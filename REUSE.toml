@@ -39,3 +39,14 @@ path = [
 ]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Capytain Contributors"
+
+# SQL migrations and proptest regressions (the latter is generated on test
+# failure and tracked in git so failures reproduce across machines).
+[[annotations]]
+path = [
+    "crates/storage/migrations/**.sql",
+    "crates/storage/tests/**.proptest-regressions",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Capytain Contributors"
+SPDX-License-Identifier = "Apache-2.0"

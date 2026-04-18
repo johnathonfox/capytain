@@ -21,7 +21,14 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # paste 1.0.15 — unmaintained (RUSTSEC-2024-0436). Transitive dep pulled
+    # in through Turso / clap ancestry. The advisory is informational, not a
+    # vulnerability; upstream recommends `pastey` as a drop-in, but we're
+    # not in a position to force that substitution through our dep graph.
+    # Revisit when Turso or clap bump to a paste-free release.
+    "RUSTSEC-2024-0436",
+]
 
 [licenses]
 version = 2
