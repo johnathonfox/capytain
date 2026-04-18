@@ -11,5 +11,20 @@ repository.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+[dependencies]
+capytain-core = { workspace = true }
+capytain-mime = { workspace = true }
+async-imap = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+tracing = { workspace = true }
+webpki-roots = { workspace = true }
+
 [lints]
 workspace = true
