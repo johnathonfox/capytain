@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+
+[alias]
+xtask = "run --package xtask --"
+
+[build]
+# Build artifacts live in the workspace-root `target/` directory.
+
+[net]
+git-fetch-with-cli = true

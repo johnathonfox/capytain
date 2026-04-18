@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# cargo-deny policy for Capytain.
+#
+# Policy shape (DESIGN.md §10.2 step 6):
+#   (a) Fail the build on any dependency under GPL, AGPL, SSPL, or any
+#       non-OSI license.
+#   (b) Require explicit, deliberate review before vendoring copyleft
+#       licenses (MPL, LGPL). We implement "warn + special handling" as
+#       "fail by default; add to `[licenses.exceptions]` with a per-crate
+#       justification" — the exceptions entry is the special handling.
+#   (c) Every workspace `Cargo.toml` declares `license = "Apache-2.0"`.
+#       cargo-deny checks workspace members alongside dependencies, so the
+#       allow-list below enforces this automatically.
+#
+# All four sections use the v2 schema (cargo-deny 0.14+).
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+
+# The full allow-list. Anything a dependency (or workspace member) declares
+# that is NOT in this list fails the build. GPL / AGPL / SSPL / MPL / LGPL
+# are deliberately absent.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "0BSD",
+]
+
+# Per-crate license exceptions live here when (and only when) a reviewer has
+# signed off on vendoring a copyleft dep. Each entry should be accompanied by
+# a commit message explaining why.
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
