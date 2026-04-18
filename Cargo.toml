@@ -32,10 +32,15 @@ publish = false
 [workspace.dependencies]
 async-trait = "0.1"
 base64 = "0.22"
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4", features = ["derive"] }
 directories = "6"
+async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+jmap-client = { version = "0.4", default-features = false, features = ["async"] }
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "async-secret-service", "crypto-rust", "tokio"] }
+mail-parser = "0.11"
 rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }

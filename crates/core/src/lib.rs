@@ -22,6 +22,7 @@ pub mod account;
 pub mod error;
 pub mod folder;
 pub mod ids;
+pub mod mail_backend;
 pub mod message;
 pub mod sync_state;
 
@@ -29,5 +30,6 @@ pub use account::{Account, BackendKind};
 pub use error::{MailError, StorageError};
 pub use folder::{Folder, FolderRole};
 pub use ids::{AccountId, AttachmentRef, DraftId, FolderId, MessageId, ThreadId};
+pub use mail_backend::{BackendEvent, MailBackend, MessageList};
 pub use message::{Attachment, EmailAddress, MessageBody, MessageFlags, MessageHeaders};
 pub use sync_state::SyncState;
