@@ -11,5 +11,13 @@ repository.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+[dependencies]
+capytain-core = { workspace = true }
+async-trait = { workspace = true }
+jmap-client = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
 [lints]
 workspace = true
