@@ -1,0 +1,30 @@
+name: Bug report
+description: Something isn't working as described in the docs
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Capytain is experimental — there's no maintainer committed to response. This issue may or may not receive a reply.
+  - type: input
+    attributes:
+      label: OS and version
+      placeholder: "macOS 14.3, Windows 11 23H2, Ubuntu 24.04"
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Rust toolchain version
+      description: Output of `rustc --version`
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What happened
+      description: What you tried, what you expected, what actually occurred
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Minimal reproduction
+      description: Steps or code that reproduces the problem

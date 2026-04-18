@@ -1,0 +1,19 @@
+name: Feature request
+description: A problem you'd like solved (not a solution you have in mind)
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem you're trying to solve, not the solution. If you have a specific implementation in mind, we can discuss it after the problem is understood.
+  - type: textarea
+    attributes:
+      label: The problem
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Why current behavior is insufficient
+  - type: textarea
+    attributes:
+      label: Alternatives you've considered
