@@ -49,12 +49,33 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "0BSD",
+    # Used by webpki-roots (transitive through reqwest/rustls). Permissive,
+    # OSI-style, patent grant included.
+    "CDLA-Permissive-2.0",
 ]
 
 # Per-crate license exceptions live here when (and only when) a reviewer has
 # signed off on vendoring a copyleft dep. Each entry should be accompanied by
 # a commit message explaining why.
-exceptions = []
+exceptions = [
+    # Transitive dep via `directories` → `dirs-sys`. MPL-2.0 is weak/file-
+    # level copyleft; we ship it as an unmodified dependency crate, which
+    # satisfies the MPL without forcing our own source under it (see
+    # MPL-2.0 §1.10 "Source Code Form" and §3.3 "Distribution of a
+    # Modified Version" — neither triggers here). Revisit if we ever
+    # vendor a modified fork.
+    { allow = ["MPL-2.0"], crate = "option-ext" },
+]
+
+# Crates with missing or incomplete `license` fields in their manifests:
+# point cargo-deny at an upstream LICENSE so the check is still enforced.
+[[licenses.clarify]]
+crate = "cfg_block"
+# `cfg_block` is upstream-licensed MIT (README and repo root LICENSE file).
+# The crate's Cargo.toml is missing a `license` field; we pin the hash of
+# its LICENSE content so cargo-deny treats the dep as properly licensed.
+expression = "MIT"
+license-files = [{ path = "LICENSE", hash = 0 }]
 
 [bans]
 multiple-versions = "warn"
