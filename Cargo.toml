@@ -38,6 +38,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 clap = { version = "4", features = ["derive"] }
 directories = "6"
 async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+capytain-mime = { path = "crates/mime", version = "=0.0.0" }
 jmap-client = { version = "0.4", default-features = false, features = ["async"] }
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "async-secret-service", "crypto-rust", "tokio"] }
 mail-parser = "0.11"
@@ -50,9 +51,11 @@ thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "ring"] }
 turso = "0.5"
 url = { version = "2", features = ["serde"] }
 webbrowser = "1"
+webpki-roots = "1"
 zstd = { version = "0.13", default-features = false }
 
 # Dev-only: property-testing for the storage layer round-trip suite.
