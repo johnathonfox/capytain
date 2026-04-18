@@ -623,7 +623,9 @@ dependencies = [
  "base64",
  "capytain-core",
  "capytain-mime",
+ "chrono",
  "futures-util",
+ "imap-proto",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -643,6 +645,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "capytain-core",
+ "chrono",
  "jmap-client",
  "thiserror 2.0.18",
  "tokio",
@@ -2144,6 +2147,8 @@ version = "0.0.0"
 dependencies = [
  "capytain-auth",
  "capytain-core",
+ "capytain-imap-client",
+ "capytain-jmap-client",
  "capytain-storage",
  "capytain-telemetry",
  "chrono",

@@ -18,6 +18,8 @@ path = "src/main.rs"
 [dependencies]
 capytain-auth = { workspace = true }
 capytain-core = { workspace = true }
+capytain-imap-client = { workspace = true }
+capytain-jmap-client = { workspace = true }
 capytain-storage = { workspace = true }
 capytain-telemetry = { workspace = true }
 chrono = { workspace = true }

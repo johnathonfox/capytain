@@ -18,13 +18,15 @@
 //! 1 when EventSource lands.
 
 use async_trait::async_trait;
+use chrono::{TimeZone, Utc};
 use jmap_client::client::Client;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 use capytain_core::{
-    AccountId, AttachmentRef, BackendKind, Folder, FolderId, FolderRole, MailBackend, MailError,
-    MessageBody, MessageFlags, MessageId, MessageList, SyncState,
+    AccountId, Attachment, AttachmentRef, BackendKind, EmailAddress, Folder, FolderId, FolderRole,
+    MailBackend, MailError, MessageBody, MessageFlags, MessageHeaders, MessageId, MessageList,
+    SyncState, ThreadId,
 };
 
 /// JMAP-backed [`MailBackend`].
@@ -112,13 +114,134 @@ impl MailBackend for JmapBackend {
         since: Option<&SyncState>,
         limit: Option<u32>,
     ) -> Result<MessageList, MailError> {
-        let _ = (folder, since, limit);
-        Err(MailError::Other(NOT_YET.into()))
+        use jmap_client::core::query::Comparator;
+        use jmap_client::email::{self, query::Filter};
+
+        let client = self.client.lock().await;
+
+        // Discovery: what are the ids in this mailbox that changed
+        // since our last sync? JMAP's Email/changes is the right answer
+        // when `since` is present — it also tells us what was destroyed.
+        // For the initial sync (no `since`) we fall back to Email/query
+        // scoped to `inMailbox = <folder>`.
+        let (ids_to_fetch, removed, new_state_token) = if let Some(state) = since {
+            let changes = client
+                .email_changes(state.backend_state.as_str(), None)
+                .await
+                .map_err(|e| MailError::Protocol(format!("Email/changes: {e}")))?;
+            let created: Vec<String> = changes.created().iter().map(|s| s.to_string()).collect();
+            let updated: Vec<String> = changes.updated().iter().map(|s| s.to_string()).collect();
+            let destroyed: Vec<MessageId> = changes
+                .destroyed()
+                .iter()
+                .map(|s| MessageId(s.to_string()))
+                .collect();
+            let mut all = created;
+            all.extend(updated);
+            let new_state = changes.new_state().to_string();
+            (all, destroyed, new_state)
+        } else {
+            let filter = Filter::in_mailbox(folder.0.clone());
+            let query = client
+                .email_query(
+                    Some(filter),
+                    None::<Vec<Comparator<email::query::Comparator>>>,
+                )
+                .await
+                .map_err(|e| MailError::Protocol(format!("Email/query: {e}")))?;
+            let all_ids: Vec<String> = query.ids().iter().map(|s| s.to_string()).collect();
+            let ids = match limit {
+                Some(n) if (n as usize) < all_ids.len() => all_ids
+                    .into_iter()
+                    .rev()
+                    .take(n as usize)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect(),
+                _ => all_ids,
+            };
+            // Email/query doesn't return a state-like cursor on its
+            // own; the state we persist is Email/changes-ready —
+            // clients must do one follow-up `email_changes` on next
+            // sync. We seed with the query's `query_state` if present,
+            // otherwise an empty string (which JMAP treats as "any
+            // prior state").
+            let new_state = query.query_state().to_string();
+            (ids, Vec::new(), new_state)
+        };
+
+        let mut messages = Vec::with_capacity(ids_to_fetch.len());
+        for id in &ids_to_fetch {
+            let email = client
+                .email_get(id.as_str(), None::<Vec<jmap_client::email::Property>>)
+                .await
+                .map_err(|e| MailError::Protocol(format!("Email/get {id}: {e}")))?;
+            if let Some(email) = email {
+                messages.push(email_to_headers(&email, folder, &self.account_id));
+            }
+        }
+        drop(client);
+
+        debug!(
+            folder = %folder.0,
+            fetched = messages.len(),
+            destroyed = removed.len(),
+            "JMAP list_messages"
+        );
+
+        Ok(MessageList {
+            messages,
+            new_state: SyncState {
+                folder_id: folder.clone(),
+                backend_state: new_state_token,
+            },
+            removed,
+        })
     }
 
     async fn fetch_message(&self, id: &MessageId) -> Result<MessageBody, MailError> {
-        let _ = id;
-        Err(MailError::Other(NOT_YET.into()))
+        let client = self.client.lock().await;
+        let email = client
+            .email_get(&id.0, None::<Vec<jmap_client::email::Property>>)
+            .await
+            .map_err(|e| MailError::Protocol(format!("Email/get {}: {e}", id.0)))?
+            .ok_or_else(|| MailError::NotFound(format!("JMAP email id {}", id.0)))?;
+        drop(client);
+
+        // Folder assignment: JMAP emails belong to one-or-more mailboxes
+        // via `mailboxIds`. For our MessageBody we pick the first
+        // (there's no guaranteed canonical one in JMAP). Callers that
+        // care about the "which folder" story can look at mailbox_ids
+        // directly once we surface it.
+        let folder_id = email
+            .mailbox_ids()
+            .first()
+            .map(|s| FolderId(s.to_string()))
+            .unwrap_or_else(|| FolderId(String::new()));
+
+        let headers = email_to_headers(&email, &folder_id, &self.account_id);
+
+        // Body content: JMAP returns textBody/htmlBody as references
+        // into `bodyValues`. For Phase 0 read path, `preview()` + what
+        // text_body/html_body point at is enough to surface plaintext.
+        // Full bodyValues wiring lands in the Phase 1 polish pass.
+        let body_text = email.preview().map(str::to_string);
+
+        Ok(MessageBody {
+            headers,
+            body_html: None,
+            body_text,
+            attachments: Vec::<Attachment>::new(),
+            in_reply_to: email
+                .in_reply_to()
+                .and_then(|list| list.first())
+                .map(|s| format!("<{s}>")),
+            references: email
+                .references()
+                .map(|list| list.iter().map(|s| format!("<{s}>")).collect())
+                .unwrap_or_default(),
+        })
     }
 
     async fn fetch_attachment(
@@ -200,6 +323,78 @@ fn mailbox_to_folder(mb: jmap_client::mailbox::Mailbox, account: &AccountId) -> 
         total_count: total,
         parent,
     }
+}
+
+fn email_to_headers(
+    email: &jmap_client::email::Email,
+    folder: &FolderId,
+    account: &AccountId,
+) -> MessageHeaders {
+    let id = MessageId(email.id().unwrap_or_default().to_string());
+    let subject = email.subject().unwrap_or_default().to_string();
+    let rfc822_message_id = email
+        .message_id()
+        .and_then(|list| list.first())
+        .map(|s| format!("<{s}>"));
+    let date = email
+        .received_at()
+        .or_else(|| email.sent_at())
+        .and_then(|ts| Utc.timestamp_opt(ts, 0).single())
+        .unwrap_or_else(Utc::now);
+
+    let flags = keywords_to_flags(&email.keywords());
+    let snippet = email.preview().unwrap_or_default().to_string();
+    let size = u32::try_from(email.size()).unwrap_or(u32::MAX);
+
+    MessageHeaders {
+        id,
+        account_id: account.clone(),
+        folder_id: folder.clone(),
+        thread_id: None::<ThreadId>,
+        rfc822_message_id,
+        subject,
+        from: translate_addrs(email.from()),
+        reply_to: translate_addrs(email.reply_to()),
+        to: translate_addrs(email.to()),
+        cc: translate_addrs(email.cc()),
+        bcc: translate_addrs(email.bcc()),
+        date,
+        flags,
+        // JMAP mailboxes serve as both folders and labels; a message in
+        // multiple mailboxes shows up in each. For Capytain, the
+        // secondary mailboxes become labels.
+        labels: email.mailbox_ids().iter().map(|s| s.to_string()).collect(),
+        snippet,
+        size,
+        has_attachments: email.has_attachment(),
+    }
+}
+
+fn translate_addrs(addrs: Option<&[jmap_client::email::EmailAddress]>) -> Vec<EmailAddress> {
+    let Some(list) = addrs else {
+        return Vec::new();
+    };
+    list.iter()
+        .map(|a| EmailAddress {
+            address: a.email().to_string(),
+            display_name: a.name().map(str::to_string),
+        })
+        .collect()
+}
+
+fn keywords_to_flags(keywords: &[&str]) -> MessageFlags {
+    let mut flags = MessageFlags::default();
+    for k in keywords {
+        match k.to_ascii_lowercase().as_str() {
+            "$seen" => flags.seen = true,
+            "$flagged" => flags.flagged = true,
+            "$answered" => flags.answered = true,
+            "$draft" => flags.draft = true,
+            "$forwarded" => flags.forwarded = true,
+            _ => {}
+        }
+    }
+    flags
 }
 
 /// Translate JMAP's built-in mailbox roles (RFC 8621 §2) into Capytain's

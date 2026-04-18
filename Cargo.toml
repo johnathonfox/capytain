@@ -68,6 +68,8 @@ proptest = "1"
 # version is only ever used as local metadata.
 capytain-auth = { path = "crates/auth", version = "=0.0.0" }
 capytain-core = { path = "crates/core", version = "=0.0.0" }
+capytain-imap-client = { path = "crates/imap-client", version = "=0.0.0" }
+capytain-jmap-client = { path = "crates/jmap-client", version = "=0.0.0" }
 capytain-storage = { path = "crates/storage", version = "=0.0.0" }
 capytain-telemetry = { path = "crates/telemetry", version = "=0.0.0" }
 

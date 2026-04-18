@@ -7,7 +7,7 @@
 //! for IMAP: it serializes the RFC 7162 tuple
 //! `(uidvalidity, highestmodseq, uidnext)` to JSON and parses it back.
 
-use capytain_core::{MailError, SyncState};
+use capytain_core::{MailError, MessageId, SyncState};
 use serde::{Deserialize, Serialize};
 
 /// Serializable IMAP-specific backend state.
@@ -49,6 +49,58 @@ impl BackendState {
     }
 }
 
+/// Identity of an IMAP message, packed into Capytain's opaque
+/// [`MessageId`] wrapper.
+///
+/// `MessageId`s are strings to the core. We use a `|`-delimited shape so
+/// the encoder/decoder is trivially inspectable in logs:
+///
+/// ```text
+/// imap|<uidvalidity>|<uid>|<folder_path>
+/// ```
+///
+/// Splitting with `splitn(4, '|')` means folder paths that contain `|`
+/// round-trip correctly (they live in the final segment). Paths in the
+/// wild use `/` or `.` as separators; `|` is rare but allowed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageRef {
+    pub uidvalidity: u32,
+    pub uid: u32,
+    pub folder: String,
+}
+
+impl MessageRef {
+    pub fn encode(&self) -> MessageId {
+        MessageId(format!(
+            "imap|{}|{}|{}",
+            self.uidvalidity, self.uid, self.folder
+        ))
+    }
+
+    pub fn decode(id: &MessageId) -> Result<Self, MailError> {
+        let s = &id.0;
+        let mut parts = s.splitn(4, '|');
+        let scheme = parts.next();
+        let uidvalidity = parts.next();
+        let uid = parts.next();
+        let folder = parts.next();
+        match (scheme, uidvalidity, uid, folder) {
+            (Some("imap"), Some(uv), Some(u), Some(f)) => Ok(MessageRef {
+                uidvalidity: uv
+                    .parse()
+                    .map_err(|e| MailError::Protocol(format!("bad uidvalidity in {s:?}: {e}")))?,
+                uid: u
+                    .parse()
+                    .map_err(|e| MailError::Protocol(format!("bad uid in {s:?}: {e}")))?,
+                folder: f.to_string(),
+            }),
+            _ => Err(MailError::Protocol(format!(
+                "not an IMAP message id: {s:?}"
+            ))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,5 +136,35 @@ mod tests {
     fn rejects_garbage() {
         let err = BackendState::decode("not json").unwrap_err();
         assert!(err.to_string().contains("corrupt IMAP sync cursor"));
+    }
+
+    #[test]
+    fn message_ref_round_trip() {
+        let r = MessageRef {
+            uidvalidity: 1_712_345,
+            uid: 42,
+            folder: "[Gmail]/Sent Mail".into(),
+        };
+        let back = MessageRef::decode(&r.encode()).unwrap();
+        assert_eq!(r, back);
+    }
+
+    #[test]
+    fn message_ref_handles_folder_with_pipe() {
+        // splitn(4) keeps everything after the third `|` in the last
+        // segment, so a folder with `|` round-trips correctly.
+        let r = MessageRef {
+            uidvalidity: 1,
+            uid: 2,
+            folder: "odd|name".into(),
+        };
+        let back = MessageRef::decode(&r.encode()).unwrap();
+        assert_eq!(r, back);
+    }
+
+    #[test]
+    fn message_ref_rejects_non_imap() {
+        let err = MessageRef::decode(&capytain_core::MessageId("M0000001".into())).unwrap_err();
+        assert!(err.to_string().contains("not an IMAP message id"));
     }
 }

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use async_imap::types::Fetch;
 use async_imap::{Client, Session};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -19,13 +20,14 @@ use tokio_rustls::client::TlsStream;
 use tracing::{debug, info, warn};
 
 use capytain_core::{
-    AccountId, AttachmentRef, BackendKind, Folder, FolderId, FolderRole, MailBackend, MailError,
-    MessageBody, MessageFlags, MessageId, MessageList, SyncState,
+    AccountId, AttachmentRef, BackendKind, EmailAddress, Folder, FolderId, FolderRole, MailBackend,
+    MailError, MessageBody, MessageFlags, MessageHeaders, MessageId, MessageList, SyncState,
+    ThreadId,
 };
 
 use crate::auth::XOAuth2;
 use crate::capabilities::require as require_caps;
-use crate::sync_state::BackendState;
+use crate::sync_state::{BackendState, MessageRef};
 
 type StreamT = TlsStream<TcpStream>;
 
@@ -154,18 +156,157 @@ impl MailBackend for ImapBackend {
         since: Option<&SyncState>,
         limit: Option<u32>,
     ) -> Result<MessageList, MailError> {
-        // Placeholder: the wire command shape — SELECT folder (checks
-        // UIDVALIDITY against `since`), UID FETCH (or CHANGEDSINCE for
-        // CONDSTORE delta), ENVELOPE + RFC822.SIZE + FLAGS — is the next
-        // increment on this branch. The method exists now so the trait
-        // is fully populated and callers' plumbing compiles.
-        let _ = (folder, since, limit);
-        Err(MailError::Other(NOT_YET.into()))
+        let mut session = self.session.lock().await;
+
+        let mbox = session
+            .select(&folder.0)
+            .await
+            .map_err(|e| MailError::Protocol(format!("SELECT {}: {e}", folder.0)))?;
+        let uidvalidity = mbox
+            .uid_validity
+            .ok_or_else(|| MailError::Protocol("SELECT missing UIDVALIDITY".into()))?;
+        let uidnext = mbox.uid_next.unwrap_or(1);
+
+        // Build the new backend state from what SELECT told us. Any
+        // call to list_messages ends with this persisted regardless of
+        // how the fetch side goes.
+        let new_state = BackendState {
+            uidvalidity,
+            // `highestmodseq` comes in via Mailbox.extensions on CONDSTORE
+            // servers; async-imap 0.11 surfaces it differently across
+            // response shapes, so we track 0 as a best-effort seed and let
+            // Phase 1's smarter delta logic refine.
+            highestmodseq: 0,
+            uidnext,
+        };
+
+        // Decide the UID set to FETCH. If `since` is present *and*
+        // UIDVALIDITY matches, we only need messages the server added
+        // after the previous uidnext. Otherwise we do a bounded initial
+        // sync.
+        let uid_set = match since {
+            Some(state) => {
+                let cached = BackendState::from_sync(state)?;
+                if cached.uidvalidity != uidvalidity {
+                    warn!(
+                        cached = cached.uidvalidity,
+                        observed = uidvalidity,
+                        "UIDVALIDITY changed; caller must refetch from scratch"
+                    );
+                    return Err(MailError::Protocol(format!(
+                        "UIDVALIDITY changed for {} ({} → {})",
+                        folder.0, cached.uidvalidity, uidvalidity
+                    )));
+                }
+                // New messages have UID >= cached.uidnext.
+                format!("{}:*", cached.uidnext)
+            }
+            None => match limit {
+                // A bare `1:*` would pull the whole folder. For initial
+                // sync we lean on the limit if the caller supplied one.
+                Some(n) if n > 0 => {
+                    // Fetch the `n` highest UIDs — the most recent messages
+                    // are usually what the UI wants first.
+                    let lo = uidnext.saturating_sub(n);
+                    format!("{}:*", lo.max(1))
+                }
+                _ => "1:*".to_string(),
+            },
+        };
+
+        let query = "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE)";
+        let mut fetches = session
+            .uid_fetch(&uid_set, query)
+            .await
+            .map_err(|e| MailError::Protocol(format!("UID FETCH {uid_set} {query}: {e}")))?;
+
+        let mut messages = Vec::new();
+        while let Some(item) = fetches.next().await {
+            let fetch = item.map_err(|e| MailError::Protocol(format!("FETCH entry: {e}")))?;
+            match fetch_to_headers(&fetch, folder, uidvalidity, &self.account) {
+                Ok(Some(h)) => messages.push(h),
+                Ok(None) => {
+                    debug!(message = ?fetch.message, "FETCH response missing UID — skipping");
+                }
+                Err(e) => {
+                    warn!(error = %e, message = ?fetch.message, "failed to translate FETCH");
+                }
+            }
+        }
+        drop(fetches);
+        debug!(
+            folder = %folder.0,
+            count = messages.len(),
+            "IMAP list_messages"
+        );
+
+        Ok(MessageList {
+            messages,
+            new_state: SyncState {
+                folder_id: folder.clone(),
+                backend_state: new_state.encode(),
+            },
+            // QRESYNC's VANISHED response is the standard route for
+            // server-side deletion detection since the last sync. The
+            // full VANISHED parser lands alongside Phase 1's delta
+            // work; for now we surface an empty `removed` list and
+            // rely on the next full rescan to catch deletions.
+            removed: Vec::new(),
+        })
     }
 
     async fn fetch_message(&self, id: &MessageId) -> Result<MessageBody, MailError> {
-        let _ = id;
-        Err(MailError::Other(NOT_YET.into()))
+        let r = MessageRef::decode(id)?;
+        let mut session = self.session.lock().await;
+
+        let mbox = session
+            .select(&r.folder)
+            .await
+            .map_err(|e| MailError::Protocol(format!("SELECT {}: {e}", r.folder)))?;
+        let current_uv = mbox
+            .uid_validity
+            .ok_or_else(|| MailError::Protocol("SELECT missing UIDVALIDITY".into()))?;
+        if current_uv != r.uidvalidity {
+            return Err(MailError::Protocol(format!(
+                "UIDVALIDITY changed for {} ({} → {})",
+                r.folder, r.uidvalidity, current_uv
+            )));
+        }
+
+        let query = "(UID RFC822)";
+        let mut fetches = session
+            .uid_fetch(&r.uid.to_string(), query)
+            .await
+            .map_err(|e| MailError::Protocol(format!("UID FETCH {} {query}: {e}", r.uid)))?;
+
+        let fetch = fetches
+            .next()
+            .await
+            .ok_or(MailError::NotFound(format!(
+                "message UID {} in {}",
+                r.uid, r.folder
+            )))?
+            .map_err(|e| MailError::Protocol(format!("FETCH entry: {e}")))?;
+        drop(fetches);
+
+        let raw = fetch
+            .body()
+            .ok_or_else(|| MailError::Protocol("FETCH returned no RFC822 body".into()))?
+            .to_vec();
+
+        let folder_id = FolderId(r.folder.clone());
+        let flags = extract_flags(&fetch);
+        let identity = capytain_mime::MessageIdentity {
+            id,
+            account_id: &self.account,
+            folder_id: &folder_id,
+            thread_id: None,
+            size: raw.len() as u32,
+            flags: &flags,
+            labels: &[],
+        };
+        capytain_mime::parse_rfc822(&raw, identity)
+            .ok_or_else(|| MailError::Parse(format!("mail-parser could not parse UID {}", r.uid)))
     }
 
     async fn fetch_attachment(
@@ -303,9 +444,121 @@ fn ensure_uidvalidity_matches(
     Ok(())
 }
 
-// Silence unused-fetch warning until list_messages/fetch_message land.
-#[allow(dead_code)]
-fn _keep_types_alive(_f: Fetch) {}
+fn fetch_to_headers(
+    fetch: &Fetch,
+    folder: &FolderId,
+    uidvalidity: u32,
+    account: &AccountId,
+) -> Result<Option<MessageHeaders>, MailError> {
+    let Some(uid) = fetch.uid else {
+        return Ok(None);
+    };
+    let envelope = fetch.envelope();
+    let flags = extract_flags(fetch);
+    let size = fetch.size.unwrap_or(0);
+    let rfc822_message_id = envelope
+        .and_then(|e| e.message_id.as_deref())
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .map(|s| s.to_string());
+    let subject = envelope
+        .and_then(|e| e.subject.as_deref())
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let from = addr_vec(envelope.and_then(|e| e.from.as_ref()));
+    let reply_to = addr_vec(envelope.and_then(|e| e.reply_to.as_ref()));
+    let to = addr_vec(envelope.and_then(|e| e.to.as_ref()));
+    let cc = addr_vec(envelope.and_then(|e| e.cc.as_ref()));
+    let bcc = addr_vec(envelope.and_then(|e| e.bcc.as_ref()));
+
+    // Prefer INTERNALDATE (always present on servers). Fall back to the
+    // envelope date if the server skips it for some reason.
+    let date = fetch
+        .internal_date()
+        .map(|d| d.with_timezone(&Utc))
+        .or_else(|| {
+            envelope
+                .and_then(|e| e.date.as_deref())
+                .and_then(|b| std::str::from_utf8(b).ok())
+                .and_then(parse_rfc2822_to_utc)
+        })
+        .unwrap_or_else(Utc::now);
+
+    let r = MessageRef {
+        uidvalidity,
+        uid,
+        folder: folder.0.clone(),
+    };
+
+    Ok(Some(MessageHeaders {
+        id: r.encode(),
+        account_id: account.clone(),
+        folder_id: folder.clone(),
+        thread_id: None::<ThreadId>,
+        rfc822_message_id,
+        subject,
+        from,
+        reply_to,
+        to,
+        cc,
+        bcc,
+        date,
+        flags,
+        labels: Vec::new(),
+        snippet: String::new(),
+        size,
+        has_attachments: false,
+    }))
+}
+
+fn addr_vec(addrs: Option<&Vec<imap_proto::Address<'_>>>) -> Vec<EmailAddress> {
+    let Some(list) = addrs else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|a| {
+            let mailbox = a
+                .mailbox
+                .as_deref()
+                .and_then(|b| std::str::from_utf8(b).ok())?;
+            let host = a
+                .host
+                .as_deref()
+                .and_then(|b| std::str::from_utf8(b).ok())?;
+            let name = a
+                .name
+                .as_deref()
+                .and_then(|b| std::str::from_utf8(b).ok())
+                .map(str::to_string);
+            Some(EmailAddress {
+                address: format!("{mailbox}@{host}"),
+                display_name: name,
+            })
+        })
+        .collect()
+}
+
+fn extract_flags(fetch: &Fetch) -> MessageFlags {
+    use async_imap::types::Flag;
+    let mut flags = MessageFlags::default();
+    for f in fetch.flags() {
+        match f {
+            Flag::Seen => flags.seen = true,
+            Flag::Flagged => flags.flagged = true,
+            Flag::Answered => flags.answered = true,
+            Flag::Draft => flags.draft = true,
+            Flag::Custom(s) if s.eq_ignore_ascii_case("$forwarded") => flags.forwarded = true,
+            _ => {}
+        }
+    }
+    flags
+}
+
+fn parse_rfc2822_to_utc(s: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc2822(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
+}
 
 // ---------- BackendKind helper ----------
 
