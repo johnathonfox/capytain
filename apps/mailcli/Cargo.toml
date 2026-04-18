@@ -16,8 +16,15 @@ name = "mailcli"
 path = "src/main.rs"
 
 [dependencies]
+capytain-auth = { workspace = true }
+capytain-core = { workspace = true }
+capytain-storage = { workspace = true }
 capytain-telemetry = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true }
+directories = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 
 [lints]

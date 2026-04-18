@@ -31,15 +31,23 @@ publish = false
 
 [workspace.dependencies]
 async-trait = "0.1"
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4", features = ["derive"] }
+directories = "6"
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "async-secret-service", "crypto-rust", "tokio"] }
+rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 turso = "0.5"
+url = { version = "2", features = ["serde"] }
+webbrowser = "1"
 zstd = { version = "0.13", default-features = false }
 
 # Dev-only: property-testing for the storage layer round-trip suite.
@@ -50,7 +58,9 @@ proptest = "1"
 # and gives cargo-deny a concrete version to check (it treats a bare
 # `{ path = ... }` as a wildcard dep otherwise); `publish = false` means the
 # version is only ever used as local metadata.
+capytain-auth = { path = "crates/auth", version = "=0.0.0" }
 capytain-core = { path = "crates/core", version = "=0.0.0" }
+capytain-storage = { path = "crates/storage", version = "=0.0.0" }
 capytain-telemetry = { path = "crates/telemetry", version = "=0.0.0" }
 
 [workspace.lints.rust]

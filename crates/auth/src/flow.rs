@@ -1,0 +1,276 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! High-level OAuth2 Authorization Code + PKCE flow orchestrator.
+//!
+//! Handwritten on top of `reqwest` instead of the `oauth2` crate — this
+//! is two short HTTP interactions (authorize, exchange) with no runtime
+//! state to track beyond one request/response pair each. A framework
+//! would obscure more than it'd save.
+
+use std::time::Duration;
+
+use base64::Engine;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use rand::{distr::Alphanumeric, Rng};
+use serde::Deserialize;
+use tracing::{debug, info, warn};
+use url::Url;
+
+use crate::error::AuthError;
+use crate::loopback::LoopbackRedirect;
+use crate::pkce;
+use crate::provider::OAuthProvider;
+use crate::tokens::{AccessToken, RefreshToken, TokenSet};
+
+/// Default time the flow waits on the browser / user before giving up.
+pub const DEFAULT_FLOW_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// What the flow returns on success. Caller is responsible for persisting
+/// the refresh token via [`crate::TokenVault`] and the access token
+/// in-memory.
+#[derive(Debug)]
+pub struct FlowOutcome {
+    pub tokens: TokenSet,
+    /// Scopes the token was actually granted. Providers may downscope
+    /// what we requested (or upscope for legacy reasons).
+    pub granted_scopes: Vec<String>,
+}
+
+/// Run the full authorization flow against a provider.
+///
+/// 1. Bind a loopback listener on 127.0.0.1:<ephemeral>.
+/// 2. Generate PKCE verifier + S256 challenge and a random CSRF `state`.
+/// 3. Construct the authorization URL and open it in the user's browser.
+/// 4. Wait for the browser to redirect back to the loopback. Verify the
+///    `state` matches what we sent.
+/// 5. Exchange the code + verifier for tokens at the provider's token
+///    endpoint via HTTPS POST.
+///
+/// `email_hint` is passed to Google as `login_hint=` so the account
+/// picker lands on the right mailbox. Providers that don't recognize
+/// the parameter ignore it.
+pub async fn run_loopback_flow(
+    provider: &dyn OAuthProvider,
+    email_hint: Option<&str>,
+) -> Result<FlowOutcome, AuthError> {
+    let profile = provider.profile();
+    let client_id = profile.require_client_id()?;
+
+    let loopback = LoopbackRedirect::bind().await?;
+    let redirect_uri = loopback.redirect_uri();
+
+    let verifier = pkce::random_verifier(64);
+    let challenge = pkce::sha256_challenge(&verifier);
+    let state = random_state();
+
+    let auth_url = build_authorize_url(
+        profile.authorization_url,
+        client_id,
+        &redirect_uri,
+        profile.scopes,
+        &state,
+        &challenge,
+        email_hint,
+    )?;
+    info!(provider = profile.slug, "opening browser for authorization");
+    debug!(%auth_url);
+
+    webbrowser::open(auth_url.as_str())
+        .map_err(|e| AuthError::Browser(format!("webbrowser::open: {e}")))?;
+
+    let response = loopback.await_redirect(DEFAULT_FLOW_TIMEOUT).await?;
+    if response.state != state {
+        warn!("state mismatch on loopback redirect (CSRF?)");
+        return Err(AuthError::AuthResponse(
+            "state mismatch (possible CSRF)".into(),
+        ));
+    }
+
+    let tokens = exchange_code(
+        profile.token_url,
+        client_id,
+        &redirect_uri,
+        &response.code,
+        &verifier,
+    )
+    .await?;
+
+    Ok(tokens)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_authorize_url(
+    endpoint: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    scopes: &[&str],
+    state: &str,
+    challenge: &str,
+    email_hint: Option<&str>,
+) -> Result<Url, AuthError> {
+    let mut url = Url::parse(endpoint)?;
+    {
+        let mut q = url.query_pairs_mut();
+        q.append_pair("response_type", "code");
+        q.append_pair("client_id", client_id);
+        q.append_pair("redirect_uri", redirect_uri);
+        q.append_pair("scope", &scopes.join(" "));
+        q.append_pair("state", state);
+        q.append_pair("code_challenge", challenge);
+        q.append_pair("code_challenge_method", "S256");
+        q.append_pair("access_type", "offline"); // Google: request refresh token
+        q.append_pair("prompt", "consent"); // always prompt so we reliably get refresh_token
+        if let Some(hint) = email_hint {
+            q.append_pair("login_hint", hint);
+        }
+    }
+    Ok(url)
+}
+
+fn random_state() -> String {
+    // 32 chars of url-safe alphanumerics ≈ 190 bits of entropy — plenty
+    // to make CSRF forgery impossible in practice.
+    rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect()
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    expires_in: Option<i64>,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    token_type: Option<String>,
+    // Error fields — populated if the server returned a 400 with a
+    // JSON-encoded error body.
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    error_description: Option<String>,
+}
+
+async fn exchange_code(
+    endpoint: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    code: &str,
+    verifier: &str,
+) -> Result<FlowOutcome, AuthError> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| AuthError::Other(format!("reqwest build: {e}")))?;
+
+    let form = [
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+        ("client_id", client_id),
+        ("code_verifier", verifier),
+    ];
+
+    let resp = client
+        .post(endpoint)
+        .header("Accept", "application/json")
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| AuthError::TokenExchange(format!("HTTP error: {e}")))?;
+
+    let status = resp.status();
+    let body: TokenResponse = resp
+        .json()
+        .await
+        .map_err(|e| AuthError::TokenExchange(format!("JSON parse: {e}")))?;
+
+    if !status.is_success() || body.error.is_some() {
+        let msg = body
+            .error_description
+            .or(body.error)
+            .unwrap_or_else(|| format!("HTTP {status}"));
+        return Err(AuthError::TokenExchange(msg));
+    }
+
+    if let Some(tt) = body.token_type.as_deref() {
+        if !tt.eq_ignore_ascii_case("bearer") {
+            warn!(token_type = tt, "non-bearer token_type on exchange");
+        }
+    }
+
+    let expires_at = body.expires_in.map(expires_at_from_now);
+    let granted_scopes = body
+        .scope
+        .as_deref()
+        .map(|s| s.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default();
+
+    Ok(FlowOutcome {
+        tokens: TokenSet {
+            access: AccessToken(body.access_token),
+            refresh: body.refresh_token.map(RefreshToken),
+            expires_at,
+        },
+        granted_scopes,
+    })
+}
+
+fn expires_at_from_now(expires_in: i64) -> DateTime<Utc> {
+    Utc::now() + ChronoDuration::seconds(expires_in)
+}
+
+// Unused-but-kept for potential future nonce experiments. Keeps the
+// base64 import relevant to the binary instead of the test module alone.
+#[allow(dead_code)]
+fn base64_url_nopad(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authorize_url_has_all_required_params() {
+        let url = build_authorize_url(
+            "https://example.test/auth",
+            "client-xyz",
+            "http://127.0.0.1:12345/",
+            &["scope-a", "scope-b"],
+            "state-abc",
+            "challenge-def",
+            Some("foo@bar"),
+        )
+        .unwrap();
+
+        let params: std::collections::HashMap<String, String> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+
+        assert_eq!(params.get("response_type").unwrap(), "code");
+        assert_eq!(params.get("client_id").unwrap(), "client-xyz");
+        assert_eq!(
+            params.get("redirect_uri").unwrap(),
+            "http://127.0.0.1:12345/"
+        );
+        assert_eq!(params.get("scope").unwrap(), "scope-a scope-b");
+        assert_eq!(params.get("state").unwrap(), "state-abc");
+        assert_eq!(params.get("code_challenge").unwrap(), "challenge-def");
+        assert_eq!(params.get("code_challenge_method").unwrap(), "S256");
+        assert_eq!(params.get("login_hint").unwrap(), "foo@bar");
+    }
+
+    #[test]
+    fn random_state_has_expected_length() {
+        for _ in 0..10 {
+            assert_eq!(random_state().len(), 32);
+        }
+    }
+}
