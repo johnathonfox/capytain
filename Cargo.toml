@@ -39,9 +39,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # First-party workspace crates — reference by path so members always build
-# against the in-tree version.
-capytain-core = { path = "crates/core" }
-capytain-telemetry = { path = "crates/telemetry" }
+# against the in-tree version. The `version` pin matches `[workspace.package]`
+# and gives cargo-deny a concrete version to check (it treats a bare
+# `{ path = ... }` as a wildcard dep otherwise); `publish = false` means the
+# version is only ever used as local metadata.
+capytain-core = { path = "crates/core", version = "=0.0.0" }
+capytain-telemetry = { path = "crates/telemetry", version = "=0.0.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
