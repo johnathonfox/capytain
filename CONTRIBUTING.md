@@ -23,27 +23,68 @@ If you're planning a large change, open a discussion issue first — not because
 
 ## Development Setup
 
-See the "Getting started" section of [`README.md`](./README.md) for prerequisites and build commands.
+Target: from a fresh machine and a fresh clone to `cargo test --workspace` passing in under 10 minutes. If it takes you longer than that, please [file an issue](https://github.com/johnathonfox/capytain/issues) — the quickstart is broken and we want to know.
 
-Additional tools you'll want installed for contributing:
+### 1. Install the Rust toolchain
+
+Capytain pins its toolchain with `rust-toolchain.toml`, so you don't have to pick a version. Install [rustup](https://rustup.rs/) and `cargo` will auto-download the pinned toolchain the first time you run a cargo command in the repo:
 
 ```sh
-rustup component add rustfmt clippy
-cargo install cargo-deny cargo-about
-pipx install reuse    # or: pip install --user reuse
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # macOS / Linux
+# or, on Windows: https://rustup.rs/ → rustup-init.exe
 ```
 
-Before submitting a PR, run:
+### 2. Install platform build dependencies
+
+- **macOS** — Xcode command-line tools: `xcode-select --install`.
+- **Windows** — Visual Studio 2022 with "Desktop development with C++" workload (needed for the MSVC linker).
+- **Linux** — Debian/Ubuntu: `sudo apt install build-essential libssl-dev pkg-config`. Additional deps for the Phase 0 Week 5 Tauri shell (`libwebkit2gtk-4.1-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`) are only required once you build `apps/desktop`; you don't need them to `cargo test --workspace`.
+
+### 3. Clone and check
 
 ```sh
-cargo fmt --all
+git clone git@github.com:johnathonfox/capytain.git
+cd capytain
+cargo test --workspace
+```
+
+The first `cargo` invocation downloads the pinned toolchain (~100 MB) and compiles every workspace crate. Subsequent runs are incremental and fast.
+
+### 4. Install contributor tooling
+
+Each of these is only needed for the matching local check. CI runs its own isolated copies, so if you only ever push and let CI gate your PR you don't strictly need them locally:
+
+```sh
+cargo install cargo-deny          # license + advisory auditing
+pipx install reuse                # or: pip install --user reuse
+```
+
+### 5. Run the full PR gate locally
+
+These are the exact checks CI runs. Running them before you push saves a CI round-trip:
+
+```sh
+cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo deny check
 reuse lint
 ```
 
-CI runs all of these on every PR; running them locally first saves a round-trip.
+### Editor setup
+
+- **VS Code:** install [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer). No further config needed.
+- **JetBrains:** [RustRover](https://www.jetbrains.com/rust/) works out of the box; IntelliJ + the Rust plugin also works.
+- **Neovim / Helix / Zed:** `rust-analyzer` over LSP.
+
+If rust-analyzer is slow on a full workspace check, add `--package <name>` when you're only editing one crate.
+
+### Troubleshooting
+
+- *"error: no override and no default toolchain set"* — You haven't installed rustup. See step 1.
+- *Slow or stalled `cargo test` on first run* — The pinned toolchain is downloading; it's a one-time ~100 MB fetch.
+- *`reuse lint` complains on files I didn't touch* — every new file needs either an `SPDX-License-Identifier` header inline or coverage by `REUSE.toml`. For docs and config, add the glob to `REUSE.toml`; for source files, add the inline header.
+- *`cargo tauri dev` fails* — Tauri isn't wired up yet. It lands in Phase 0 Week 5.
 
 ## Developer Certificate of Origin (DCO)
 
@@ -124,10 +165,18 @@ Signed-off-by: Your Name <your.email@example.com>
 ## Testing Expectations
 
 - **Unit tests** live inline in `#[cfg(test)] mod tests` within each source file.
-- **Integration tests** live in each crate's `tests/` directory.
+- **Integration tests** live in each crate's `tests/` directory. One example test ships in `crates/core/tests/serde_roundtrip.rs`; use it as a template for shape.
 - **Fixtures** (test emails, test OAuth responses) live in `tests/fixtures/` per crate.
 - **Network access in tests is forbidden.** Use recorded fixtures or mocked backends. If a test genuinely needs a live server, mark it `#[ignore]` with a comment explaining how to run it manually.
 - **Snapshots** (for rendering tests) live alongside the test that generates them; `cargo insta` is the convention.
+
+Run the whole suite with `cargo test --workspace`; run a single crate with `cargo test -p <crate-name>` (e.g. `cargo test -p capytain-core`).
+
+## Release Flow
+
+Phase 0 is pre-release; there is no signing, distribution, or update channel yet. Release tooling (`cargo tauri build`, code signing, notarization, `.deb`/`.rpm`/AppImage/Flatpak packaging, auto-updater) lands in Phase 4. See [`DESIGN.md` §7](./DESIGN.md#7-build-distribution-and-platforms) and [`PHASE_0.md`](./PHASE_0.md) Phase 4 for the plan.
+
+For now, the "release" process is: PR merges to `main`, CI is green, contributors run `git pull`.
 
 ## Security Issues
 

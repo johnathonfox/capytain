@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "capytain-core"
-description = "Capytain domain types, errors, and core traits."
+name = "capytain-telemetry"
+description = "Shared tracing initialization for Capytain binaries."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,12 +12,8 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
-chrono = { workspace = true }
-serde = { workspace = true }
-thiserror = { workspace = true }
-
-[dev-dependencies]
-serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

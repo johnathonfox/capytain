@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "mailcli"
+description = "Capytain headless protocol CLI used during Phase 0 as a forcing function for crate boundaries."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "mailcli"
+path = "src/main.rs"
+
+[dependencies]
+capytain-telemetry = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true
