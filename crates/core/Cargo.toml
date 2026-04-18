@@ -12,7 +12,9 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 chrono = { workspace = true }
+futures-core = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 

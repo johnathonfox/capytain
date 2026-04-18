@@ -492,7 +492,9 @@ dependencies = [
 name = "capytain-core"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "chrono",
+ "futures-core",
  "serde",
  "serde_json",
  "thiserror",
@@ -517,6 +519,11 @@ version = "0.0.0"
 [[package]]
 name = "capytain-mime"
 version = "0.0.0"
+dependencies = [
+ "capytain-core",
+ "chrono",
+ "mail-parser",
+]
 
 [[package]]
 name = "capytain-search"
@@ -1217,6 +1224,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
 
 [[package]]
+name = "hashify"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd1246c0e5493286aeb2dde35b1f4eb9c4ce00e628641210a5e553fc001a1f26"
+dependencies = [
+ "indexmap",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1807,6 +1826,15 @@ name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
+
+[[package]]
+name = "mail-parser"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f82a3d6522697593ba4c683e0a6ee5a40fee93bc1a525e3cc6eeb3da11fd8897"
+dependencies = [
+ "hashify",
+]
 
 [[package]]
 name = "mailcli"
