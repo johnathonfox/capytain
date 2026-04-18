@@ -14,10 +14,12 @@
 //! extension distinguishes compressed blobs on disk for manual inspection
 //! with `zstdcat`.
 //!
-//! Paths are percent-safe — we let the filesystem carry whatever bytes the
-//! backend handed us for account/folder/message IDs. If we ever hit a
-//! backend that mints path-hostile IDs we'll hash them; no backend we
-//! target does.
+//! Path components are percent-encoded for characters that are reserved on
+//! Windows (`<>:"/\|?*` plus control chars) so IMAP message IDs like
+//! `1712345:42` don't trip `ERROR_INVALID_PARAMETER`. The encoding is
+//! reversible, but callers should treat the on-disk filename as opaque —
+//! use the returned [`PathBuf`] from [`BlobStore::put`] rather than
+//! reconstructing one.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -139,17 +141,44 @@ impl BlobStore {
     }
 
     /// Absolute path a blob *would* live at, whether or not it exists.
+    ///
+    /// Each ID component is percent-encoded against the Windows filename
+    /// reserved set so cross-platform storage works even when backends hand
+    /// us IDs that contain `:` or `/`.
     pub fn path_for(&self, account: &AccountId, folder: &FolderId, message: &MessageId) -> PathBuf {
         let mut p = self.root.clone();
-        p.push(&account.0);
-        p.push(&folder.0);
+        p.push(sanitize_path_component(&account.0));
+        p.push(sanitize_path_component(&folder.0));
         let ext = match self.compression {
             Compression::Zstd => "eml.zst",
             Compression::None => "eml",
         };
-        p.push(format!("{}.{}", message.0, ext));
+        p.push(format!("{}.{}", sanitize_path_component(&message.0), ext));
         p
     }
+}
+
+/// Percent-encode characters that aren't safe in a Windows filename
+/// component. The Windows reserved set is `<>:"/\|?*` plus all control
+/// characters (0x00-0x1F); we also encode `.` at the head and `%` itself
+/// (so the encoding is reversible).
+fn sanitize_path_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for (i, c) in s.chars().enumerate() {
+        let needs_encode = matches!(
+            c,
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' | '%'
+        ) || c.is_control()
+            || (i == 0 && c == '.');
+        if needs_encode {
+            for b in c.to_string().bytes() {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn write_blob(path: &Path, bytes: &[u8], compression: Compression) -> Result<(), StorageError> {
@@ -248,6 +277,49 @@ mod tests {
         let (a, f, m) = ids();
         let err = store.get(&a, &f, &m).await.unwrap_err();
         assert!(matches!(err, capytain_core::StorageError::NotFound));
+    }
+
+    #[test]
+    fn sanitize_escapes_windows_reserved_characters() {
+        // IMAP-style MessageIds embed `:`; backslashes and slashes can
+        // appear in some backends' folder paths; `*?` show up in wildcard-y
+        // labels. All of these must be encoded so NTFS doesn't reject the
+        // filename with ERROR_INVALID_PARAMETER.
+        let s = sanitize_path_component("1712345:42/x\\y*?\"<>|");
+        assert!(!s.contains(':'), "colon not escaped: {s}");
+        assert!(!s.contains('/'), "forward slash not escaped: {s}");
+        assert!(!s.contains('\\'), "backslash not escaped: {s}");
+        assert!(!s.contains('*'), "star not escaped: {s}");
+        assert!(!s.contains('?'), "question not escaped: {s}");
+        assert!(!s.contains('"'), "quote not escaped: {s}");
+        assert!(!s.contains('<'), "less-than not escaped: {s}");
+        assert!(!s.contains('>'), "greater-than not escaped: {s}");
+        assert!(!s.contains('|'), "pipe not escaped: {s}");
+        // Printable ASCII round-trip — `a-z`, `0-9`, etc. survive.
+        assert_eq!(
+            sanitize_path_component("plain-ascii.123"),
+            "plain-ascii.123"
+        );
+    }
+
+    #[tokio::test]
+    async fn colon_bearing_message_id_roundtrips() {
+        // Regression: IMAP mints IDs like `<folder_uid_validity>:<uid>`;
+        // storing them unescaped broke the blob store on Windows with
+        // ERROR_INVALID_PARAMETER.
+        let tmp = tempdir();
+        let store = BlobStore::new(tmp.path());
+        let a = AccountId("acct-1".into());
+        let f = FolderId("INBOX".into());
+        let m = MessageId("1712345:42".into());
+        let payload = b"body";
+        let path = store.put(&a, &f, &m, payload).await.unwrap();
+        assert!(
+            !path.file_name().unwrap().to_string_lossy().contains(':'),
+            "on-disk filename must not contain a raw colon: {path:?}"
+        );
+        let back = store.get(&a, &f, &m).await.unwrap();
+        assert_eq!(back, payload);
     }
 
     #[tokio::test]
