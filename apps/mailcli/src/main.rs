@@ -2,19 +2,29 @@
 
 //! `mailcli` — Capytain's headless protocol CLI.
 //!
-//! Phase 0 scope:
+//! Phase 0 scope (all of Week 4 landed end-to-end here):
 //!
 //! - `auth add <provider> <email>` runs the OAuth2 + PKCE flow against
 //!   the built-in provider profile, stores the refresh token in the
 //!   keychain, and writes an account row to the local database.
-//! - `auth list` prints the accounts on disk with a keychain presence
-//!   indicator.
-//! - `auth remove <email>` deletes both the account row and the keychain
+//! - `auth list` prints accounts on disk with a keychain presence flag.
+//! - `auth remove <email>` deletes both the DB row and the keychain
 //!   entry.
-//!
-//! Week 4+ will flesh out `list-folders`, `list-messages`, `show-message`,
-//! and `sync`. They're scaffolded here as subcommands that print a
-//! Phase-0 status line so the shape of the CLI is already visible.
+//! - `list-folders <email>` connects via the appropriate adapter (IMAP
+//!   for Gmail, JMAP for Fastmail) using an access token refreshed
+//!   against the stored refresh token, and prints every folder the
+//!   server advertises.
+//! - `list-messages <email> <folder> [--limit N]` SELECT+FETCHes
+//!   (IMAP) or Email/query+get-s (JMAP) the most recent N messages.
+//! - `sync <email>` finds the INBOX, upserts its folder row, runs
+//!   delta sync against any previously-persisted cursor, writes each
+//!   message header via `capytain_storage::repos::messages`, and
+//!   persists the new sync cursor. Prints
+//!   `Synced N new messages, M removed, in T ms`.
+//! - `show-message <id>` is a placeholder — IMAP ids encode the
+//!   folder so it would be self-contained, but we want a consistent
+//!   UX across both adapters; the full version lands with the Phase
+//!   1 polish pass.
 
 use std::path::PathBuf;
 
@@ -23,8 +33,12 @@ use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
 use tracing::info;
 
-use capytain_auth::{run_loopback_flow, AuthError, TokenVault};
-use capytain_core::{Account, AccountId, BackendKind, MailError};
+use capytain_auth::{
+    lookup as provider_lookup, refresh_access_token, run_loopback_flow, AuthError, TokenVault,
+};
+use capytain_core::{Account, AccountId, BackendKind, FolderId, MailBackend, MailError};
+use capytain_imap_client::ImapBackend;
+use capytain_jmap_client::JmapBackend;
 use capytain_storage::{repos, run_migrations, TursoConn};
 
 /// Capytain headless protocol CLI.
@@ -120,24 +134,15 @@ async fn run(cli: Cli) -> Result<(), MailcliError> {
     let paths = DataPaths::resolve(cli.data_dir.as_deref())?;
     match cli.command {
         Command::Auth { action } => dispatch_auth(action, &paths).await,
-        Command::ListFolders { email } => stub("list-folders", &email, "Phase 0 Week 4"),
+        Command::ListFolders { email } => list_folders(&email, &paths).await,
         Command::ListMessages {
             email,
             folder,
             limit,
-        } => stub(
-            "list-messages",
-            &format!("{email}:{folder} (limit={limit})"),
-            "Phase 0 Week 4",
-        ),
-        Command::ShowMessage { id } => stub("show-message", &id, "Phase 0 Week 4"),
-        Command::Sync { email } => stub("sync", &email, "Phase 0 Week 4"),
+        } => list_messages(&email, &folder, limit, &paths).await,
+        Command::ShowMessage { id } => show_message(&id, &paths).await,
+        Command::Sync { email } => sync_account(&email, &paths).await,
     }
-}
-
-fn stub(name: &str, arg: &str, when: &str) -> Result<(), MailcliError> {
-    println!("mailcli: `{name} {arg}` is a Phase 0 stub; the real implementation lands in {when}.");
-    Ok(())
 }
 
 async fn dispatch_auth(action: AuthAction, paths: &DataPaths) -> Result<(), MailcliError> {
@@ -250,6 +255,220 @@ async fn auth_remove(email: &str, paths: &DataPaths) -> Result<(), MailcliError>
         repos::accounts::delete(&conn, &a.id).await?;
         println!("removed {}", a.id.0);
     }
+    Ok(())
+}
+
+// ---------- read path commands ----------
+
+async fn resolve_account(
+    conn: &TursoConn,
+    email: &str,
+) -> Result<capytain_core::Account, MailcliError> {
+    let accounts = repos::accounts::list(conn).await?;
+    accounts
+        .into_iter()
+        .find(|a| a.email_address == email)
+        .ok_or_else(|| {
+            MailcliError::Usage(format!(
+                "no account found for {email}; run `mailcli auth add`"
+            ))
+        })
+}
+
+fn provider_slug_from_id(id: &AccountId) -> Option<&str> {
+    id.0.split_once(':').map(|(slug, _)| slug)
+}
+
+/// Build a live [`MailBackend`] for an account by refreshing its access
+/// token and handing it to the right adapter.
+async fn open_backend(account: &Account) -> Result<Box<dyn MailBackend>, MailcliError> {
+    let slug = provider_slug_from_id(&account.id).ok_or_else(|| {
+        MailcliError::Usage(format!(
+            "account id {} does not follow `<provider>:<email>`",
+            account.id.0
+        ))
+    })?;
+    let provider = provider_lookup(slug)
+        .ok_or_else(|| MailcliError::Usage(format!("unknown provider: {slug}")))?;
+    let vault = TokenVault::new();
+    let token_set = refresh_access_token(provider, &vault, &account.id).await?;
+
+    match account.kind {
+        BackendKind::ImapSmtp => {
+            let host = match slug {
+                "gmail" => "imap.gmail.com",
+                other => {
+                    return Err(MailcliError::Usage(format!(
+                        "no hardcoded IMAP host for provider {other}; \
+                         set one in capytain-imap-client before connecting"
+                    )))
+                }
+            };
+            let backend = ImapBackend::connect_tls(
+                host,
+                993,
+                &account.email_address,
+                token_set.access.expose(),
+                account.id.clone(),
+            )
+            .await?;
+            Ok(Box::new(backend))
+        }
+        BackendKind::Jmap => {
+            let session_url = match slug {
+                "fastmail" => "https://api.fastmail.com/.well-known/jmap",
+                other => {
+                    return Err(MailcliError::Usage(format!(
+                        "no hardcoded JMAP session URL for provider {other}"
+                    )))
+                }
+            };
+            let backend =
+                JmapBackend::connect(session_url, token_set.access.expose(), account.id.clone())
+                    .await
+                    .map_err(MailcliError::Mail)?;
+            Ok(Box::new(backend))
+        }
+        _ => Err(MailcliError::Usage(format!(
+            "account {} uses an unsupported backend kind",
+            account.id.0
+        ))),
+    }
+}
+
+async fn list_folders(email: &str, paths: &DataPaths) -> Result<(), MailcliError> {
+    let conn = paths.open_db().await?;
+    let account = resolve_account(&conn, email).await?;
+    let backend = open_backend(&account).await?;
+    let folders = backend.list_folders().await?;
+
+    println!(
+        "{:<24}  {:<12}  {:>7}  {:>7}  path",
+        "id", "role", "unread", "total"
+    );
+    for f in folders {
+        let role = f
+            .role
+            .as_ref()
+            .map(|r| format!("{r:?}"))
+            .unwrap_or_default();
+        let truncated_id: String = f.id.0.chars().take(24).collect();
+        println!(
+            "{:<24}  {:<12}  {:>7}  {:>7}  {}",
+            truncated_id, role, f.unread_count, f.total_count, f.path
+        );
+    }
+    Ok(())
+}
+
+async fn list_messages(
+    email: &str,
+    folder: &str,
+    limit: u32,
+    paths: &DataPaths,
+) -> Result<(), MailcliError> {
+    let conn = paths.open_db().await?;
+    let account = resolve_account(&conn, email).await?;
+    let backend = open_backend(&account).await?;
+    let fid = FolderId(folder.to_string());
+
+    let out = backend.list_messages(&fid, None, Some(limit)).await?;
+    println!("{:<12}  {:<20}  {:<32}  subject", "flags", "from", "date");
+    for m in &out.messages {
+        let flags = format!(
+            "{}{}{}",
+            if m.flags.seen { "R" } else { "U" },
+            if m.flags.flagged { "*" } else { " " },
+            if m.flags.answered { "↩" } else { " " },
+        );
+        let from = m
+            .from
+            .first()
+            .map(|a| a.address.clone())
+            .unwrap_or_default();
+        let from: String = from.chars().take(20).collect();
+        println!(
+            "{:<12}  {:<20}  {:<32}  {}",
+            flags,
+            from,
+            m.date.to_rfc3339(),
+            m.subject
+        );
+    }
+    println!(
+        "({} messages; new sync cursor persisted on next `sync`)",
+        out.messages.len()
+    );
+    Ok(())
+}
+
+async fn show_message(id: &str, _paths: &DataPaths) -> Result<(), MailcliError> {
+    // Decoding the id tells us which account (by provider slug for
+    // IMAP; opaque for JMAP). For Phase 0 we just say "look it up once
+    // you know the account" — the user passes an account email
+    // separately in future revisions. Today the command is a
+    // placeholder to prove the CLI shape.
+    Err(MailcliError::Usage(format!(
+        "`show-message {id}` needs an --email selector; \
+         today `list-messages` prints ids in a debuggable format and \
+         `show-message` with an account hint lands in Phase 1 Week 1"
+    )))
+}
+
+async fn sync_account(email: &str, paths: &DataPaths) -> Result<(), MailcliError> {
+    use std::time::Instant;
+
+    let conn = paths.open_db().await?;
+    let account = resolve_account(&conn, email).await?;
+    let backend = open_backend(&account).await?;
+
+    // Phase 0 exit criterion: fetch the INBOX's headers and persist
+    // them. We run delta against the stored sync_state if present.
+    let folders = backend.list_folders().await?;
+    let inbox = folders
+        .into_iter()
+        .find(|f| {
+            f.role == Some(capytain_core::FolderRole::Inbox) || f.path.eq_ignore_ascii_case("INBOX")
+        })
+        .ok_or_else(|| {
+            MailcliError::Usage("could not find an INBOX folder on this account".into())
+        })?;
+
+    // Persist the folder row so sync_states has a place to hang the
+    // backend cursor on.
+    match repos::folders::find(&conn, &inbox.id).await? {
+        Some(_) => repos::folders::update(&conn, &inbox).await?,
+        None => repos::folders::insert(&conn, &inbox).await?,
+    }
+
+    let prior = repos::sync_states::get(&conn, &inbox.id)
+        .await
+        .ok()
+        .flatten();
+
+    let start = Instant::now();
+    let result = backend
+        .list_messages(&inbox.id, prior.as_ref(), Some(200))
+        .await?;
+    let added = result.messages.len();
+    let removed = result.removed.len();
+
+    // Persist headers.
+    for h in &result.messages {
+        // Upsert — storage's repos don't have one, so check then
+        // insert/update.
+        match repos::messages::find(&conn, &h.id).await? {
+            Some(_) => repos::messages::update(&conn, h, None).await?,
+            None => repos::messages::insert(&conn, h, None).await?,
+        }
+    }
+    repos::sync_states::put(&conn, &result.new_state).await?;
+
+    let duration = start.elapsed();
+    println!(
+        "Synced {added} new messages, {removed} removed, in {} ms",
+        duration.as_millis()
+    );
     Ok(())
 }
 
