@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# REUSE.toml provides license and copyright for files that cannot or should
+# not carry inline SPDX headers:
+#
+#   - Markdown documents (headers would show up in rendered output)
+#   - YAML/JSON config consumed by tools that trip on non-doc comments
+#   - Generated files (Cargo.lock)
+#   - Dotfiles (.gitignore, .gitattributes)
+#
+# Source files under version control in the workspace that *can* carry
+# inline headers still should — REUSE treats inline metadata as
+# authoritative and layered coverage from this file as a fallback.
+#
+# Spec: https://reuse.software/spec-3.3/
+
+version = 1
+
+[[annotations]]
+path = [
+    "**.md",
+    ".gitignore",
+    ".gitattributes",
+    "Cargo.lock",
+    ".github/**.md",
+    ".github/**.yml",
+    ".github/**.yaml",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Capytain Contributors"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Source files that carry inline `SPDX-License-Identifier` but no
+# `SPDX-FileCopyrightText`: supply the copyright from here.
+[[annotations]]
+path = [
+    "**.rs",
+    "**.toml",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Capytain Contributors"

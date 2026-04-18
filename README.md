@@ -66,21 +66,27 @@ Capytain makes the opposite bet on each: pure-Rust end to end, no intermediary s
 
 ```sh
 git clone https://github.com/johnathonfox/capytain.git
-cd Capytain
+cd capytain
 cargo check --workspace          # verifies the whole workspace compiles
 cargo test --workspace           # runs all tests
-cargo tauri dev                  # launches the desktop app in dev mode
+cargo run -p mailcli -- --help   # the headless protocol CLI
 ```
+
+The Tauri desktop app (`cargo tauri dev`) lands in Phase 0 Week 5. See [`PHASE_0.md`](./PHASE_0.md) for the current state.
+
+A full quickstart — including platform build deps, contributor tooling, and the PR-gate local checks — lives in [`CONTRIBUTING.md`](./CONTRIBUTING.md#development-setup).
 
 ### Running the headless protocol CLI
 
-Useful for testing IMAP/JMAP adapters without the UI:
+`mailcli` is Capytain's headless protocol CLI, used during Phase 0 as a forcing function for crate boundaries. Once the Phase 0 weeks 3–4 subcommands ship, it'll look like:
 
 ```sh
-cargo run -p mailcli -- auth add gmail your@gmail.com
-cargo run -p mailcli -- list-folders your@gmail.com
+cargo run -p mailcli -- auth add gmail your@gmail.com     # Phase 0 Week 3
+cargo run -p mailcli -- list-folders your@gmail.com       # Phase 0 Week 4
 cargo run -p mailcli -- list-messages your@gmail.com INBOX
 ```
+
+Until then, `cargo run -p mailcli -- --log-level debug` exercises the binary stub and shared tracing init.
 
 ## Project structure
 
