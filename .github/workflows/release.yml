@@ -193,8 +193,61 @@ jobs:
         run: cargo install dioxus-cli --version '${{ env.DIOXUS_CLI_VERSION }}' --locked
 
       - name: Build Dioxus UI (WASM, release)
+        # Dioxus 0.7's `dx build --platform web --release` writes its
+        # output under `target/dx/<app>/release/web/` (default), which
+        # does NOT match what `tauri.conf.json`'s `frontendDist = ../ui/dist`
+        # resolves to. Preview v0.0.0-preview.2 failed with exactly
+        # "Unable to find your web assets ... frontendDist is set to ../ui/dist"
+        # because of this gap. Build with dx, then stage the
+        # emitted files at `apps/desktop/ui/dist/` so Tauri finds them.
         working-directory: apps/desktop/ui
-        run: dx build --platform web --release
+        shell: bash
+        run: |
+          set -eu
+          dx build --platform web --release
+
+          rm -rf dist
+          mkdir -p dist
+
+          # Probe known dx output locations in order. The first
+          # non-empty directory wins. Run from apps/desktop/ui/, so
+          # the workspace `target/` is at ../../target/.
+          src=""
+          for candidate in \
+            "../../target/dx/capytain/release/web/public" \
+            "../../target/dx/capytain/release/web" \
+            "../../target/dx/capytain/bundle/web/public" \
+            "../../target/dx/capytain/bundle/web" \
+            "../../target/dx/release/web/public" \
+            "../../target/dx/release/web"; do
+            if [ -d "$candidate" ] && [ -n "$(ls -A "$candidate" 2>/dev/null)" ]; then
+              src="$candidate"
+              break
+            fi
+          done
+
+          # Last-ditch fallback: find any `index.html` that dx wrote
+          # under `target/dx/` and use its parent directory. Picks up
+          # any future default layout change without another code
+          # change here.
+          if [ -z "$src" ] && [ -d "../../target/dx" ]; then
+            idx=$(find ../../target/dx -name index.html -print -quit 2>/dev/null || true)
+            if [ -n "$idx" ]; then
+              src=$(dirname "$idx")
+            fi
+          fi
+
+          if [ -z "$src" ]; then
+            echo "::error::Could not locate dx build output under target/dx/." >&2
+            echo "Directory tree (first 60 lines):" >&2
+            find ../../target/dx -maxdepth 8 2>/dev/null | head -60 >&2 || true
+            exit 1
+          fi
+
+          echo "Staging dx output from: $src"
+          cp -R "$src"/. dist/
+          echo "Final dist/ contents:"
+          ls -la dist/
 
       - name: Build + bundle Tauri app
         uses: tauri-apps/tauri-action@v0
