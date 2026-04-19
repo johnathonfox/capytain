@@ -1,2 +1,37 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Normalize all text files to LF in the repo, on every platform.
+#
+# The previous `* text=auto` rule deferred to git's auto-detection plus
+# the user's `core.autocrlf` setting. On Windows that converted LF to
+# CRLF at checkout, which then broke `cargo fmt --all --check` on the
+# Windows CI runner because rustfmt always wants LF. Explicit
+# `eol=lf` fixes that on every platform.
+
+# Default for everything git thinks is text.
+* text=auto eol=lf
+
+# Explicit rules for the source-file types we touch, so there's no
+# ambiguity for any tool that consults .gitattributes directly.
+*.rs         text eol=lf
+*.toml       text eol=lf
+*.md         text eol=lf
+*.yml        text eol=lf
+*.yaml       text eol=lf
+*.json       text eol=lf
+*.sql        text eol=lf
+*.css        text eol=lf
+*.html       text eol=lf
+*.sh         text eol=lf
+
+# Generated / pinned files that must stay LF too.
+Cargo.lock   text eol=lf
+
+# Known binary formats — leave byte-for-byte.
+*.png        binary
+*.ico        binary
+*.icns       binary
+*.dmg        binary
+*.deb        binary
+*.rpm        binary
+*.AppImage   binary
+*.msi        binary
+*.exe        binary
