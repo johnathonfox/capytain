@@ -7,20 +7,23 @@
 #   - Manual dispatch with a tag name, for dry runs against an existing tag.
 #
 # Output:
-#   - One GitHub Release (draft, prerelease by default), with per-OS Tauri
-#     bundles attached:
-#       - macOS: universal .dmg + .app.tar.gz
-#       - Linux (x86_64): .deb + .AppImage + .rpm
+#   - One GitHub Release (draft, prerelease by default), with a Tauri
+#     bundle attached for:
 #       - Windows (x86_64): .msi + .exe
 #
+# Scope note (Phase 0 preview):
+#   macOS and Linux bundles are intentionally disabled for now while we
+#   debug a `cargo tauri build` failure that hit both platforms on
+#   v0.0.0-preview.1. Re-enable them in the matrix once we've verified
+#   the Windows path end-to-end; the commented-out matrix entries below
+#   show the layout to restore.
+#
 # What this workflow does NOT do (yet):
-#   - Signing / notarization. Binaries are unsigned. macOS Gatekeeper and
-#     Windows SmartScreen will warn end users. Signing tokens + the
-#     `TAURI_SIGNING_PRIVATE_KEY` pipeline land in a follow-up when we
-#     have Apple Developer and Authenticode certs.
-#   - Linux AppImage signing, Flatpak, Snap packaging.
-#   - Release notes generation. The release body is a static stub pointing
-#     at CHANGELOG.md (once we have one).
+#   - Signing. Binaries are unsigned. Windows SmartScreen will warn end
+#     users on first launch. Authenticode + the `TAURI_SIGNING_*`
+#     pipeline land in a follow-up when we have a signing cert.
+#   - Release notes generation. The release body is a static stub
+#     pointing at CHANGELOG.md (once we have one).
 #
 # The Dioxus UI is built to `apps/desktop/ui/dist/` via `dx build
 # --platform web --release` before Tauri bundles, since `tauri.conf.json`
@@ -92,9 +95,12 @@ jobs:
               '',
               '| Platform | File | Notes |',
               '|---|---|---|',
-              '| macOS (universal) | `.dmg` | Apple Silicon + Intel in one bundle |',
-              '| Linux (x86_64) | `.deb`, `.AppImage`, `.rpm` | Requires webkit2gtk 4.1 |',
               '| Windows (x86_64) | `.msi`, `.exe` | WebView2 Runtime required (ships with Windows 11) |',
+              '',
+              '_macOS and Linux bundles are temporarily disabled in the',
+              'release workflow while we debug an earlier `cargo tauri',
+              'build` failure on those platforms. They will return once',
+              'the Windows path is proven end-to-end._',
             ].join('\n');
 
             // Try to reuse an existing release for this tag (workflow_dispatch
@@ -131,14 +137,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: macOS (universal)
-            os: macos-latest
-            tauri_args: --target universal-apple-darwin
-            rust_targets: aarch64-apple-darwin x86_64-apple-darwin
-          - label: Linux (x86_64)
-            os: ubuntu-latest
-            tauri_args: ''
-            rust_targets: ''
+          # Windows-only for now. macOS and Linux entries are preserved
+          # in `.github/workflows/release.yml` history so we can restore
+          # them by re-adding these blocks:
+          #   - label: macOS (universal)
+          #     os: macos-latest
+          #     tauri_args: --target universal-apple-darwin
+          #     rust_targets: aarch64-apple-darwin x86_64-apple-darwin
+          #   - label: Linux (x86_64)
+          #     os: ubuntu-latest
+          #     tauri_args: ''
+          #     rust_targets: ''
           - label: Windows (x86_64)
             os: windows-latest
             tauri_args: ''
@@ -231,10 +240,15 @@ jobs:
               core.setFailed('No assets were attached to the release.');
               return;
             }
-            // Loose sanity check: expect at least one asset per OS bundle.
+            // Windows is the only platform currently in the matrix; the
+            // Windows bundle is required, macOS/Linux are informational
+            // (and will come back when those runners rejoin the matrix).
+            const haveWin = assets.some(a => /\.msi$|setup\.exe$/.test(a.name));
+            if (!haveWin) {
+              core.setFailed('No Windows bundle found on the release.');
+              return;
+            }
             const haveMac = assets.some(a => /\.dmg$|\.app\.tar\.gz$/.test(a.name));
             const haveLinux = assets.some(a => /\.deb$|\.AppImage$|\.rpm$/.test(a.name));
-            const haveWin = assets.some(a => /\.msi$|setup\.exe$/.test(a.name));
-            if (!haveMac)   core.warning('No macOS bundle found on the release.');
-            if (!haveLinux) core.warning('No Linux bundle found on the release.');
-            if (!haveWin)   core.warning('No Windows bundle found on the release.');
+            if (!haveMac)   core.info('(macOS bundle intentionally skipped — disabled in matrix.)');
+            if (!haveLinux) core.info('(Linux bundle intentionally skipped — disabled in matrix.)');
