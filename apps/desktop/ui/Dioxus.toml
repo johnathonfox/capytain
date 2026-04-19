@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Dioxus CLI configuration. Read by `dx build --platform web` and
+# `dx serve`. Keep the output layout at `dist/`; Tauri's
+# `frontendDist` in `apps/desktop/src-tauri/tauri.conf.json` points at
+# `../ui/dist` so the two stay in sync.
+
+[application]
+name = "capytain"
+default_platform = "web"
+
+[web.app]
+title = "Capytain"
+
+[web.watcher]
+reload_html = true
+watch_path = ["src", "assets"]
+
+[web.resource]
+style = ["assets/tailwind.css"]
+script = []
+
+[web.resource.dev]
+style = []
+script = []

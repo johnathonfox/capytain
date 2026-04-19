@@ -1,0 +1,240 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Release workflow for Capytain.
+#
+# Trigger:
+#   - Push a tag starting with `v` (e.g. `v0.1.0`, `v0.0.0-phase-0-preview`).
+#   - Manual dispatch with a tag name, for dry runs against an existing tag.
+#
+# Output:
+#   - One GitHub Release (draft, prerelease by default), with per-OS Tauri
+#     bundles attached:
+#       - macOS: universal .dmg + .app.tar.gz
+#       - Linux (x86_64): .deb + .AppImage + .rpm
+#       - Windows (x86_64): .msi + .exe
+#
+# What this workflow does NOT do (yet):
+#   - Signing / notarization. Binaries are unsigned. macOS Gatekeeper and
+#     Windows SmartScreen will warn end users. Signing tokens + the
+#     `TAURI_SIGNING_PRIVATE_KEY` pipeline land in a follow-up when we
+#     have Apple Developer and Authenticode certs.
+#   - Linux AppImage signing, Flatpak, Snap packaging.
+#   - Release notes generation. The release body is a static stub pointing
+#     at CHANGELOG.md (once we have one).
+#
+# The Dioxus UI is built to `apps/desktop/ui/dist/` via `dx build
+# --platform web --release` before Tauri bundles, since `tauri.conf.json`
+# points `frontendDist` there.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (must already exist on origin)'
+        required: true
+        type: string
+
+# Least privilege: we create releases (contents: write) and nothing else.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pin the dioxus-cli to a version range compatible with the workspace
+  # dioxus dep. Bump when the workspace Cargo.toml bumps dioxus.
+  DIOXUS_CLI_VERSION: '^0.7'
+
+jobs:
+  create-release:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.release_id }}
+      tag: ${{ steps.resolve-tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: resolve-tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Resolved release tag: ${TAG}"
+
+      - name: Create draft release
+        id: create
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ steps.resolve-tag.outputs.tag }}
+        with:
+          script: |
+            const tag = process.env.RELEASE_TAG;
+            const body = [
+              `Capytain pre-release **${tag}**.`,
+              '',
+              '> This is a Phase 0 preview build. Binaries are **not signed**',
+              '> and **not notarized** — macOS Gatekeeper and Windows',
+              '> SmartScreen will warn on first launch. Sync, compose, and',
+              '> HTML rendering are incomplete. See [`PHASE_0.md`](https://github.com/johnathonfox/capytain/blob/main/PHASE_0.md)',
+              '> for the full status.',
+              '',
+              '## Downloads',
+              '',
+              '| Platform | File | Notes |',
+              '|---|---|---|',
+              '| macOS (universal) | `.dmg` | Apple Silicon + Intel in one bundle |',
+              '| Linux (x86_64) | `.deb`, `.AppImage`, `.rpm` | Requires webkit2gtk 4.1 |',
+              '| Windows (x86_64) | `.msi`, `.exe` | WebView2 Runtime required (ships with Windows 11) |',
+            ].join('\n');
+
+            // Try to reuse an existing release for this tag (workflow_dispatch
+            // re-runs) before creating a new one.
+            try {
+              const existing = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag,
+              });
+              core.setOutput('release_id', existing.data.id);
+              core.info(`Reusing existing release ${existing.data.id} for ${tag}`);
+              return;
+            } catch (e) {
+              if (e.status !== 404) throw e;
+            }
+
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `Capytain ${tag}`,
+              body,
+              draft: true,
+              prerelease: true,
+            });
+            core.setOutput('release_id', data.id);
+            core.info(`Created draft release ${data.id} for ${tag}`);
+
+  build:
+    name: Build ${{ matrix.label }}
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS (universal)
+            os: macos-latest
+            tauri_args: --target universal-apple-darwin
+            rust_targets: aarch64-apple-darwin x86_64-apple-darwin
+          - label: Linux (x86_64)
+            os: ubuntu-latest
+            tauri_args: ''
+            rust_targets: ''
+          - label: Windows (x86_64)
+            os: windows-latest
+            tauri_args: ''
+            rust_targets: ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add extra Rust targets (macOS universal)
+        if: matrix.rust_targets != ''
+        shell: bash
+        run: |
+          for t in ${{ matrix.rust_targets }}; do
+            rustup target add "$t"
+          done
+
+      - name: Add wasm32 target (Dioxus UI)
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install Tauri Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libxdo-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Release builds differ from CI's dev builds enough that sharing
+          # the cache isn't worth the cross-contamination risk.
+          key: release-${{ matrix.os }}
+
+      - name: Install dioxus-cli
+        run: cargo install dioxus-cli --version '${{ env.DIOXUS_CLI_VERSION }}' --locked
+
+      - name: Build Dioxus UI (WASM, release)
+        working-directory: apps/desktop/ui
+        run: dx build --platform web --release
+
+      - name: Build + bundle Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signing env vars go here when we have them. Leaving them unset
+          # produces an unsigned bundle — the Phase 0 preview target.
+          # APPLE_CERTIFICATE:             ${{ secrets.APPLE_CERTIFICATE }}
+          # APPLE_CERTIFICATE_PASSWORD:    ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # APPLE_SIGNING_IDENTITY:        ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # APPLE_ID:                      ${{ secrets.APPLE_ID }}
+          # APPLE_PASSWORD:                ${{ secrets.APPLE_PASSWORD }}
+          # APPLE_TEAM_ID:                 ${{ secrets.APPLE_TEAM_ID }}
+          # TAURI_SIGNING_PRIVATE_KEY:     ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          projectPath: apps/desktop/src-tauri
+          args: ${{ matrix.tauri_args }}
+
+  smoke-test:
+    name: Smoke-test release artifacts
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: List attached assets
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            const { data: assets } = await github.rest.repos.listReleaseAssets({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: Number(process.env.RELEASE_ID),
+              per_page: 100,
+            });
+            core.info(`Assets on release ${process.env.RELEASE_ID}:`);
+            for (const a of assets) {
+              core.info(`  - ${a.name} (${a.size} bytes)`);
+            }
+            if (assets.length === 0) {
+              core.setFailed('No assets were attached to the release.');
+              return;
+            }
+            // Loose sanity check: expect at least one asset per OS bundle.
+            const haveMac = assets.some(a => /\.dmg$|\.app\.tar\.gz$/.test(a.name));
+            const haveLinux = assets.some(a => /\.deb$|\.AppImage$|\.rpm$/.test(a.name));
+            const haveWin = assets.some(a => /\.msi$|setup\.exe$/.test(a.name));
+            if (!haveMac)   core.warning('No macOS bundle found on the release.');
+            if (!haveLinux) core.warning('No Linux bundle found on the release.');
+            if (!haveWin)   core.warning('No Windows bundle found on the release.');

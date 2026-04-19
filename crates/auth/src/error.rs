@@ -62,6 +62,29 @@ impl From<url::ParseError> for AuthError {
     }
 }
 
+/// Route `AuthError` variants to their closest `IpcErrorKind`. The UI
+/// primarily cares about `Auth` (prompt re-auth) and `Cancelled` (user
+/// aborted); everything else collapses to `Internal` or `Network`.
+///
+/// Lives here rather than in `capytain-ipc` because `capytain-ipc`
+/// compiles to wasm32 for the Dioxus UI and can't pull in this crate's
+/// tokio/keyring/reqwest dependencies.
+impl From<AuthError> for capytain_ipc::IpcError {
+    fn from(e: AuthError) -> Self {
+        use capytain_ipc::IpcErrorKind as K;
+        use AuthError as A;
+        let kind = match &e {
+            A::ProviderNotConfigured(_) => K::Internal,
+            A::Loopback(_) | A::Browser(_) => K::Network,
+            A::AuthResponse(_) | A::TokenExchange(_) => K::Auth,
+            A::Keyring(_) => K::Storage,
+            A::Cancelled => K::Cancelled,
+            _ => K::Internal,
+        };
+        capytain_ipc::IpcError::new(kind, e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

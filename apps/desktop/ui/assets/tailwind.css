@@ -1,0 +1,60 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/*
+ * Placeholder stylesheet for the Capytain UI.
+ *
+ * Phase 0 Week 5 part 1 does not yet ship the Tailwind toolchain —
+ * the proof-of-life UI is unstyled except for the minimal rules here.
+ * Week 5 part 2 adds the Tailwind build step and real component
+ * styles; this file is the hook point so `Dioxus.toml` can reference
+ * a stable path today.
+ */
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #0f1115;
+  color: #e6e8eb;
+}
+
+.capytain-root {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+h1 {
+  margin: 0 0 0.5rem;
+  font-size: 1.5rem;
+  letter-spacing: -0.01em;
+}
+
+.subtitle {
+  margin: 0 0 2rem;
+  color: #8a929b;
+}
+
+.accounts ul {
+  list-style: none;
+  padding: 0;
+}
+
+.accounts li {
+  padding: 0.5rem 0;
+  border-top: 1px solid #22262e;
+}
+
+.accounts li:last-child {
+  border-bottom: 1px solid #22262e;
+}
+
+.error {
+  color: #ff6b6b;
+}
+
+code {
+  background: #22262e;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  font-size: 0.9em;
+}

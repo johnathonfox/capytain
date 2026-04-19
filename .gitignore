@@ -16,6 +16,12 @@ Thumbs.db
 /dist
 /out
 
+# Tauri build-script output. `tauri-build` regenerates these on every
+# `cargo check` from `tauri.conf.json` and the capability files —
+# they are not source.
+apps/desktop/src-tauri/gen/
+apps/desktop/ui/dist/
+
 # Local env
 .env
 .env.local

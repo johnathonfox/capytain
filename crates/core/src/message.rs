@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::ids::{AccountId, AttachmentRef, FolderId, MessageId, ThreadId};
 
 /// A parsed email address with optional display name.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmailAddress {
     /// Addr-spec portion, e.g. `jane@example.com`.
     pub address: String,
@@ -23,7 +23,7 @@ pub struct EmailAddress {
 
 /// IMAP-style message flags, generalized so JMAP keywords round-trip through
 /// them too.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageFlags {
     /// IMAP `\Seen`, JMAP keyword `$seen`.
     pub seen: bool,
@@ -46,7 +46,7 @@ pub struct MessageFlags {
 ///
 /// `MessageHeaders` is what populates list views. It's cheap to send over
 /// IPC and cheap to persist.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageHeaders {
     /// Backend-assigned identifier.
     pub id: MessageId,
@@ -104,7 +104,7 @@ pub struct MessageHeaders {
 }
 
 /// A message with its body and attachment descriptors.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageBody {
     /// Headers for this message.
     pub headers: MessageHeaders,
@@ -128,7 +128,7 @@ pub struct MessageBody {
 
 /// Attachment metadata. Bytes are fetched on demand via
 /// `MailBackend::fetch_attachment`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
     /// Backend-assigned identifier, unique within the parent message.
     pub id: AttachmentRef,
