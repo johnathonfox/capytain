@@ -76,3 +76,16 @@ path = [
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Capytain Contributors"
 SPDX-License-Identifier = "Apache-2.0"
+
+# Build-script output. `tauri-build` regenerates `apps/desktop/
+# src-tauri/gen/` on every `cargo check` from tauri.conf.json and the
+# capability files; `.gitignore` keeps it out of the repo but
+# contributors who run `reuse lint` after a local build would see it on
+# disk. Covering it here means that run still passes.
+[[annotations]]
+path = [
+    "apps/desktop/src-tauri/gen/**",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Capytain Contributors"
+SPDX-License-Identifier = "Apache-2.0"

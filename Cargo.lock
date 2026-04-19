@@ -733,6 +733,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "capytain-core",
+ "capytain-ipc",
  "chrono",
  "keyring",
  "rand 0.9.4",
@@ -768,6 +769,7 @@ dependencies = [
  "capytain-imap-client",
  "capytain-ipc",
  "capytain-jmap-client",
+ "capytain-mime",
  "capytain-storage",
  "capytain-telemetry",
  "directories",
@@ -803,7 +805,6 @@ dependencies = [
 name = "capytain-ipc"
 version = "0.0.0"
 dependencies = [
- "capytain-auth",
  "capytain-core",
  "chrono",
  "serde",
@@ -876,6 +877,8 @@ version = "0.0.0"
 dependencies = [
  "capytain-ipc",
  "dioxus",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
  "js-sys",
  "serde",
  "serde-wasm-bindgen",

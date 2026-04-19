@@ -10,7 +10,7 @@ use crate::ids::AccountId;
 /// A configured mail account. Credentials for the account live in the OS
 /// keychain and are referenced via `auth_ref` in storage; they never appear
 /// on this struct.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
     /// Local identifier; stable across renames of `display_name`.
     pub id: AccountId,

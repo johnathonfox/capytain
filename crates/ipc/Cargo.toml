@@ -12,7 +12,10 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
-capytain-auth = { workspace = true }
+# NB: no dep on `capytain-auth` — that crate pulls tokio / mio /
+# keyring, which don't compile for wasm32-unknown-unknown. The
+# `AuthError → IpcError` conversion lives on the `capytain-auth` side
+# so this crate can ride in the Dioxus WASM bundle.
 capytain-core = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }

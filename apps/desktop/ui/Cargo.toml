@@ -32,5 +32,12 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 serde-wasm-bindgen = "0.6"
 
+# `getrandom` is reachable transitively (capytain-auth → rand). On
+# wasm32-unknown-unknown it needs a backend opt-in; `wasm_js` routes
+# randomness through the browser's `crypto.getRandomValues`. Declare
+# both major versions so feature unification reaches all copies.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+
 [lints]
 workspace = true

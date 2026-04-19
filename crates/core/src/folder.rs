@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::ids::{AccountId, FolderId};
 
 /// A folder or mailbox in a given account.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Folder {
     /// Backend-assigned identifier.
     pub id: FolderId,

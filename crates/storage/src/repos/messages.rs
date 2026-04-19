@@ -117,6 +117,44 @@ pub async fn list_by_folder(
     rows.iter().map(row_to_headers).collect()
 }
 
+/// Total number of messages persisted for a folder.
+///
+/// Used by `MessagePage::total_count` so the UI can render pagination
+/// hints without streaming the whole folder.
+pub async fn count_by_folder(conn: &dyn DbConn, folder: &FolderId) -> Result<u32, StorageError> {
+    let row = conn
+        .query_one(
+            "SELECT COUNT(*) AS c FROM messages WHERE folder_id = ?1",
+            Params(vec![Value::Text(&folder.0)]),
+        )
+        .await?;
+    let c = row.get_i64("c")?;
+    Ok(c.max(0) as u32)
+}
+
+/// Number of unread (`!seen`) messages in a folder.
+///
+/// We persist `flags_json` as an opaque JSON blob, so the query uses
+/// SQLite's `json_extract` to look inside it. Messages whose flag blob
+/// can't be parsed (e.g. written by a future schema version) are
+/// treated as read rather than crashing the count.
+pub async fn count_unread_by_folder(
+    conn: &dyn DbConn,
+    folder: &FolderId,
+) -> Result<u32, StorageError> {
+    let row = conn
+        .query_one(
+            "SELECT COUNT(*) AS c \
+               FROM messages \
+              WHERE folder_id = ?1 \
+                AND COALESCE(json_extract(flags_json, '$.seen'), 0) = 0",
+            Params(vec![Value::Text(&folder.0)]),
+        )
+        .await?;
+    let c = row.get_i64("c")?;
+    Ok(c.max(0) as u32)
+}
+
 pub async fn update_flags(
     conn: &dyn DbConn,
     id: &MessageId,

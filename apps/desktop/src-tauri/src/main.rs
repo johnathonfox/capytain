@@ -53,7 +53,12 @@ fn main() {
             app.manage(state);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![commands::accounts::accounts_list])
+        .invoke_handler(tauri::generate_handler![
+            commands::accounts::accounts_list,
+            commands::folders::folders_list,
+            commands::messages::messages_list,
+            commands::messages::messages_get,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Capytain");
 }

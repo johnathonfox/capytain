@@ -83,20 +83,11 @@ impl From<StorageError> for IpcError {
     }
 }
 
-impl From<capytain_auth::AuthError> for IpcError {
-    fn from(e: capytain_auth::AuthError) -> Self {
-        use capytain_auth::AuthError as A;
-        let kind = match &e {
-            A::ProviderNotConfigured(_) => IpcErrorKind::Internal,
-            A::Loopback(_) | A::Browser(_) => IpcErrorKind::Network,
-            A::AuthResponse(_) | A::TokenExchange(_) => IpcErrorKind::Auth,
-            A::Keyring(_) => IpcErrorKind::Storage,
-            A::Cancelled => IpcErrorKind::Cancelled,
-            _ => IpcErrorKind::Internal,
-        };
-        IpcError::new(kind, e.to_string())
-    }
-}
+// `From<capytain_auth::AuthError>` deliberately lives in `capytain-auth`
+// instead of here: the UI crate compiles to wasm32 and can't pull in
+// tokio / mio / keyring transitively through `capytain-auth`. Desktop
+// command handlers that surface auth errors use the impl on the
+// `capytain-auth` side to convert.
 
 #[cfg(test)]
 mod tests {

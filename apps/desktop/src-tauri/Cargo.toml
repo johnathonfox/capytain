@@ -25,6 +25,7 @@ capytain-core = { workspace = true }
 capytain-imap-client = { workspace = true }
 capytain-ipc = { workspace = true }
 capytain-jmap-client = { workspace = true }
+capytain-mime = { workspace = true }
 capytain-storage = { workspace = true }
 capytain-telemetry = { workspace = true }
 async-trait = { workspace = true }
