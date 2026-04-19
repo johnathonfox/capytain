@@ -194,14 +194,28 @@ jobs:
 
       - name: Build Dioxus UI (WASM, release)
         # Dioxus 0.7's `dx build --platform web --release` writes its
-        # output under `target/dx/<app>/release/web/` (default), which
-        # does NOT match what `tauri.conf.json`'s `frontendDist = ../ui/dist`
-        # resolves to. Preview v0.0.0-preview.2 failed with exactly
-        # "Unable to find your web assets ... frontendDist is set to ../ui/dist"
-        # because of this gap. Build with dx, then stage the
-        # emitted files at `apps/desktop/ui/dist/` so Tauri finds them.
+        # output under `target/dx/<cargo-package-name>/release/web/public/`
+        # (confirmed empirically on v0.0.0-preview.3 run:
+        # `target/dx/capytain-ui/release/web/public`). That path does
+        # NOT match `tauri.conf.json`'s `frontendDist = "../ui/dist"`,
+        # so we explicitly stage it at `apps/desktop/ui/dist/` after
+        # the build.
+        #
+        # NB: the working directory of this step is `apps/desktop/ui/`,
+        # which is THREE levels below the workspace root. Earlier
+        # preview.3 attempt used `../../` (two levels) and silently
+        # probed the wrong tree. Always use `../../..` from here.
         working-directory: apps/desktop/ui
         shell: bash
+        env:
+          # Anchor: workspace `target/` dir, expressed relative to the
+          # step's working directory.
+          WORKSPACE_TARGET: ../../../target
+          # dx keys its per-crate output folder by the Cargo package
+          # name declared in `apps/desktop/ui/Cargo.toml`. If that name
+          # is ever renamed, update both here and in the package
+          # manifest — the release build depends on them matching.
+          DX_PKG: capytain-ui
         run: |
           set -eu
           dx build --platform web --release
@@ -209,38 +223,34 @@ jobs:
           rm -rf dist
           mkdir -p dist
 
-          # Probe known dx output locations in order. The first
-          # non-empty directory wins. Run from apps/desktop/ui/, so
-          # the workspace `target/` is at ../../target/.
+          # Known-good 0.7 path (what preview.3's dx log showed) plus
+          # a few likely-future layouts in case dx relocates things.
           src=""
           for candidate in \
-            "../../target/dx/capytain/release/web/public" \
-            "../../target/dx/capytain/release/web" \
-            "../../target/dx/capytain/bundle/web/public" \
-            "../../target/dx/capytain/bundle/web" \
-            "../../target/dx/release/web/public" \
-            "../../target/dx/release/web"; do
+            "${WORKSPACE_TARGET}/dx/${DX_PKG}/release/web/public" \
+            "${WORKSPACE_TARGET}/dx/${DX_PKG}/release/web" \
+            "${WORKSPACE_TARGET}/dx/${DX_PKG}/bundle/web/public" \
+            "${WORKSPACE_TARGET}/dx/${DX_PKG}/bundle/web"; do
             if [ -d "$candidate" ] && [ -n "$(ls -A "$candidate" 2>/dev/null)" ]; then
               src="$candidate"
               break
             fi
           done
 
-          # Last-ditch fallback: find any `index.html` that dx wrote
-          # under `target/dx/` and use its parent directory. Picks up
-          # any future default layout change without another code
-          # change here.
-          if [ -z "$src" ] && [ -d "../../target/dx" ]; then
-            idx=$(find ../../target/dx -name index.html -print -quit 2>/dev/null || true)
+          # Fallback: find any `index.html` that dx wrote anywhere
+          # under `target/dx/` and use its parent. Catches future dx
+          # layout changes without another workflow edit.
+          if [ -z "$src" ] && [ -d "${WORKSPACE_TARGET}/dx" ]; then
+            idx=$(find "${WORKSPACE_TARGET}/dx" -name index.html -print -quit 2>/dev/null || true)
             if [ -n "$idx" ]; then
               src=$(dirname "$idx")
             fi
           fi
 
           if [ -z "$src" ]; then
-            echo "::error::Could not locate dx build output under target/dx/." >&2
-            echo "Directory tree (first 60 lines):" >&2
-            find ../../target/dx -maxdepth 8 2>/dev/null | head -60 >&2 || true
+            echo "::error::Could not locate dx build output under ${WORKSPACE_TARGET}/dx/." >&2
+            echo "Directory tree (first 80 lines):" >&2
+            find "${WORKSPACE_TARGET}/dx" -maxdepth 8 2>/dev/null | head -80 >&2 || true
             exit 1
           fi
 
