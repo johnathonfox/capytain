@@ -13,8 +13,8 @@
 //!
 //! All three panes are driven by global signals (selected account,
 //! selected folder, selected message). Data comes from Tauri commands
-//! over the `window.__TAURI__.core.invoke` bridge; HTML rendering via
-//! Servo arrives in Week 6.
+//! over the `window.__TAURI_INTERNALS__.invoke` bridge; HTML
+//! rendering via Servo arrives in Week 6.
 
 use capytain_ipc::{
     Account, AccountId, Folder, FolderId, MessageHeaders, MessageId, MessagePage, RenderedMessage,
@@ -26,9 +26,15 @@ use wasm_bindgen::prelude::*;
 
 // ---------- Tauri bridge ----------
 
+// `window.__TAURI_INTERNALS__.invoke` is the stable IPC hook Tauri 2
+// exposes on every window without configuration. The `window.__TAURI__`
+// convenience namespace is only bound when `app.withGlobalTauri: true`
+// is set in `tauri.conf.json`, which we don't enable — so reach for the
+// internal hook directly. This is exactly what `@tauri-apps/api`'s
+// `invoke()` wraps under the hood.
 #[wasm_bindgen(inline_js = r#"
     export async function coreInvoke(cmd, args) {
-        return await window.__TAURI__.core.invoke(cmd, args);
+        return await window.__TAURI_INTERNALS__.invoke(cmd, args);
     }
 "#)]
 extern "C" {
