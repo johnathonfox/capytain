@@ -31,7 +31,9 @@ capytain-telemetry = { workspace = true }
 async-trait = { workspace = true }
 directories = { workspace = true }
 serde = { workspace = true }
-tauri = { workspace = true }
+# `devtools` feature enables Ctrl+Shift+I in the WebView even on
+# release builds. Phase 0 preview only — strip before going public.
+tauri = { workspace = true, features = ["devtools"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
