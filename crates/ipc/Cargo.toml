@@ -11,5 +11,15 @@ repository.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+[dependencies]
+capytain-auth = { workspace = true }
+capytain-core = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
 [lints]
 workspace = true

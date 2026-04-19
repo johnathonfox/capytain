@@ -36,9 +36,30 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # macOS / Linux
 
 ### 2. Install platform build dependencies
 
-- **macOS** — Xcode command-line tools: `xcode-select --install`.
-- **Windows** — Visual Studio 2022 with "Desktop development with C++" workload (needed for the MSVC linker).
-- **Linux** — Debian/Ubuntu: `sudo apt install build-essential libssl-dev pkg-config`. Additional deps for the Phase 0 Week 5 Tauri shell (`libwebkit2gtk-4.1-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`) are only required once you build `apps/desktop`; you don't need them to `cargo test --workspace`.
+- **macOS** — Xcode command-line tools: `xcode-select --install`. WKWebView (the webview Tauri uses) ships with the OS.
+- **Windows** — Visual Studio 2022 with "Desktop development with C++" workload (needed for the MSVC linker). WebView2 Evergreen Runtime ships with Windows 11; on Windows 10 install it from Microsoft if not already present.
+- **Linux** — Debian/Ubuntu: `sudo apt install build-essential libssl-dev pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev`. Other distros: install the equivalent WebKit2GTK 4.1 + GTK 3 + AppIndicator3 + librsvg development packages. Tauri pulls these in through `cargo check`; you need them to build `apps/desktop/src-tauri`, not just to run it.
+
+### 2a. Install Tauri and Dioxus CLIs
+
+Only needed for running the desktop app; not required for `cargo test --workspace`.
+
+```sh
+cargo install tauri-cli --version '^2'   # `cargo tauri dev`, `cargo tauri build`
+cargo install dioxus-cli                 # `dx serve`, `dx build --platform web`
+```
+
+Running the app in dev mode:
+
+```sh
+# Terminal 1 — build + watch the Dioxus UI, emits to apps/desktop/ui/dist/
+cd apps/desktop/ui && dx serve --platform web
+
+# Terminal 2 — launch the Tauri shell, which serves apps/desktop/ui/dist/
+cd apps/desktop/src-tauri && cargo tauri dev
+```
+
+Hot reload works for UI changes (`dx` re-emits, Tauri picks it up). Core Rust changes require restarting `cargo tauri dev`.
 
 ### 3. Clone and check
 

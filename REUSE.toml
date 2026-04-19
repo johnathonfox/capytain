@@ -50,3 +50,29 @@ path = [
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Capytain Contributors"
 SPDX-License-Identifier = "Apache-2.0"
+
+# Tauri configuration JSON and Dioxus HTML/CSS entrypoints. JSON files
+# have no comment syntax so REUSE metadata can't ride inline; HTML/CSS
+# files carry inline SPDX headers but we add the copyright attribution
+# here to keep file fronts uncluttered.
+[[annotations]]
+path = [
+    "apps/desktop/src-tauri/tauri.conf.json",
+    "apps/desktop/src-tauri/capabilities/**.json",
+    "apps/desktop/ui/index.html",
+    "apps/desktop/ui/assets/**.css",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Capytain Contributors"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Placeholder application icons. Generated programmatically during Phase
+# 0 Week 5 scaffolding; binary assets so REUSE metadata rides here rather
+# than inline. Real icons land with the visual design pass in Phase 1.
+[[annotations]]
+path = [
+    "apps/desktop/src-tauri/icons/**",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Capytain Contributors"
+SPDX-License-Identifier = "Apache-2.0"
