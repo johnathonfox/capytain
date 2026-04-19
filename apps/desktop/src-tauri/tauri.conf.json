@@ -21,7 +21,8 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' ipc: https://ipc.localhost; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:;"
+      "_note": "CSP temporarily disabled for Phase 0 preview diagnostics. v0.0.0-preview.4 launched to a blank window on Windows, most likely because the previous CSP was missing 'wasm-unsafe-eval' and WebView2 silently blocked the Dioxus WASM bundle. Setting csp=null rules CSP out entirely as a suspect; we'll pin a proper script-src / wasm-unsafe-eval / connect-src policy once we confirm the bundle otherwise renders.",
+      "csp": null
     }
   },
   "bundle": {
