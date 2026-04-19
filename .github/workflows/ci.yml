@@ -16,7 +16,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Windows-only for now, matching `release.yml`. macOS and Linux
+        # entries are preserved here as comments so re-enabling is a
+        # minimal diff once the Windows release path is proven and the
+        # cross-platform `cargo tauri build` failure is diagnosed.
+        #   os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -26,7 +31,9 @@ jobs:
       # Tauri 2 pulls webkit2gtk + friends on Linux. These aren't on the
       # GitHub ubuntu-latest image by default, so install them before
       # the cargo steps. macOS (WKWebView) and Windows (WebView2
-      # Evergreen Runtime) ship what Tauri needs out of the box.
+      # Evergreen Runtime) ship what Tauri needs out of the box. The
+      # `if` guard keeps this a no-op under the current Windows-only
+      # matrix; when Linux rejoins, it fires automatically.
       - name: Install Tauri Linux dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -41,7 +48,6 @@ jobs:
             pkg-config
       - name: Format
         run: cargo fmt --all --check
-        if: matrix.os == 'ubuntu-latest'
       - name: Clippy
         run: cargo clippy --workspace --all-targets
       - name: Test
