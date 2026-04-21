@@ -8,17 +8,20 @@
 //! UI rides in Tauri's webview and calls these commands over the
 //! standard `invoke` bridge.
 //!
-//! # Runtime shape (Phase 0 Week 5 part 1)
+//! # Runtime shape (Phase 0 Week 5–6)
 //!
 //! - Tauri owns the event loop and the tokio runtime (via its built-in
 //!   `tauri::async_runtime`).
 //! - On `setup`, we resolve the OS data directory with `directories`,
 //!   open the database, run pending migrations, and hand the handle to
-//!   [`AppState`].
-//! - A single command — `accounts_list` — is registered as the proof of
-//!   life. The rest of `COMMANDS.md` lands in Week 5 part 2.
+//!   [`AppState`]. Then — when the `servo` feature is on (default for
+//!   Linux / macOS) — we build the auxiliary reader window and attach
+//!   the Servo-backed `EmailRenderer` to it. That has to happen on the
+//!   main thread, where the Tauri `setup` hook runs.
 
 mod commands;
+#[cfg(feature = "servo")]
+mod renderer_bridge;
 mod state;
 
 use std::path::PathBuf;
@@ -39,6 +42,22 @@ fn main() {
         eprintln!("capytain-telemetry: {e}");
     }
 
+    // Install a rustls `CryptoProvider` before any TLS traffic starts.
+    // With the `servo` feature on, both `ring` and `aws-lc-rs` end up
+    // in the dep graph (Servo's hyper-rustls and our keyring /
+    // tokio-rustls pull them in respectively); rustls then refuses to
+    // auto-pick and panics at the first HTTPS handshake — see
+    // docs/week-6-day-2-notes.md. Explicitly installing `ring` keeps
+    // the desktop app consistent with the rest of the workspace.
+    if rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_err()
+    {
+        // An earlier call already installed a provider. That's fine;
+        // we don't want to panic on hot-reload or double-init.
+        tracing::debug!("rustls CryptoProvider was already installed; continuing");
+    }
+
     tauri::Builder::default()
         .setup(|app| {
             // Resolve data dir + open DB on the Tauri async runtime so
@@ -51,6 +70,14 @@ fn main() {
             let state = tauri::async_runtime::block_on(bootstrap_state())
                 .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             app.manage(state);
+
+            // Install the Servo renderer once state is live. The
+            // renderer attaches to an auxiliary "servo-reader" window
+            // and stays on the main thread for its entire lifetime;
+            // all trait calls marshal via `TauriDispatcher`.
+            #[cfg(feature = "servo")]
+            renderer_bridge::install_servo_renderer(app)?;
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -58,6 +85,7 @@ fn main() {
             commands::folders::folders_list,
             commands::messages::messages_list,
             commands::messages::messages_get,
+            commands::reader::reader_render,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Capytain");
