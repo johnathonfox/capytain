@@ -284,14 +284,20 @@ surfman vendored dep — the embedder API doesn't give us a hook to
 attach acquire points. No workaround found within the session's
 budget.
 
-**Workarounds tried, none successful:**
+**Workarounds tried:**
 
 | Try | Result |
 |---|---|
 | `GDK_BACKEND=x11` (force XWayland) | Tauri plain `Window`'s raw `display_handle()` returns "handle not available" under XWayland — Servo renderer silently disables, app runs without the reader pane |
-| `LIBGL_ALWAYS_SOFTWARE=1` | NVIDIA's EGL-Wayland driver ignores it; same protocol error |
+| `LIBGL_ALWAYS_SOFTWARE=1` alone | NVIDIA's EGL-Wayland driver ignores it; same protocol error |
 | Plain `tauri::window::WindowBuilder` (under `unstable` feature) instead of a second webkit2gtk-backed `WebviewWindow` | Same error (confirms it's not webkit2gtk + servo fighting; it's servo + the compositor itself) |
 | `reader_window.show()` before querying `display_handle` | No change on Wayland; no help on XWayland either |
+| `MESA_LOADER_DRIVER_OVERRIDE=llvmpipe LIBGL_ALWAYS_SOFTWARE=1 __GLX_VENDOR_LIBRARY_NAME=mesa __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json` | **Bypasses the wp_linux_drm_syncobj protocol error** (forces Mesa llvmpipe software GL instead of the NVIDIA EGL-Wayland path). Servo installs cleanly and the app survives in headless cargo runs. On an interactive desktop the Servo reader window appears briefly and then exits — possibly a follow-up issue, not chased in this session. Useful as a diagnostic: confirms the crash is NVIDIA-specific, not a generic Servo-on-Wayland failure. |
+
+The llvmpipe workaround narrows the diagnosis: the wp_linux_drm_syncobj
+protocol error lives specifically in surfman's NVIDIA EGL-Wayland
+initialization path. An Intel or AMD Wayland host likely just works
+without any of this.
 
 ### Environments likely to avoid the bug
 
