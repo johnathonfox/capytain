@@ -16,25 +16,31 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Windows-only for now, matching `release.yml`. macOS and Linux
-        # entries are preserved here as comments so re-enabling is a
-        # minimal diff once the Windows release path is proven and the
-        # cross-platform `cargo tauri build` failure is diagnosed.
-        #   os: [ubuntu-latest, macos-latest, windows-latest]
-        os: [windows-latest]
+        # Linux joins Windows now that the Phase 0 Week 6 Servo-backed
+        # renderer has a validated Linux path (see Day 2 PR and
+        # docs/servo-composition.md). macOS is deliberately left out:
+        # the macOS renderer was written without Mac hardware and is
+        # marked UNVERIFIED — adding a macOS job now would publish
+        # green ticks we can't trust. It rejoins after a Mac-hardware
+        # session validates `new_macos`. Servo-on-Windows is a separate
+        # PR; for now the Windows job excludes capytain-renderer from
+        # the workspace build and verifies the crate's no-servo path
+        # still compiles there.
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # Tauri 2 pulls webkit2gtk + friends on Linux. These aren't on the
-      # GitHub ubuntu-latest image by default, so install them before
-      # the cargo steps. macOS (WKWebView) and Windows (WebView2
-      # Evergreen Runtime) ship what Tauri needs out of the box. The
-      # `if` guard keeps this a no-op under the current Windows-only
-      # matrix; when Linux rejoins, it fires automatically.
-      - name: Install Tauri Linux dependencies
+
+      # Tauri 2 needs webkit2gtk + friends on Linux; Servo 0.1.0 additionally
+      # needs cmake, clang, fontconfig / freetype / harfbuzz, gstreamer, and
+      # libssl (see docs/servo-composition.md §7). macOS (WKWebView) and
+      # Windows (WebView2 Evergreen Runtime) ship what Tauri needs out of
+      # the box for the *system* webview; Servo on Windows is out of scope
+      # for this PR, so the Windows job deliberately skips Servo build deps.
+      - name: Install Tauri + Servo Linux dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
@@ -45,13 +51,51 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libssl-dev \
-            pkg-config
+            pkg-config \
+            cmake \
+            clang \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libharfbuzz-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            libglib2.0-dev
+
       - name: Format
         run: cargo fmt --all --check
-      - name: Clippy
+
+      # Linux: full workspace build including capytain-renderer's
+      # `servo` feature (default-on).
+      - name: Clippy (Linux — full workspace)
+        if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --workspace --all-targets
-      - name: Test
+      - name: Test (Linux — full workspace)
+        if: matrix.os == 'ubuntu-latest'
         run: cargo test --workspace
+      - name: Check capytain-renderer with servo feature (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo check -p capytain-renderer --features servo
+
+      # Windows: everything except capytain-renderer, which pulls in
+      # Servo's 10+ GB native-dep tree (cmake / clang-cl / SpiderMonkey /
+      # gstreamer) we haven't wired up for Windows yet. Servo on Windows
+      # is tracked as follow-up work.
+      - name: Clippy (Windows — workspace minus capytain-renderer)
+        if: matrix.os == 'windows-latest'
+        run: cargo clippy --workspace --exclude capytain-renderer --all-targets
+      - name: Test (Windows — workspace minus capytain-renderer)
+        if: matrix.os == 'windows-latest'
+        run: cargo test --workspace --exclude capytain-renderer
+      # Even without Servo, downstream crates depend on `capytain-renderer`
+      # (via the trait seam); make sure its `default-features = false`
+      # build path still compiles on Windows so those downstream depend-on
+      # chains don't break.
+      - name: Check capytain-renderer without servo (Windows)
+        if: matrix.os == 'windows-latest'
+        run: cargo check -p capytain-renderer --no-default-features
 
   deny:
     name: cargo-deny
