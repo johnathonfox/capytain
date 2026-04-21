@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "capytain-renderer"
+description = "Servo-backed implementation of the EmailRenderer trait."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[features]
+# Compile the Servo-backed renderer. When off, the crate compiles to an empty
+# library — the workspace still builds without Servo's platform toolchain
+# installed. Phase 0 Week 6 Days 2-4 land the real implementation behind this
+# flag.
+default = []
+servo = []
+
+[dependencies]
+capytain-core = { workspace = true }
+url = { workspace = true }
+
+[lints]
+workspace = true

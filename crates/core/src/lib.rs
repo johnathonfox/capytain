@@ -14,9 +14,8 @@
 //! - [`message`] — `EmailAddress`, `MessageFlags`, `MessageHeaders`,
 //!   `MessageBody`, `Attachment`.
 //! - [`sync_state`] — [`SyncState`] (opaque per-folder sync cursor).
-//!
-//! Traits that depend on async runtimes (`MailBackend`, `EmailRenderer`) land
-//! in a later Phase 0 week alongside the crates that implement them.
+//! - [`renderer`] — [`EmailRenderer`] trait and [`NullRenderer`] test double.
+//!   The Servo-backed implementation lives in `capytain-renderer`.
 
 pub mod account;
 pub mod error;
@@ -24,6 +23,7 @@ pub mod folder;
 pub mod ids;
 pub mod mail_backend;
 pub mod message;
+pub mod renderer;
 pub mod sync_state;
 
 pub use account::{Account, BackendKind};
@@ -32,4 +32,5 @@ pub use folder::{Folder, FolderRole};
 pub use ids::{AccountId, AttachmentRef, DraftId, FolderId, MessageId, ThreadId};
 pub use mail_backend::{BackendEvent, MailBackend, MessageList};
 pub use message::{Attachment, EmailAddress, MessageBody, MessageFlags, MessageHeaders};
+pub use renderer::{ColorScheme, EmailRenderer, NullRenderer, RenderHandle, RenderPolicy};
 pub use sync_state::SyncState;
