@@ -65,6 +65,16 @@ webbrowser = "1"
 webpki-roots = "1"
 zstd = { version = "0.13", default-features = false }
 
+# Servo + friends — behind the `servo` feature on `capytain-renderer`.
+# servo 0.1.0 (2026-04-13) has no `lts` feature; the crate is versioned 0.1.0
+# and tracks semver. docs/servo-composition.md §8 called verifying the LTS
+# feature name an open question; resolved: there isn't one. Pin `~0.1.0`
+# (compatible updates only) so the half-yearly migration windows envisioned
+# in §8 still apply, via cargo's SemVer caret default on 0.x.
+servo = "0.1"
+raw-window-handle = "0.6"
+dpi = "0.1"
+
 # Dev-only: property-testing for the storage layer round-trip suite.
 proptest = "1"
 
