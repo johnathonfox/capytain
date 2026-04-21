@@ -25,6 +25,7 @@ servo = [
     "dep:dpi",
     "dep:tracing",
     "dep:url",
+    "dep:thiserror",
 ]
 
 [dependencies]
@@ -36,6 +37,7 @@ raw-window-handle = { workspace = true, optional = true }
 dpi = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
 
 [lints]
 workspace = true

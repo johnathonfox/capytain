@@ -1240,6 +1240,7 @@ dependencies = [
  "dpi",
  "raw-window-handle",
  "servo",
+ "thiserror 2.0.18",
  "tracing",
  "url",
 ]

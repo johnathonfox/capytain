@@ -4,20 +4,23 @@
 //!
 //! # Status
 //!
-//! Pre-spike. The trait definition and test double ([`capytain_core::NullRenderer`])
-//! are stable, but the Servo-backed implementation is still under construction —
-//! Phase 0 Week 6 Days 2-4.
+//! Phase 0 Week 6 Day 2. The Linux embedding is validated on real hardware;
+//! the macOS embedding is written to the design doc but unverified (the
+//! implementer did not have a Mac). Windows lands in a follow-up PR.
 //!
-//! See `docs/servo-composition.md` at the repo root for the pre-spike design,
-//! including the current understanding of Servo's embedding API surface, the
-//! three platform integration points (macOS `NSView`, Windows `HWND`, Linux
-//! GTK widget), and the known pitfalls.
+//! See `docs/servo-composition.md` for the pre-spike design — the three
+//! platform integration points, the Servo 0.1.0 API surface we exercise,
+//! and the known footguns documented in §6 (paint contract,
+//! `surfman::error::Error` not implementing `std::error::Error`, thread
+//! affinity on the main thread, etc.).
 //!
 //! # Feature flags
 //!
-//! - `servo` (off by default): compile the real Servo-backed renderer. When
-//!   off, this crate exports nothing — consumers fall back to
-//!   [`capytain_core::NullRenderer`] for tests and CLI paths.
+//! - `servo` (default on): compile the real Servo-backed renderer. When
+//!   off, this crate re-exports [`capytain_core::NullRenderer`] so
+//!   downstream crates that consume `capytain-renderer` still have a
+//!   working [`EmailRenderer`](capytain_core::EmailRenderer) without
+//!   needing the Servo native toolchain installed.
 
 #![cfg_attr(not(feature = "servo"), allow(dead_code))]
 
@@ -25,7 +28,7 @@
 mod servo;
 
 #[cfg(feature = "servo")]
-pub use servo::ServoRenderer;
+pub use servo::{MainThreadDispatch, RendererError, ServoRenderer};
 
 // When the `servo` feature is off, we re-export the null renderer so
 // downstream crates can depend on `capytain-renderer` and still have a
