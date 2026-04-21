@@ -33,20 +33,15 @@ use capytain_core::{AccountId, FolderId, MessageId, StorageError};
 pub const DEFAULT_COMPRESSION_LEVEL: i32 = 3;
 
 /// How to lay bytes down on disk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Compression {
     /// zstd compression at [`DEFAULT_COMPRESSION_LEVEL`]. Default for new
     /// blob stores.
+    #[default]
     Zstd,
     /// No compression; raw RFC 822 bytes. Useful for tests and debug
     /// inspection.
     None,
-}
-
-impl Default for Compression {
-    fn default() -> Self {
-        Self::Zstd
-    }
 }
 
 /// On-disk blob store rooted at a user-supplied directory.

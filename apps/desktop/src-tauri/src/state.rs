@@ -3,8 +3,11 @@
 //! Shared runtime state for the Tauri shell.
 //!
 //! `AppState` owns the long-lived handles every command needs: the
-//! Turso-backed [`capytain_storage::TursoConn`] for persistence and a
-//! per-account cache of live [`MailBackend`] implementations.
+//! Turso-backed [`capytain_storage::TursoConn`] for persistence, a
+//! per-account cache of live [`MailBackend`] implementations, and
+//! — when the `servo` feature is on and the platform supports it —
+//! the Servo-backed [`EmailRenderer`] attached to a secondary Tauri
+//! window (the reader pane).
 //!
 //! The backend cache is lazily populated — a `MailBackend` is built and
 //! logged in the first time a command actually reaches out to the
@@ -15,7 +18,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use capytain_core::{AccountId, MailBackend};
+use capytain_core::{AccountId, EmailRenderer, MailBackend};
 use capytain_storage::TursoConn;
 use tokio::sync::Mutex;
 
@@ -38,16 +41,31 @@ pub struct AppState {
     /// and kept here so commands don't recompute it.
     #[allow(dead_code)] // consumed by later commands in week 5 part 2
     pub data_dir: PathBuf,
+
+    /// Servo-backed email renderer, if the platform supports it. `None`
+    /// when the `servo` feature is off (fallback path for environments
+    /// without the Servo native toolchain) or when `new_linux` /
+    /// `new_macos` failed at startup (e.g. unsupported window handle
+    /// variant). Consumers MUST handle the `None` case — degrade the
+    /// reader pane rather than crashing.
+    ///
+    /// Wrapped in `tokio::sync::Mutex` even though the renderer is
+    /// `Send + Sync`: trait methods take `&mut self`, so exclusive
+    /// access is required.
+    pub servo_renderer: Mutex<Option<Box<dyn EmailRenderer>>>,
 }
 
 impl AppState {
     /// Build an `AppState` given an already-opened database and the
-    /// resolved data directory.
+    /// resolved data directory. The renderer slot starts empty;
+    /// `main::setup` installs the real renderer once the Tauri window
+    /// exists and its raw handle can be queried.
     pub fn new(db: TursoConn, data_dir: PathBuf) -> Self {
         Self {
             db: Arc::new(Mutex::new(db)),
             backends: Mutex::new(HashMap::new()),
             data_dir,
+            servo_renderer: Mutex::new(None),
         }
     }
 }

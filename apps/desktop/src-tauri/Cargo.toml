@@ -19,6 +19,14 @@ path = "src/main.rs"
 [build-dependencies]
 tauri-build = { workspace = true }
 
+[features]
+# `servo` controls whether the Servo-backed renderer is linked into
+# the desktop app. Default-on so `cargo build -p capytain-desktop`
+# produces the real reader pane on Linux / macOS; turn off for a
+# stubbed build (e.g. Windows CI until Servo-on-Windows lands).
+default = ["servo"]
+servo = ["capytain-renderer/servo"]
+
 [dependencies]
 capytain-auth = { workspace = true }
 capytain-core = { workspace = true }
@@ -28,8 +36,15 @@ capytain-jmap-client = { workspace = true }
 capytain-mime = { workspace = true }
 capytain-storage = { workspace = true }
 capytain-telemetry = { workspace = true }
+# The workspace-level decl sets `default-features = false`; desktop
+# re-enables renderer's `servo` via its OWN `[features]` table so a
+# `cargo build -p capytain-desktop --no-default-features` cleanly
+# drops Servo (Windows CI path).
+capytain-renderer = { workspace = true }
 async-trait = { workspace = true }
 directories = { workspace = true }
+dpi = { workspace = true }
+raw-window-handle = { workspace = true }
 serde = { workspace = true }
 # `devtools` feature enables Ctrl+Shift+I in the WebView even on
 # release builds. Phase 0 preview only — strip before going public.

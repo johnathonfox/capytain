@@ -13,12 +13,19 @@ publish.workspace = true
 
 [features]
 # `servo` enables the native Servo-backed `EmailRenderer` implementation.
-# Default-on so the desktop app gets the real renderer without extra feature
-# flags. Turning it off leaves `capytain-renderer` as an empty library, which
-# is useful for downstream crates that depend on the trait via
-# `capytain-core` only and want to avoid the Servo toolchain (cmake, clang,
-# gstreamer, ~15 GB of build artifacts — see `docs/servo-composition.md` §7).
-default = ["servo"]
+# Kept OFF by default at the renderer level so `cargo check --workspace`
+# on a machine without the Servo toolchain still succeeds. The desktop
+# app (`apps/desktop/src-tauri`) enables this feature unconditionally
+# via a dep-level `features = ["servo"]`, so end users still get the
+# real renderer without passing any extra flags.
+#
+# Turning the feature off leaves `capytain-renderer` as an empty library
+# that re-exports `capytain_core::NullRenderer`, which is useful for:
+# (a) downstream crates that depend on the trait via `capytain-core`
+# only and want to avoid Servo's cmake / clang / gstreamer / ~15 GB
+# build-artifact toolchain (see `docs/servo-composition.md` §7), and
+# (b) Windows CI until Servo-on-Windows lands as a follow-up PR.
+default = []
 servo = [
     "dep:servo",
     "dep:raw-window-handle",

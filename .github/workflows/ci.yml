@@ -23,9 +23,10 @@ jobs:
         # marked UNVERIFIED — adding a macOS job now would publish
         # green ticks we can't trust. It rejoins after a Mac-hardware
         # session validates `new_macos`. Servo-on-Windows is a separate
-        # PR; for now the Windows job excludes capytain-renderer from
-        # the workspace build and verifies the crate's no-servo path
-        # still compiles there.
+        # PR; for now the Windows job excludes `capytain-renderer` and
+        # `capytain-desktop` from the workspace build (because they
+        # pull in Servo's toolchain) and verifies their no-servo paths
+        # explicitly.
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
@@ -67,9 +68,9 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
-      # Linux: full workspace build including capytain-renderer's
-      # `servo` feature (default-on).
-      - name: Clippy (Linux — full workspace)
+      # --- Linux path: full build with Servo enabled everywhere ---
+
+      - name: Clippy (Linux — full workspace, Servo on)
         if: matrix.os == 'ubuntu-latest'
         run: cargo clippy --workspace --all-targets
       - name: Test (Linux — full workspace)
@@ -79,23 +80,24 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo check -p capytain-renderer --features servo
 
-      # Windows: everything except capytain-renderer, which pulls in
-      # Servo's 10+ GB native-dep tree (cmake / clang-cl / SpiderMonkey /
-      # gstreamer) we haven't wired up for Windows yet. Servo on Windows
-      # is tracked as follow-up work.
-      - name: Clippy (Windows — workspace minus capytain-renderer)
+      # --- Windows path: workspace minus Servo-toolchain consumers,
+      # then each excluded crate checked in its no-servo shape ---
+
+      - name: Clippy (Windows — workspace minus Servo consumers)
         if: matrix.os == 'windows-latest'
-        run: cargo clippy --workspace --exclude capytain-renderer --all-targets
-      - name: Test (Windows — workspace minus capytain-renderer)
+        run: cargo clippy --workspace --all-targets --exclude capytain-renderer --exclude capytain-desktop
+      - name: Test (Windows — workspace minus Servo consumers)
         if: matrix.os == 'windows-latest'
-        run: cargo test --workspace --exclude capytain-renderer
-      # Even without Servo, downstream crates depend on `capytain-renderer`
-      # (via the trait seam); make sure its `default-features = false`
-      # build path still compiles on Windows so those downstream depend-on
-      # chains don't break.
-      - name: Check capytain-renderer without servo (Windows)
+        run: cargo test --workspace --exclude capytain-renderer --exclude capytain-desktop
+      - name: Clippy capytain-renderer without servo (Windows)
         if: matrix.os == 'windows-latest'
-        run: cargo check -p capytain-renderer --no-default-features
+        run: cargo clippy -p capytain-renderer --no-default-features --all-targets
+      - name: Clippy capytain-desktop without servo (Windows)
+        if: matrix.os == 'windows-latest'
+        run: cargo clippy -p capytain-desktop --no-default-features --all-targets
+      - name: Test capytain-desktop without servo (Windows)
+        if: matrix.os == 'windows-latest'
+        run: cargo test -p capytain-desktop --no-default-features
 
   deny:
     name: cargo-deny
