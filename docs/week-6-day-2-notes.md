@@ -241,17 +241,89 @@ to stop `--exclude`ing `capytain-renderer` / `capytain-desktop`.
 
 ## Validation status (Linux — this session)
 
-- Target display server for validation: **Wayland** (`wayland-0`),
-  on a CachyOS / Linux 7.0.0 kernel box.
-- **Runtime validation is gated on having `cmake` installed** for
-  `mozjs_sys` / SpiderMonkey's build.rs. `cargo check` and `cargo
-  test` both pass without `cmake` because neither runs the SpiderMonkey
-  native link step; `cargo build --release` is where the tree actually
-  exercises that. This is a one-command fix on the validating host
-  (`sudo pacman -S cmake` on CachyOS / Arch) — but it's worth
-  calling out here so subsequent sessions don't hit the same wall.
-- Whatever display server ends up validating the build — Wayland or
-  X11 — should get documented in the PR description that lands this
-  work, not here. Both should work; surfman abstracts the difference.
-- X11 path: untested; confirm on an X11 host before trusting the
-  "works on both" claim.
+- Target box: CachyOS / Linux 7.0.0 on **Wayland** (`wayland-0`),
+  NVIDIA GeForce RTX 5070 Ti with proprietary driver 595.58.03.
+- `cmake` turned out NOT to be needed — `mozjs_sys` 0.140.8-2 ships a
+  bundled build system that works without it on our host. (Earlier
+  draft of this doc worried about cmake; keeping the worry recorded
+  so the next session knows it was a red herring and not a landmine.)
+
+### What works end-to-end
+
+- `cargo check --workspace`, `cargo clippy --workspace --all-targets
+  -- -D warnings`, `cargo fmt --all --check`, `cargo test --workspace`,
+  `reuse lint` — all green.
+- `cargo build --release -p capytain-desktop` — succeeds, ~2m17s on
+  a 32-core box after cache is warm.
+- App boot: database opens, migrations run, Tauri event loop starts,
+  WebRender initializes on the NVIDIA GPU, Servo engine constructs,
+  `capytain-desktop: Servo renderer installed` fires from
+  `renderer_bridge::install_servo_renderer`. **The entire code path
+  through trait construction is exercised.**
+
+### What doesn't — the Wayland explicit-sync bug
+
+Immediately after "Servo renderer installed", the app dies with:
+
+```
+[Display Queue] wl_display#1.error(wp_linux_drm_syncobj_surface_v1#48, 4,
+    "explicit sync is used, but no acquire point is set")
+Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display.
+```
+
+Exit code 1, typically within 50ms of the renderer install log. The
+diagnosis is straightforward: Servo 0.1.0 (via surfman via the
+NVIDIA EGL-Wayland backend) subscribes to the
+`wp_linux_drm_syncobj_surface_v1` explicit-synchronization protocol
+for the surface we pass it, but doesn't set an acquire point on the
+first commit. The Wayland compositor catches this protocol
+violation and disconnects, at which point Gdk exits the process.
+
+This is almost certainly an upstream bug in Servo 0.1.0 or its
+surfman vendored dep — the embedder API doesn't give us a hook to
+attach acquire points. No workaround found within the session's
+budget.
+
+**Workarounds tried, none successful:**
+
+| Try | Result |
+|---|---|
+| `GDK_BACKEND=x11` (force XWayland) | Tauri plain `Window`'s raw `display_handle()` returns "handle not available" under XWayland — Servo renderer silently disables, app runs without the reader pane |
+| `LIBGL_ALWAYS_SOFTWARE=1` | NVIDIA's EGL-Wayland driver ignores it; same protocol error |
+| Plain `tauri::window::WindowBuilder` (under `unstable` feature) instead of a second webkit2gtk-backed `WebviewWindow` | Same error (confirms it's not webkit2gtk + servo fighting; it's servo + the compositor itself) |
+| `reader_window.show()` before querying `display_handle` | No change on Wayland; no help on XWayland either |
+
+### Environments likely to avoid the bug
+
+Not tested in this session, but worth trying next:
+
+- Intel or AMD GPU on Wayland — these platforms often skip explicit
+  sync entirely. The bug may be NVIDIA-specific.
+- A real X11 desktop (not XWayland) — lets surfman use GLX and bypass
+  the entire DRM-syncobj protocol.
+- Downgrading to a compositor that doesn't enforce the protocol. A
+  non-starter for a user-facing app but useful as a local-dev
+  diagnostic.
+
+### Escalation path
+
+Per design doc §10 go/no-go: "The spike is 'no-go' if … `Window
+RenderingContext` API doesn't actually support a child-surface
+model on one or more platforms." What we've hit is more narrow —
+the API works, the compositor interaction doesn't — but the effect
+is the same.
+
+Recommended next steps, in priority order:
+
+1. **Reproduce on a non-NVIDIA Linux machine** (Intel/AMD/Wayland or
+   any X11) to confirm the bug is hardware-specific rather than
+   architectural. If it works there, the Servo path stays.
+2. **File an upstream Servo issue** against 0.1.0 with the protocol
+   error and a minimal reproducer. The fix almost certainly lives
+   in surfman's Wayland backend.
+3. **If 1 + 2 stall**, fall back to the `TauriWebviewRenderer`
+   second-`EmailRenderer`-impl path from design doc §10. The trait
+   was shaped for exactly this swap; the work already in this PR
+   (scaffolding, delegate, state, dispatch, CI) stays valuable
+   because it's the reference implementation of the trait on a
+   real native rendering engine.

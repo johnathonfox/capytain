@@ -1174,6 +1174,7 @@ dependencies = [
  "directories",
  "dpi",
  "raw-window-handle",
+ "rustls",
  "serde",
  "tauri",
  "tauri-build",

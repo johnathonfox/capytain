@@ -42,6 +42,22 @@ fn main() {
         eprintln!("capytain-telemetry: {e}");
     }
 
+    // Install a rustls `CryptoProvider` before any TLS traffic starts.
+    // With the `servo` feature on, both `ring` and `aws-lc-rs` end up
+    // in the dep graph (Servo's hyper-rustls and our keyring /
+    // tokio-rustls pull them in respectively); rustls then refuses to
+    // auto-pick and panics at the first HTTPS handshake — see
+    // docs/week-6-day-2-notes.md. Explicitly installing `ring` keeps
+    // the desktop app consistent with the rest of the workspace.
+    if rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_err()
+    {
+        // An earlier call already installed a provider. That's fine;
+        // we don't want to panic on hot-reload or double-init.
+        tracing::debug!("rustls CryptoProvider was already installed; continuing");
+    }
+
     tauri::Builder::default()
         .setup(|app| {
             // Resolve data dir + open DB on the Tauri async runtime so

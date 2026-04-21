@@ -65,25 +65,33 @@ pub fn install_servo_renderer<R: Runtime>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_handle = app.handle().clone();
 
-    // Dedicated auxiliary window for the Servo surface. Kept as a
-    // separate OS window — not embedded inside the main Tauri window —
-    // because Servo's `WindowRenderingContext` paints over its target
-    // window's full surface, which would cover the Dioxus chrome in
-    // the main window. Proper in-window child-surface embedding
-    // (§4.3 of the design doc) is tracked in docs/week-6-day-2-notes.md;
-    // this side-by-side arrangement is the honest Day 2 shape.
-    let reader_window = tauri::WebviewWindowBuilder::new(
-        &app_handle,
-        "servo-reader",
-        tauri::WebviewUrl::App("about:blank".into()),
-    )
-    .title("Capytain Reader (Servo)")
-    .inner_size(
-        f64::from(READER_WINDOW_WIDTH),
-        f64::from(READER_WINDOW_HEIGHT),
-    )
-    .resizable(true)
-    .build()?;
+    // Dedicated auxiliary OS window for the Servo surface. **Plain**
+    // `tauri::window::WindowBuilder`, not `WebviewWindowBuilder`: if we
+    // create a second webkit2gtk-backed window here and then attach
+    // Servo's surfman context on top, both GL contexts fight over the
+    // same `wl_surface` and Wayland disconnects with protocol error
+    // 71. The Dioxus chrome stays in the *main* Tauri webview window;
+    // this window is a bare OS surface used exclusively by Servo.
+    //
+    // Kept as a separate OS window rather than embedded inside the
+    // main Tauri window because `WindowRenderingContext` paints over
+    // its target's full surface — §4.3 of the design doc describes
+    // the proper in-window child-widget integration that's deferred
+    // to Phase 1 (see docs/week-6-day-2-notes.md).
+    let reader_window = tauri::window::WindowBuilder::new(&app_handle, "servo-reader")
+        .title("Capytain Reader (Servo)")
+        .inner_size(
+            f64::from(READER_WINDOW_WIDTH),
+            f64::from(READER_WINDOW_HEIGHT),
+        )
+        .resizable(true)
+        .visible(true)
+        .build()?;
+
+    // Ensure the OS window is realized before we query its raw handle —
+    // on X11/XWayland the underlying `Window` handle isn't available
+    // until the window has been mapped at least once.
+    reader_window.show()?;
 
     let dispatcher: Arc<dyn MainThreadDispatch> = TauriDispatcher::new(app_handle.clone());
 
@@ -123,7 +131,7 @@ pub fn install_servo_renderer<R: Runtime>(
 /// body reads linearly regardless of how many platforms we support.
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
 fn build_servo_renderer<R: Runtime>(
-    parent: &tauri::WebviewWindow<R>,
+    parent: &tauri::Window<R>,
     dispatcher: Arc<dyn MainThreadDispatch>,
 ) -> Result<ServoRenderer, Box<dyn std::error::Error>> {
     Ok(ServoRenderer::new_linux(
@@ -135,7 +143,7 @@ fn build_servo_renderer<R: Runtime>(
 
 #[cfg(target_os = "macos")]
 fn build_servo_renderer<R: Runtime>(
-    parent: &tauri::WebviewWindow<R>,
+    parent: &tauri::Window<R>,
     dispatcher: Arc<dyn MainThreadDispatch>,
 ) -> Result<ServoRenderer, Box<dyn std::error::Error>> {
     Ok(ServoRenderer::new_macos(
@@ -152,7 +160,7 @@ fn build_servo_renderer<R: Runtime>(
     target_os = "netbsd"
 )))]
 fn build_servo_renderer<R: Runtime>(
-    _parent: &tauri::WebviewWindow<R>,
+    _parent: &tauri::Window<R>,
     _dispatcher: Arc<dyn MainThreadDispatch>,
 ) -> Result<ServoRenderer, Box<dyn std::error::Error>> {
     Err("Servo renderer is not yet implemented on this platform".into())
