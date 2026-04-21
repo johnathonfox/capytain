@@ -44,7 +44,7 @@ use servo::{
 };
 
 mod delegate;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
