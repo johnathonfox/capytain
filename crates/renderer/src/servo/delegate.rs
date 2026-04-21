@@ -17,8 +17,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use servo::{
-    LoadStatus, NavigationRequest, PermissionRequest, RenderingContext, WebView,
-    WebViewDelegate, WindowRenderingContext,
+    LoadStatus, NavigationRequest, PermissionRequest, RenderingContext, WebView, WebViewDelegate,
+    WindowRenderingContext,
 };
 
 /// Shared slot for the caller-registered link-click callback.
@@ -41,10 +41,7 @@ pub struct CapytainDelegate {
 }
 
 impl CapytainDelegate {
-    pub fn new(
-        rendering_context: Rc<WindowRenderingContext>,
-        link_cb: Arc<Mutex<LinkCb>>,
-    ) -> Self {
+    pub fn new(rendering_context: Rc<WindowRenderingContext>, link_cb: Arc<Mutex<LinkCb>>) -> Self {
         Self {
             rendering_context,
             link_cb,

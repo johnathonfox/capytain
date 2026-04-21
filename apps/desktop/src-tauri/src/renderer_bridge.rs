@@ -97,9 +97,7 @@ pub fn install_servo_renderer<R: Runtime>(
             Box::new(r)
         }
         Err(e) => {
-            tracing::warn!(
-                "capytain-desktop: Servo renderer unavailable on this platform: {e}"
-            );
+            tracing::warn!("capytain-desktop: Servo renderer unavailable on this platform: {e}");
             return Ok(());
         }
     };

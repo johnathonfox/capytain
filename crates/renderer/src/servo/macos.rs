@@ -86,9 +86,8 @@ impl ServoRenderer {
         // `NSView` pointed at by the raw window handle. The renderer
         // does not directly call any AppKit API — all AppKit interaction
         // is internal to surfman / Servo.
-        let rendering_context =
-            WindowRenderingContext::new(display_handle, window_handle, size)
-                .map_err(|e| RendererError::RenderingContext(format!("{e:?}")))?;
+        let rendering_context = WindowRenderingContext::new(display_handle, window_handle, size)
+            .map_err(|e| RendererError::RenderingContext(format!("{e:?}")))?;
         let rendering_context = Rc::new(rendering_context);
 
         let link_cb: Arc<Mutex<LinkCb>> = Arc::new(Mutex::new(None));

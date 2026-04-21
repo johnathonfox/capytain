@@ -39,8 +39,8 @@ use std::sync::{Arc, Mutex};
 
 use capytain_core::{ColorScheme, EmailRenderer, RenderHandle, RenderPolicy};
 use servo::{
-    EventLoopWaker, Preferences, RenderingContext, Servo, ServoBuilder, WebView,
-    WebViewBuilder, WindowRenderingContext,
+    EventLoopWaker, Preferences, RenderingContext, Servo, ServoBuilder, WebView, WebViewBuilder,
+    WindowRenderingContext,
 };
 
 mod delegate;

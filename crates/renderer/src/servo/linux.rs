@@ -70,9 +70,8 @@ impl ServoRenderer {
         // does not `impl Display` either (design doc §6.5 footgun —
         // slightly worse than documented). Wrap via the Debug formatter
         // at the boundary rather than trying to `?` through.
-        let rendering_context =
-            WindowRenderingContext::new(display_handle, window_handle, size)
-                .map_err(|e| RendererError::RenderingContext(format!("{e:?}")))?;
+        let rendering_context = WindowRenderingContext::new(display_handle, window_handle, size)
+            .map_err(|e| RendererError::RenderingContext(format!("{e:?}")))?;
         let rendering_context = Rc::new(rendering_context);
 
         let link_cb: Arc<Mutex<LinkCb>> = Arc::new(Mutex::new(None));
