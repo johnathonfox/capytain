@@ -22,6 +22,30 @@ all-features = true
 version = 2
 yanked = "deny"
 ignore = [
+    # --- Servo-transitive advisories ---
+    #
+    # bincode 1.3.3 — unmaintained (RUSTSEC-2025-0141). Author
+    # deprecated the 1.x series after a harassment incident; upstream
+    # considers 1.3.3 a complete release. Pulled in via `webrender
+    # 0.68` → `servo`. Not a vulnerability, informational only.
+    # Revisit when Servo migrates webrender to a maintained serializer
+    # (postcard / rkyv / bitcode).
+    "RUSTSEC-2025-0141",
+
+    # --- Timing side-channels in Servo-transitive crypto crates ---
+    #
+    # Both advisories are real timing side-channels in cryptographic signing
+    # / key operations, but neither is reachable in Capytain's use of Servo:
+    # `capytain_renderer::servo::apply_reader_pane_preferences` disables
+    # every DOM API (serviceworker, webrtc, webgpu, …) that could let email
+    # content reach WebCrypto's `SubtleCrypto` — the only path the reader
+    # pipeline could exercise these crates through. The sanitizer upstream
+    # also strips `<script>` tags before `render()`, so no DOM JS runs at
+    # all. Revisit if a future phase enables SubtleCrypto in rendered
+    # content.
+    "RUSTSEC-2025-0144", # ml-dsa 0.0.4 — timing side-channel in ML-DSA Decompose
+    "RUSTSEC-2023-0071", # rsa 0.9.10 — Marvin Attack (no safe upgrade upstream)
+
     # paste 1.0.15 — unmaintained (RUSTSEC-2024-0436). Transitive dep pulled
     # in through Turso / clap ancestry. The advisory is informational, not a
     # vulnerability; upstream recommends `pastey` as a drop-in, but we're
@@ -71,7 +95,8 @@ confidence-threshold = 0.93
 
 # The full allow-list. Anything a dependency (or workspace member) declares
 # that is NOT in this list fails the build. GPL / AGPL / SSPL / MPL / LGPL
-# are deliberately absent.
+# are deliberately absent — MPL-2.0 appears instead as per-crate exceptions
+# below, with reviewer sign-off for each.
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
@@ -87,30 +112,128 @@ allow = [
     # Used by webpki-roots (transitive through reqwest/rustls). Permissive,
     # OSI-style, patent grant included.
     "CDLA-Permissive-2.0",
+    # Boost Software License — permissive, OSI-approved, similar scope to
+    # MIT. Pulled in via `clipboard-win` and `error-code` (Windows-only
+    # transitive deps of the Servo stack). Not copyleft.
+    "BSL-1.0",
+    # University of Illinois / NCSA Open Source License — permissive,
+    # OSI-approved, BSD-style. Used by the LLVM project and its satellites;
+    # pulled in via `libfuzzer-sys` through the Servo stack. Not copyleft.
+    "NCSA",
 ]
 
 # Per-crate license exceptions live here when (and only when) a reviewer has
 # signed off on vendoring a copyleft dep. Each entry should be accompanied by
 # a commit message explaining why.
+#
+# Universal MPL-2.0 reasoning for all entries below (§10.2 step 6 per-crate
+# justification): MPL-2.0 is weak, file-level copyleft. We consume each of
+# these crates as an unmodified upstream package (no vendored forks, no
+# local patches). Per MPL-2.0 §1.10 ("Source Code Form") and §3.3
+# ("Distribution of a Modified Version"), an unmodified consumer does not
+# trigger the Modified-Version distribution obligations. Our first-party
+# code stays under Apache-2.0. If we ever vendor a local fork of any of
+# these crates, that specific entry needs re-review — the unmodified-
+# consumer reasoning no longer applies.
 exceptions = [
-    # Transitive dep via `directories` → `dirs-sys`. MPL-2.0 is weak/file-
-    # level copyleft; we ship it as an unmodified dependency crate, which
-    # satisfies the MPL without forcing our own source under it (see
-    # MPL-2.0 §1.10 "Source Code Form" and §3.3 "Distribution of a
-    # Modified Version" — neither triggers here). Revisit if we ever
-    # vendor a modified fork.
+    # --- Pre-Servo MPL-2.0 deps (Phase 0 Week 5, Tauri / Dioxus stack) ---
+
+    # Transitive dep via `directories` → `dirs-sys`.
     { allow = ["MPL-2.0"], crate = "option-ext" },
 
-    # Servo CSS stack — `selectors`, `cssparser`, `cssparser-macros`,
-    # `dtoa-short`. Transitive deps via `wry` → `dom_query` / HTML tree
-    # querying on the Tauri desktop stack. Same MPL-2.0 reasoning as
-    # `option-ext`: shipped as unmodified upstream crates, so MPL's §3.3
-    # (Modified Version distribution) does not reach our source.
-    # Revisit if we ever vendor a fork.
+    # Servo CSS stack consumed through `wry` → `dom_query` / HTML tree
+    # querying on the Tauri desktop stack.
     { allow = ["MPL-2.0"], crate = "selectors" },
     { allow = ["MPL-2.0"], crate = "cssparser" },
     { allow = ["MPL-2.0"], crate = "cssparser-macros" },
     { allow = ["MPL-2.0"], crate = "dtoa-short" },
+
+    # --- Servo 0.1.0 engine and its MPL-2.0-licensed vendored tree ---
+    # Pulled in by `capytain-renderer` (Phase 0 Week 6 Day 2). Every entry
+    # below is a direct or transitive dep of `servo = "0.1"`; the list is
+    # exhaustive against the cargo-deny check at the HEAD of the Day 2
+    # PR — new Servo releases may add or remove crates here, and each
+    # change needs explicit review.
+    #
+    # Sorted alphabetically within the block for easier diff review when
+    # the servo crate bumps.
+    { allow = ["MPL-2.0"], crate = "accountable-refcell" },
+    { allow = ["MPL-2.0"], crate = "app_units" },
+    { allow = ["MPL-2.0"], crate = "dwrote" },
+    { allow = ["MPL-2.0"], crate = "mozjs" },
+    { allow = ["MPL-2.0"], crate = "mozjs_sys" },
+    { allow = ["MPL-2.0"], crate = "plane-split" },
+    { allow = ["MPL-2.0"], crate = "servo" },
+    { allow = ["MPL-2.0"], crate = "servo-allocator" },
+    { allow = ["MPL-2.0"], crate = "servo-background-hang-monitor" },
+    { allow = ["MPL-2.0"], crate = "servo-background-hang-monitor-api" },
+    { allow = ["MPL-2.0"], crate = "servo-base" },
+    { allow = ["MPL-2.0"], crate = "servo-canvas" },
+    { allow = ["MPL-2.0"], crate = "servo-canvas-traits" },
+    { allow = ["MPL-2.0"], crate = "servo-config" },
+    { allow = ["MPL-2.0"], crate = "servo-config-macro" },
+    { allow = ["MPL-2.0"], crate = "servo-constellation" },
+    { allow = ["MPL-2.0"], crate = "servo-constellation-traits" },
+    { allow = ["MPL-2.0"], crate = "servo-default-resources" },
+    { allow = ["MPL-2.0"], crate = "servo-deny-public-fields" },
+    { allow = ["MPL-2.0"], crate = "servo-devtools" },
+    { allow = ["MPL-2.0"], crate = "servo-devtools-traits" },
+    { allow = ["MPL-2.0"], crate = "servo-dom-struct" },
+    { allow = ["MPL-2.0"], crate = "servo-embedder-traits" },
+    { allow = ["MPL-2.0"], crate = "servo-fonts" },
+    { allow = ["MPL-2.0"], crate = "servo-fonts-traits" },
+    { allow = ["MPL-2.0"], crate = "servo-geometry" },
+    { allow = ["MPL-2.0"], crate = "servo-jstraceable-derive" },
+    { allow = ["MPL-2.0"], crate = "servo-layout" },
+    { allow = ["MPL-2.0"], crate = "servo-layout-api" },
+    { allow = ["MPL-2.0"], crate = "servo-media" },
+    { allow = ["MPL-2.0"], crate = "servo-media-audio" },
+    { allow = ["MPL-2.0"], crate = "servo-media-derive" },
+    { allow = ["MPL-2.0"], crate = "servo-media-dummy" },
+    { allow = ["MPL-2.0"], crate = "servo-media-player" },
+    { allow = ["MPL-2.0"], crate = "servo-media-streams" },
+    { allow = ["MPL-2.0"], crate = "servo-media-thread" },
+    { allow = ["MPL-2.0"], crate = "servo-media-traits" },
+    { allow = ["MPL-2.0"], crate = "servo-media-webrtc" },
+    { allow = ["MPL-2.0"], crate = "servo-metrics" },
+    { allow = ["MPL-2.0"], crate = "servo-net" },
+    { allow = ["MPL-2.0"], crate = "servo-net-traits" },
+    { allow = ["MPL-2.0"], crate = "servo-paint" },
+    { allow = ["MPL-2.0"], crate = "servo-paint-api" },
+    { allow = ["MPL-2.0"], crate = "servo-pixels" },
+    { allow = ["MPL-2.0"], crate = "servo-profile" },
+    { allow = ["MPL-2.0"], crate = "servo-profile-traits" },
+    { allow = ["MPL-2.0"], crate = "servo-script" },
+    { allow = ["MPL-2.0"], crate = "servo-script-bindings" },
+    { allow = ["MPL-2.0"], crate = "servo-script-traits" },
+    { allow = ["MPL-2.0"], crate = "servo-storage" },
+    { allow = ["MPL-2.0"], crate = "servo-storage-traits" },
+    { allow = ["MPL-2.0"], crate = "servo-timers" },
+    { allow = ["MPL-2.0"], crate = "servo-tracing" },
+    { allow = ["MPL-2.0"], crate = "servo-url" },
+    { allow = ["MPL-2.0"], crate = "servo-webgl" },
+    { allow = ["MPL-2.0"], crate = "servo-webgpu" },
+    { allow = ["MPL-2.0"], crate = "servo-webgpu-traits" },
+    { allow = ["MPL-2.0"], crate = "servo-webxr" },
+    { allow = ["MPL-2.0"], crate = "servo-webxr-api" },
+    { allow = ["MPL-2.0"], crate = "servo-xpath" },
+    { allow = ["MPL-2.0"], crate = "stylo" },
+    { allow = ["MPL-2.0"], crate = "stylo_atoms" },
+    { allow = ["MPL-2.0"], crate = "stylo_derive" },
+    { allow = ["MPL-2.0"], crate = "stylo_dom" },
+    { allow = ["MPL-2.0"], crate = "stylo_static_prefs" },
+    { allow = ["MPL-2.0"], crate = "stylo_traits" },
+    { allow = ["MPL-2.0"], crate = "swapper" },
+    { allow = ["MPL-2.0"], crate = "to_shmem" },
+    { allow = ["MPL-2.0"], crate = "to_shmem_derive" },
+    { allow = ["MPL-2.0"], crate = "tracy-rs" },
+    { allow = ["MPL-2.0"], crate = "uluru" },
+    { allow = ["MPL-2.0"], crate = "webdriver" },
+    { allow = ["MPL-2.0"], crate = "webrender" },
+    { allow = ["MPL-2.0"], crate = "webrender_api" },
+    { allow = ["MPL-2.0"], crate = "webrender_build" },
+    { allow = ["MPL-2.0"], crate = "wr_glyph_rasterizer" },
+    { allow = ["MPL-2.0"], crate = "zeitstempel" },
 ]
 
 # Crates with missing or incomplete `license` fields in their manifests:
