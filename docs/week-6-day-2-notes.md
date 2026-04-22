@@ -327,6 +327,10 @@ Recommended next steps, in priority order:
 2. **File an upstream Servo issue** against 0.1.0 with the protocol
    error and a minimal reproducer. The fix almost certainly lives
    in surfman's Wayland backend.
+   **Filed 2026-04-22 as
+   [servo/surfman#354](https://github.com/servo/surfman/issues/354);
+   the tracked draft lives at
+   [`docs/upstream/surfman-explicit-sync.md`](upstream/surfman-explicit-sync.md).**
 3. **If 1 + 2 stall**, fall back to the `TauriWebviewRenderer`
    second-`EmailRenderer`-impl path from design doc §10. The trait
    was shaped for exactly this swap; the work already in this PR
