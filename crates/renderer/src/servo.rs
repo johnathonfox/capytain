@@ -49,6 +49,8 @@ mod delegate;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "windows")]
+mod windows;
 
 pub use corpus::{render_html_to_image, CorpusRenderer};
 use delegate::{CapytainDelegate, LinkCb};

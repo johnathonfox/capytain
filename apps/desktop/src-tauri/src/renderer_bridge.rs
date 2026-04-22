@@ -153,9 +153,22 @@ fn build_servo_renderer<R: Runtime>(
     )?)
 }
 
+#[cfg(target_os = "windows")]
+fn build_servo_renderer<R: Runtime>(
+    parent: &tauri::Window<R>,
+    dispatcher: Arc<dyn MainThreadDispatch>,
+) -> Result<ServoRenderer, Box<dyn std::error::Error>> {
+    Ok(ServoRenderer::new_windows(
+        dispatcher,
+        parent,
+        PhysicalSize::new(READER_WINDOW_WIDTH, READER_WINDOW_HEIGHT),
+    )?)
+}
+
 #[cfg(not(any(
     target_os = "linux",
     target_os = "macos",
+    target_os = "windows",
     target_os = "freebsd",
     target_os = "netbsd"
 )))]
