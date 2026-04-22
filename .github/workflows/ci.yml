@@ -16,15 +16,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Linux runs the full workspace with Servo enabled. Windows runs
-        # the workspace MINUS the Servo-toolchain consumers and verifies
-        # the no-servo paths; the optional Windows-Servo compile step at
-        # the bottom of the job is informational. macOS is deliberately
-        # left out: the macOS renderer is UNVERIFIED (Day 2) and the
-        # Windows renderer is UNVERIFIED (Day 3); publishing green CI
-        # ticks for those platforms without hardware validation would be
-        # noise. Each rejoins after a hardware-backed session validates
-        # the respective `new_*` constructor.
+        # Linux and Windows both build the full workspace with Servo
+        # enabled. macOS is deliberately left out: the macOS renderer
+        # (`crates/renderer/src/servo/macos.rs`) is marked UNVERIFIED
+        # — written without Mac hardware in Phase 0 Week 6 Day 2 — so
+        # publishing green CI ticks for macOS would be noise. The
+        # macOS job rejoins after a hardware-backed session validates
+        # `new_macos`.
+        #
+        # Windows graduated from "workspace minus Servo consumers +
+        # optional compile probe" (Day 3) to a first-class full-
+        # workspace build once PR #20's optional probe came back green,
+        # confirming Servo 0.1.0 compiles on stock `windows-latest`
+        # without any extra native-dep installation. Runtime validation
+        # on Windows still needs a hardware-backed session; the CI
+        # here covers compile + clippy + unit tests of the Servo-
+        # enabled tree.
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
@@ -33,15 +40,15 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
-      # Tauri 2 needs webkit2gtk + friends on Linux; Servo 0.1.0 additionally
-      # needs cmake, clang, fontconfig / freetype / harfbuzz, gstreamer, and
-      # libssl (see docs/servo-composition.md §7). macOS (WKWebView) and
-      # Windows (WebView2 Evergreen Runtime) ship what Tauri needs out of
-      # the box for the *system* webview; Servo on Windows is UNVERIFIED
-      # and its deps aren't installed here — the optional step at the
-      # bottom of this job will fail with missing-dep errors when they're
-      # actually needed, at which point the next Day 3 follow-up adds
-      # them.
+      # Tauri 2 needs webkit2gtk + friends on Linux; Servo 0.1.0
+      # additionally needs cmake, clang, fontconfig / freetype /
+      # harfbuzz, gstreamer, and libssl (see docs/servo-composition.md
+      # §7). macOS (WKWebView) and Windows (WebView2 Evergreen Runtime)
+      # ship what Tauri needs out of the box for the system webview;
+      # Servo 0.1.0 additionally turns out to compile on stock
+      # `windows-latest` without any extra installs (confirmed by the
+      # optional compile probe in PR #20), so no Windows install step
+      # is needed here.
       - name: Install Tauri + Servo Linux dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -69,61 +76,26 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
-      # --- Linux path: full build with Servo enabled everywhere ---
+      # --- Full workspace (Servo enabled) on both OSes ---
 
-      - name: Clippy (Linux — full workspace, Servo on)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Clippy (workspace, Servo on)
         run: cargo clippy --workspace --all-targets
-      - name: Test (Linux — full workspace)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Test (workspace)
         run: cargo test --workspace
-      - name: Check capytain-renderer with servo feature (Linux only)
+      - name: Check capytain-renderer with servo feature explicitly
+        run: cargo check -p capytain-renderer --features servo
+
+      # --- No-Servo fallback verification (Linux only; Windows full
+      # workspace above already covers it) ---
+      #
+      # The `servo` feature is off on `capytain-renderer` by default;
+      # downstream crates that depend on it via `capytain-core` only
+      # (the trait + NullRenderer path) must keep compiling when
+      # Servo is excluded. Rerun Clippy with `--no-default-features`
+      # on Linux to guard that path.
+      - name: Clippy capytain-renderer without servo (Linux)
         if: matrix.os == 'ubuntu-latest'
-        run: cargo check -p capytain-renderer --features servo
-
-      # --- Windows required path: workspace minus Servo-toolchain
-      # consumers, then each excluded crate checked in its no-servo
-      # shape. These are the gates that fail CI when broken. ---
-
-      - name: Clippy (Windows — workspace minus Servo consumers)
-        if: matrix.os == 'windows-latest'
-        run: cargo clippy --workspace --all-targets --exclude capytain-renderer --exclude capytain-desktop
-      - name: Test (Windows — workspace minus Servo consumers)
-        if: matrix.os == 'windows-latest'
-        run: cargo test --workspace --exclude capytain-renderer --exclude capytain-desktop
-      - name: Clippy capytain-renderer without servo (Windows)
-        if: matrix.os == 'windows-latest'
         run: cargo clippy -p capytain-renderer --no-default-features --all-targets
-      - name: Clippy capytain-desktop without servo (Windows)
-        if: matrix.os == 'windows-latest'
-        run: cargo clippy -p capytain-desktop --no-default-features --all-targets
-      - name: Test capytain-desktop without servo (Windows)
-        if: matrix.os == 'windows-latest'
-        run: cargo test -p capytain-desktop --no-default-features
-
-      # --- Windows optional Servo compile probe ---
-      #
-      # `new_windows` in `crates/renderer/src/servo/windows.rs` is
-      # marked UNVERIFIED in Phase 0 Week 6 Day 3 — written against
-      # the design doc without Windows hardware. This step attempts
-      # a `cargo check` of the renderer with `--features servo` on
-      # the Windows runner and REPORTS but does not FAIL the job on
-      # error (`continue-on-error: true`). Two signals it gives us:
-      #
-      #   1. Does Servo 0.1.0 even build on the stock GitHub
-      #      `windows-latest` image? If yes, we'll see it turn
-      #      green and can graduate this step to a required check
-      #      in a follow-up PR.
-      #   2. If no, the error is the missing-dep list for the
-      #      next Windows-hardware session to install.
-      #
-      # Until this step goes reliably green on its own, the
-      # required Windows gate stays the `--exclude`ed workspace
-      # above.
-      - name: Check capytain-renderer with servo feature (Windows — UNVERIFIED, optional)
-        if: matrix.os == 'windows-latest'
-        continue-on-error: true
-        run: cargo check -p capytain-renderer --features servo
 
   deny:
     name: cargo-deny
