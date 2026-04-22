@@ -3,16 +3,20 @@ SPDX-FileCopyrightText: 2026 Capytain Contributors
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Servo composition — pre-spike design
+# Servo composition — design + post-spike findings
 
-**Status:** pre-spike design. The `EmailRenderer` trait and `NullRenderer`
-landed in Phase 0 Week 6 Day 1 (`crates/core/src/renderer.rs`). The
-Servo-backed implementation in `crates/renderer/src/servo.rs` is a stub of
-`todo!()` calls; this document is the reference that guides Days 2–4.
+**Status:** post-spike (Phase 0 Week 6 Day 5). The original pre-spike
+design is preserved verbatim below so readers can see the shape of the
+plan we walked into. **§11 carries the findings** — everything we
+learned while actually making it work, what landed, what deviated, and
+what's still open for follow-up sessions.
 
-**Audience:** the engineer (or Claude Code session) implementing
-`ServoRenderer` on macOS / Windows / Linux, and anyone reviewing the PRs
-that land across those three platforms.
+**Audience:** the engineer (or Claude Code session) picking up the
+renderer next. Start with §11 if you're trying to understand the
+current state; read §0–§11 only when you need the rationale behind an
+original decision.
+
+**Quick jump to the post-spike update:** [§11](#11-post-spike-findings-day-5).
 
 ---
 
@@ -496,7 +500,268 @@ post-v1 when the embedding story is more mature.
 
 ---
 
-## 11. References
+## 11. Post-spike findings (Day 5)
+
+Everything below is what we learned *after* trying to land the plan in
+§0–§11. Where a finding contradicts earlier guidance, the finding
+wins — the earlier text is preserved for context, not as a prescription.
+
+### 11.1 Platform status snapshot
+
+| Platform | Code | Runtime validation |
+|---|---|---|
+| **Linux** (Wayland / X11) | `crates/renderer/src/servo/linux.rs` — production-shape `new_linux`, attached to a dedicated plain `tauri::window::Window` via raw-window-handle | Reaches "Servo renderer installed" on the dev box. Blocked visually by an **NVIDIA EGL-Wayland + explicit-sync bug** in surfman — see §11.4. |
+| **macOS** | `crates/renderer/src/servo/macos.rs` — UNVERIFIED mirror of the Linux shape | Compiles under `cfg(target_os = "macos")`. Never executed on Mac hardware. Needs a Mac-hardware session to validate; `docs/week-6-day-2-notes.md` §11 carries the punch list. |
+| **Windows** | not started | Out of scope; tracked as a follow-up PR. |
+| **Headless corpus (Day 5)** | `crates/renderer/src/servo/corpus.rs` — uses `SoftwareRenderingContext`, no native surface | **Fully validated.** 10 fixtures render in ~1.7s, regression harness in `crates/renderer/tests/corpus.rs`. |
+
+The headless corpus path is what actually proves "Servo renders
+real-world email HTML correctly" on Phase 0 hardware. The interactive
+(native-surface) path on Linux proves the *integration plumbing* — the
+trait, the delegate, the main-thread dispatcher, the Tauri wire-up —
+but the final paint step is blocked upstream.
+
+### 11.2 Servo 0.1.0 API corrections
+
+The pre-spike description in §3 was substantially right but a handful
+of specifics needed correction at the keyboard. Key deltas:
+
+- **No `lts` feature flag.** §8's open question resolved: servo 0.1.0
+  on crates.io has no `lts` feature; plain `version = "0.1"` is what
+  we pin. Half-yearly migration discipline is now a release-cadence
+  policy rather than a Cargo toggle.
+- **`WebView` has no `load_html`.** The 0.1.0 surface is `load(Url)`
+  only; we wrap sanitized HTML in `data:text/html;charset=utf-8,…`
+  URLs. A tiny percent-encoder lives in `servo::make_data_url` with
+  unit-test coverage. This also sets up the Phase 1 CSP-in-the-data-
+  URL belt-and-braces for JS execution.
+- **`WebViewDelegate` is narrower than §3.2 assumed.** Only five of
+  the nine methods in §3.2 actually exist on 0.1.0:
+  `notify_new_frame_ready`, `notify_load_status_changed`,
+  `notify_animating_changed`, `request_navigation`, and
+  `request_permission`. The others (`allow_opening_webview`,
+  `allow_navigation_request`, `show_simple_dialog`,
+  `request_file_picker`, `notify_pipeline_panic`) do not exist;
+  `request_navigation` alone carries the navigation-gating seam §3.2
+  split across two methods.
+- **`Preferences` has no `js_enabled`.** §5's proposed `js_enabled =
+  false` doesn't exist. JS is defended at two other layers: ammonia
+  stripping `<script>` upstream of `render()`, and the wrapper
+  `data:` URL eventually carrying a restrictive CSP (Phase 1). The
+  full list of `dom_*_enabled` prefs in §5 mostly exists and is
+  applied by `apply_reader_pane_preferences`; the speculative ones
+  (`dom_usb_enabled`, `dom_hid_enabled`, `dom_nfc_enabled`,
+  `dom_mediastream_enabled`) do not exist, but the underlying APIs
+  they'd gate are also absent from the shipped crate.
+- **`surfman::error::Error` doesn't `impl Display` either.** §6.5
+  warned about `impl std::error::Error`; Display is missing too.
+  Wrap with `format!("{e:?}")` rather than `e.to_string()`.
+- **`Servo` has no explicit shutdown.** The 0.1.0 type relies on
+  `Drop`. Our `destroy()` path pumps the event loop a few times to
+  settle in-flight messages and lets the `Rc<Servo>` fall out of
+  scope.
+- **`WebView::take_screenshot`** turned out to be the right hammer
+  for headless corpus tests (§11.5). It already waits for frames /
+  images / fonts / render-blocking stylesheets to settle, so the
+  "spin until `LoadStatus::Complete` plus 5–10 extra passes" pattern
+  from §6.3 is only needed for the interactive path, not corpus
+  rendering.
+
+### 11.3 Architecture: `!Send` state vs. a `Send` trait
+
+§6.6 flagged the thread-affinity problem without prescribing a
+solution. What we landed on (see `crates/renderer/src/servo.rs` module
+docs):
+
+- The public `ServoRenderer` struct holds only `Send + Sync` types
+  (an `Arc<dyn MainThreadDispatch>`, an `Arc<Mutex<LinkCb>>`, an
+  `AtomicU64`). It is safely stored in Tauri's `AppState`.
+- The actual Servo state (`Rc<Servo>`, `WebView`, `Rc<Window
+  RenderingContext>`, `Rc<CapytainDelegate>`) lives in a
+  `thread_local!` on whichever thread called the platform
+  constructor — the Tauri main thread in production.
+- Every trait method dispatches onto the main thread via the
+  caller-supplied `MainThreadDispatch`. The desktop crate's impl is
+  backed by `tauri::AppHandle::run_on_main_thread`, which Tauri
+  makes platform-agnostic across all three targets.
+- The `EventLoopWaker` we pass to Servo reuses the same dispatcher,
+  so Servo can kick the event loop from its internal worker threads
+  without knowing anything about Tauri.
+
+No `unsafe`; the workspace `forbid(unsafe_code)` lint stays green.
+
+### 11.4 The NVIDIA EGL-Wayland blocker
+
+Running the interactive desktop binary on the Day 2 dev box (KDE
+Plasma 6 / Wayland / NVIDIA GeForce RTX 5070 Ti, driver 595.58.03),
+Servo installs cleanly and then the compositor disconnects with:
+
+```
+wl_display#1.error(wp_linux_drm_syncobj_surface_v1#48, 4,
+    "explicit sync is used, but no acquire point is set")
+Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display.
+```
+
+Servo / surfman subscribes to the `wp_linux_drm_syncobj_surface_v1`
+explicit-sync protocol (triggered by NVIDIA's EGL-Wayland driver
+auto-attaching to the `wl_surface`) but doesn't set an acquire point
+on first commit. KWin catches the protocol violation and disconnects;
+Gdk exits the process with code 1, within ~50ms of the "Servo
+renderer installed" log line.
+
+Narrowing from workarounds tried (full list in
+`docs/week-6-day-2-notes.md` §Wayland): `MESA_LOADER_DRIVER_OVERRIDE=
+llvmpipe` avoids the error entirely, which localizes the bug to
+surfman's NVIDIA EGL-Wayland init path (not Servo-on-Wayland
+generally). Intel / AMD hosts, or any real X11 session, are expected
+to just work.
+
+**Path forward:**
+
+1. File upstream in `servo/servo` or `servo/surfman` with the
+   reproducer. Fix will land in a Servo 0.1.x patch release, eventually.
+2. The `SoftwareRenderingContext` path (§11.5) completely sidesteps
+   this — if the upstream fix is slow, the Phase 0 shipping answer
+   can be "use software rendering for the reader pane; revisit native
+   when Servo's interactive Wayland story stabilizes." §2 of the
+   pre-spike design rejected this fallback, but the NVIDIA bug tips
+   the cost/benefit.
+3. Full `TauriWebviewRenderer` fallback per §10 go/no-go remains
+   available if both (1) and (2) stall.
+
+### 11.5 Day 5 corpus harness — what we shipped
+
+`crates/renderer/tests/corpus/fixtures/` holds 10 representative HTML
+documents (plaintext, Gmail marketing, Substack, Stripe receipt,
+GitHub notification, Mailchimp promo, calendar invite, iOS auto-
+forward, Outlook + VML, CJK + RTL — the list from §9). The test
+harness in `crates/renderer/tests/corpus.rs` renders each through a
+shared `CorpusRenderer` (one `Servo` instance, one `WebView`, reused
+across all fixtures to stay within the one-per-process limit) and
+hashes the resulting `image::RgbaImage`.
+
+**Regeneration:** `CAPYTAIN_CORPUS_REGEN=1 cargo test -p
+capytain-renderer --features servo --test corpus -- --nocapture`.
+References live under `crates/renderer/tests/corpus/reference/` as
+paired `.sha256` + `.png` files — the PNGs are committed so reviewers
+can diff by eye when the hash drifts.
+
+**Failure shape:**
+
+- Hard failures (FAIL the run): render timeout, zero-sized output,
+  every pixel identical (layout produced nothing).
+- Soft drift (warn but pass): hash mismatch. Exact-pixel reproduction
+  across machines is too flaky (font hinting, subpixel AA, Servo GL
+  driver variations) to gate PRs on. The actual PNG is written to
+  `/tmp/` for eyeball review.
+
+**First-render warmup.** A fresh `Servo` instance's first render
+races a slow path and `take_screenshot` can return the pre-layout
+background. `CorpusRenderer::new` does a throwaway
+`"<!DOCTYPE html><html><body>warmup</body></html>"` render in its
+constructor to prime the pipeline; the first *real* fixture then
+hits a warm font cache, warm script thread, warm constellation.
+Without this, `01_plaintext` (or whichever fixture is first
+alphabetically) reliably produced uniform-white output on this box.
+
+### 11.6 Findings surfaced by the corpus
+
+With the 10 references captured and eyeballed, the layout output is
+high quality across the board — `02_gmail_marketing`,
+`04_stripe_receipt`, `05_github_notification`, and `09_outlook_vml`
+in particular render indistinguishably from what a system webview
+would produce. Real findings worth carrying into Phase 1:
+
+- **CJK / RTL fonts are unfilled.** `10_cjk_rtl.png` shows mojibake
+  for Japanese, Simplified Chinese, Korean, Arabic, and Hebrew —
+  Servo's default font fallback doesn't cover these scripts. Every
+  production email client configures a fallback stack; Phase 1 needs
+  a `UserContentManager`-installed CSS rule or equivalent to map
+  these to a shipping font (Noto Sans CJK / Noto Sans Arabic /
+  Noto Sans Hebrew are the usual picks).
+- **Em-dash (and other "exotic" Latin glyphs) trigger fallback.**
+  Multiple fixtures show `â□` in place of `—`. The symptom is the
+  same font-fallback stack — Servo picks a font that lacks the
+  glyph and mojibake results. Same Phase 1 fix applies.
+- **VML is correctly ignored.** `09_outlook_vml` renders the
+  surrounding Word-generated HTML cleanly; the embedded `<v:rect>`
+  disappears as intended (Servo's HTML parser treats unknown
+  namespaces as comments). No Phase 1 action needed.
+- **Tables render as specified.** Every table-based layout in the
+  corpus (Gmail marketing, Stripe receipt, GitHub notification,
+  Mailchimp promo, Outlook VML, calendar invite) comes out with
+  correct column widths, border collapse, and background colors.
+  This is a meaningful data point: the "modern Servo lost some
+  table compatibility during the stylo rewrite" fear that circulated
+  in 2023–2024 turns out not to affect the email-style table markup
+  we actually see.
+- **Data-URL size is not a problem yet.** The largest fixture
+  (`03_substack_newsletter.png` at 177 KB source HTML) loads and
+  renders in sub-200ms. Big promotional HTML (tens of kB) fits fine
+  inside a `data:` URL; if we ever hit the 10MB-ish browser limits,
+  that's a Phase 1 problem.
+
+### 11.7 Integration landmines outside the Servo API
+
+Surprises that hit during integration and landed fixes we wouldn't
+have predicted from the pre-spike design:
+
+- **Turso `#[global_allocator]` vs. Servo `#[global_allocator]`.**
+  Turso's default `mimalloc` feature declares one; `servo-allocator`
+  declares `tikv-jemallocator`. Can't have two. Fix: disable turso's
+  default features at the workspace level, keep only `sync`. Turso
+  falls back to the system allocator; Servo keeps jemalloc. No
+  measurable perf regression on Phase 0 workloads.
+- **`rustls::CryptoProvider` ambiguity.** With Servo in the graph,
+  both `ring` and `aws-lc-rs` end up enabled at the feature level;
+  rustls refuses to auto-pick and panics on the first HTTPS
+  handshake inside Servo's `ResourceManager`. Fix: call
+  `rustls::crypto::ring::default_provider().install_default()` at
+  `main()` entry. Ring matches what tokio-rustls uses elsewhere in
+  the workspace.
+- **Feature-layout pivot for Windows CI.** Default-enabling `servo`
+  on `capytain-renderer` fights the Windows CI runner (no Servo
+  toolchain). Landed shape: renderer's `default = []`, desktop owns
+  a `servo` feature that propagates to `capytain-renderer/servo`,
+  workspace pins `default-features = false` for the renderer. Linux
+  gets the real engine by default; Windows CI uses `--no-default-
+  features` to drop it.
+- **Tauri plain `Window` requires the `unstable` feature.** We use
+  `tauri::window::WindowBuilder` (no webview) for the Servo surface;
+  without `unstable`, you only get `WebviewWindowBuilder`, and
+  attaching Servo's GL context on top of webkit2gtk's produces its
+  own set of conflicts. Enabled in
+  `apps/desktop/src-tauri/Cargo.toml`.
+
+### 11.8 Follow-up work
+
+- **Phase 1 reader-pane layout.** The current Servo surface is a
+  separate OS window, not embedded inside the main Tauri window.
+  §4.3's "GTK widget subclass packed into Tauri's hierarchy" path
+  is still the right answer; scoped out of Day 2 for complexity
+  budget.
+- **macOS validation.** `servo/macos.rs` is still UNVERIFIED. Needs
+  a session on Mac hardware. Punch list in
+  `docs/week-6-day-2-notes.md` §11.
+- **Windows port.** Fresh platform day. `new_windows` per §4.2,
+  Windows CI dep install, stop `--exclude`ing the Servo-toolchain
+  consumers.
+- **CJK + Arabic + Hebrew font fallback.** Covered in §11.6. Needs
+  a Phase 1 decision on which font family to ship and how to
+  install it into Servo's font config.
+- **Upstream surfman explicit-sync fix.** Filed-or-to-file; §11.4
+  has the reproducer shape.
+- **Day 5 harness evolution.** If hash drift across maintainers'
+  machines becomes noisy, consider swapping the exact-hash check
+  for a perceptual hash (dhash / phash). We haven't needed it yet
+  — output has been stable across the few regeneration runs in
+  this session — but the `crates/renderer/tests/corpus.rs` harness
+  is structured so that swapping the hash function is a one-line
+  change.
+
+---
+
+## 12. References
 
 - [`servo` 0.1.0 release announcement (2026-04-13)](https://servo.org/blog/2026/04/13/servo-0.1.0-release/)
 - [`servo` crate API docs on docs.rs](https://doc.servo.org/servo/)

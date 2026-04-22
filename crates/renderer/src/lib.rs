@@ -28,7 +28,9 @@
 mod servo;
 
 #[cfg(feature = "servo")]
-pub use servo::{MainThreadDispatch, RendererError, ServoRenderer};
+pub use servo::{
+    render_html_to_image, CorpusRenderer, MainThreadDispatch, RendererError, ServoRenderer,
+};
 
 // When the `servo` feature is off, we re-export the null renderer so
 // downstream crates can depend on `capytain-renderer` and still have a

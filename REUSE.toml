@@ -89,3 +89,18 @@ path = [
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Capytain Contributors"
 SPDX-License-Identifier = "Apache-2.0"
+
+# Phase 0 Week 6 Day 5 corpus reference outputs — PNG screenshots +
+# SHA-256 hashes produced by `cargo test -p capytain-renderer
+# --features servo --test corpus -- --nocapture CAPYTAIN_CORPUS_REGEN=1`.
+# Binary + content-addressed hash files can't carry inline SPDX metadata,
+# so they're covered here. The fixtures next door (`**/fixtures/*.html`)
+# do carry inline SPDX headers in HTML comments and pass `reuse lint`
+# without needing a REUSE.toml entry.
+[[annotations]]
+path = [
+    "crates/renderer/tests/corpus/reference/**",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Capytain Contributors"
+SPDX-License-Identifier = "Apache-2.0"
