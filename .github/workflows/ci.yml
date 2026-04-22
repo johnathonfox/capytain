@@ -16,17 +16,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Linux joins Windows now that the Phase 0 Week 6 Servo-backed
-        # renderer has a validated Linux path (see Day 2 PR and
-        # docs/servo-composition.md). macOS is deliberately left out:
-        # the macOS renderer was written without Mac hardware and is
-        # marked UNVERIFIED — adding a macOS job now would publish
-        # green ticks we can't trust. It rejoins after a Mac-hardware
-        # session validates `new_macos`. Servo-on-Windows is a separate
-        # PR; for now the Windows job excludes `capytain-renderer` and
-        # `capytain-desktop` from the workspace build (because they
-        # pull in Servo's toolchain) and verifies their no-servo paths
-        # explicitly.
+        # Linux runs the full workspace with Servo enabled. Windows runs
+        # the workspace MINUS the Servo-toolchain consumers and verifies
+        # the no-servo paths; the optional Windows-Servo compile step at
+        # the bottom of the job is informational. macOS is deliberately
+        # left out: the macOS renderer is UNVERIFIED (Day 2) and the
+        # Windows renderer is UNVERIFIED (Day 3); publishing green CI
+        # ticks for those platforms without hardware validation would be
+        # noise. Each rejoins after a hardware-backed session validates
+        # the respective `new_*` constructor.
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
@@ -39,8 +37,11 @@ jobs:
       # needs cmake, clang, fontconfig / freetype / harfbuzz, gstreamer, and
       # libssl (see docs/servo-composition.md §7). macOS (WKWebView) and
       # Windows (WebView2 Evergreen Runtime) ship what Tauri needs out of
-      # the box for the *system* webview; Servo on Windows is out of scope
-      # for this PR, so the Windows job deliberately skips Servo build deps.
+      # the box for the *system* webview; Servo on Windows is UNVERIFIED
+      # and its deps aren't installed here — the optional step at the
+      # bottom of this job will fail with missing-dep errors when they're
+      # actually needed, at which point the next Day 3 follow-up adds
+      # them.
       - name: Install Tauri + Servo Linux dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -80,8 +81,9 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo check -p capytain-renderer --features servo
 
-      # --- Windows path: workspace minus Servo-toolchain consumers,
-      # then each excluded crate checked in its no-servo shape ---
+      # --- Windows required path: workspace minus Servo-toolchain
+      # consumers, then each excluded crate checked in its no-servo
+      # shape. These are the gates that fail CI when broken. ---
 
       - name: Clippy (Windows — workspace minus Servo consumers)
         if: matrix.os == 'windows-latest'
@@ -98,6 +100,30 @@ jobs:
       - name: Test capytain-desktop without servo (Windows)
         if: matrix.os == 'windows-latest'
         run: cargo test -p capytain-desktop --no-default-features
+
+      # --- Windows optional Servo compile probe ---
+      #
+      # `new_windows` in `crates/renderer/src/servo/windows.rs` is
+      # marked UNVERIFIED in Phase 0 Week 6 Day 3 — written against
+      # the design doc without Windows hardware. This step attempts
+      # a `cargo check` of the renderer with `--features servo` on
+      # the Windows runner and REPORTS but does not FAIL the job on
+      # error (`continue-on-error: true`). Two signals it gives us:
+      #
+      #   1. Does Servo 0.1.0 even build on the stock GitHub
+      #      `windows-latest` image? If yes, we'll see it turn
+      #      green and can graduate this step to a required check
+      #      in a follow-up PR.
+      #   2. If no, the error is the missing-dep list for the
+      #      next Windows-hardware session to install.
+      #
+      # Until this step goes reliably green on its own, the
+      # required Windows gate stays the `--exclude`ed workspace
+      # above.
+      - name: Check capytain-renderer with servo feature (Windows — UNVERIFIED, optional)
+        if: matrix.os == 'windows-latest'
+        continue-on-error: true
+        run: cargo check -p capytain-renderer --features servo
 
   deny:
     name: cargo-deny
