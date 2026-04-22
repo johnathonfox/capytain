@@ -1242,8 +1242,10 @@ version = "0.0.0"
 dependencies = [
  "capytain-core",
  "dpi",
+ "image",
  "raw-window-handle",
  "servo",
+ "sha2",
  "thiserror 2.0.18",
  "tracing",
  "url",

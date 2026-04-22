@@ -1,0 +1,48 @@
+<!--
+SPDX-FileCopyrightText: 2026 Capytain Contributors
+SPDX-License-Identifier: Apache-2.0
+
+Representative plaintext email rendered through the standard "wrap in <pre>"
+path Phase 0's read pipeline uses for `Content-Type: text/plain` bodies.
+Exercises: monospace rendering, soft-wrapping vs. hard newlines, quoted
+reply chains with the canonical `> ` prefix, preserved whitespace, URL
+autolinking NOT happening (plaintext renderers don't synthesize anchors).
+-->
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>body { margin: 0; } pre { font-family: monospace; font-size: 13px; white-space: pre-wrap; word-wrap: break-word; }</style>
+</head>
+<body>
+<pre>Hi Jane,
+
+Thanks for the update on the quarterly review — the numbers line up with
+what I was seeing on our end, so I think we're good to push the rollout
+to next Wednesday.
+
+A few things from my side before then:
+
+  1. Marketing assets land in review Monday morning.
+  2. The feature flag defaults to off; we'll flip it for the cohort list
+     once the CDN warms up.
+  3. I'll ping Ravi about the latency budget on the checkout path.
+
+Let me know if Wednesday still works.
+
+— Alex
+
+On Thu, Mar 12, 2026 at 09:14, Jane Park &lt;jane@example.com&gt; wrote:
+&gt; Just wanted to flag that the Q1 review deck is ready to circulate.
+&gt;
+&gt; I've incorporated the revenue breakdown you asked about, plus the new
+&gt; cohort retention chart. The deck is at
+&gt; https://docs.example.com/q1-review-2026
+&gt;
+&gt; Could you take a look and signal approve/defer by end of week?
+&gt;
+&gt; Thanks,
+&gt; Jane
+</pre>
+</body>
+</html>

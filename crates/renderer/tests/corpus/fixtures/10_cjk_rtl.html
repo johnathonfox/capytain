@@ -1,0 +1,70 @@
+<!--
+SPDX-FileCopyrightText: 2026 Capytain Contributors
+SPDX-License-Identifier: Apache-2.0
+
+Non-Latin-script email — covers both CJK (Japanese + Simplified Chinese
++ Korean) and RTL (Arabic + Hebrew) in one document so a single render
+exercises both the complex script shaping paths (kanji/kana rendering,
+RTL bidi resolution) and the font-fallback chain.
+
+The HTML is structurally simple because the rendering challenges are
+entirely about text shaping, font fallback, line breaking, and bidi —
+not layout. We deliberately avoid per-lang font stacks so Servo's
+default fallback is what gets exercised.
+-->
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Multilingual greetings</title>
+</head>
+<body style="margin:0;padding:24px;font-family:system-ui,-apple-system,sans-serif;color:#1a1a1a;line-height:1.6;">
+
+  <h2 lang="ja" style="margin:0 0 8px 0;">ご挨拶 (Japanese)</h2>
+  <p lang="ja" style="margin:0 0 8px 0;">
+    アレックスさん、いつもお世話になっております。先日の打ち合わせ
+    でいただいたご提案、とても興味深く拝見いたしました。来週の
+    金曜日までに詳細なレビューをお送りいたします。
+  </p>
+  <p lang="ja" style="margin:0 0 24px 0;font-size:13px;color:#666;">
+    どうぞよろしくお願い申し上げます。 — ジェーン
+  </p>
+
+  <h2 lang="zh-Hans" style="margin:0 0 8px 0;">问候 (Simplified Chinese)</h2>
+  <p lang="zh-Hans" style="margin:0 0 24px 0;">
+    亲爱的阿历克斯，感谢你上周发给我的报告。我已经阅读完毕，有
+    几点小建议想和你讨论一下。周三我们可以通个电话吗？
+  </p>
+
+  <h2 lang="ko" style="margin:0 0 8px 0;">안녕하세요 (Korean)</h2>
+  <p lang="ko" style="margin:0 0 24px 0;">
+    알렉스 님, 안녕하세요. 보내주신 자료 잘 받았습니다.
+    다음 주까지 검토 후 회신드리겠습니다. 감사합니다.
+  </p>
+
+  <hr style="border:none;border-top:1px solid #e0e0e0;margin:24px 0;">
+
+  <h2 lang="ar" dir="rtl" style="margin:0 0 8px 0;text-align:right;">تحية (Arabic)</h2>
+  <p lang="ar" dir="rtl" style="margin:0 0 24px 0;text-align:right;">
+    عزيزي أليكس، شكراً لك على التقرير الذي أرسلته الأسبوع الماضي.
+    لقد قرأته، ولدي بعض الملاحظات الصغيرة. هل يمكنك الاتصال بي
+    يوم الأربعاء؟
+  </p>
+
+  <h2 lang="he" dir="rtl" style="margin:0 0 8px 0;text-align:right;">שלום (Hebrew)</h2>
+  <p lang="he" dir="rtl" style="margin:0 0 24px 0;text-align:right;">
+    אלכס היקר, תודה על הדוח ששלחת בשבוע שעבר. קראתי אותו
+    ויש לי כמה הערות קטנות. אפשר לשוחח ביום רביעי?
+  </p>
+
+  <hr style="border:none;border-top:1px solid #e0e0e0;margin:24px 0;">
+
+  <p style="font-size:13px;color:#666;margin:0;">
+    Mixed inline: English text, then
+    <span lang="ja">日本語</span>,
+    then <span lang="ar" dir="rtl">العربية</span>,
+    back to English — exercises the bidi boundary handling.
+  </p>
+
+</body>
+</html>

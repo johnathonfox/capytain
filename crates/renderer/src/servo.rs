@@ -43,12 +43,14 @@ use servo::{
     WindowRenderingContext,
 };
 
+mod corpus;
 mod delegate;
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 
+pub use corpus::{render_html_to_image, CorpusRenderer};
 use delegate::{CapytainDelegate, LinkCb};
 
 // ---------------------------------------------------------------------------

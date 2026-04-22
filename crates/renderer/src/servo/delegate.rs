@@ -17,8 +17,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use servo::{
-    LoadStatus, NavigationRequest, PermissionRequest, RenderingContext, WebView, WebViewDelegate,
-    WindowRenderingContext,
+    LoadStatus, NavigationRequest, PermissionRequest, RenderingContext, SoftwareRenderingContext,
+    WebView, WebViewDelegate, WindowRenderingContext,
 };
 
 /// Shared slot for the caller-registered link-click callback.
@@ -113,5 +113,48 @@ impl WebViewDelegate for CapytainDelegate {
     /// Phase 0; we pump the loop at a fixed cadence regardless.
     fn notify_animating_changed(&self, _webview: WebView, animating: bool) {
         tracing::debug!(animating, "servo: animating state changed");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Corpus-test delegate
+// ---------------------------------------------------------------------------
+
+/// Minimal `WebViewDelegate` for the headless Day 5 corpus harness.
+///
+/// Same paint contract as [`CapytainDelegate`] but against
+/// `SoftwareRenderingContext` (CPU-side pixel buffer) rather than
+/// `WindowRenderingContext`. Does not surface link clicks — the corpus
+/// tests don't exercise navigation — and denies every permission and
+/// navigation request just like the production delegate.
+pub struct CorpusDelegate {
+    rendering_context: Rc<SoftwareRenderingContext>,
+}
+
+impl CorpusDelegate {
+    pub fn new(rendering_context: Rc<SoftwareRenderingContext>) -> Self {
+        Self { rendering_context }
+    }
+}
+
+impl WebViewDelegate for CorpusDelegate {
+    fn notify_new_frame_ready(&self, webview: WebView) {
+        webview.paint();
+        self.rendering_context.present();
+    }
+
+    fn notify_load_status_changed(&self, _webview: WebView, status: LoadStatus) {
+        tracing::debug!(?status, "corpus: load status changed");
+    }
+
+    fn request_navigation(&self, _webview: WebView, navigation_request: NavigationRequest) {
+        // Corpus tests render one fixture at a time — deny every
+        // navigation so a runaway fixture can't pull other URLs into
+        // the render pipeline mid-test.
+        navigation_request.deny();
+    }
+
+    fn request_permission(&self, _webview: WebView, request: PermissionRequest) {
+        request.deny();
     }
 }

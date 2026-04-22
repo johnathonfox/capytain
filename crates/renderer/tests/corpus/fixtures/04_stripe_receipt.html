@@ -1,0 +1,86 @@
+<!--
+SPDX-FileCopyrightText: 2026 Capytain Contributors
+SPDX-License-Identifier: Apache-2.0
+
+Stripe-style transactional receipt: hairline dividers, monospace amount
+column, line-item table with right-aligned numerics, subtotal + tax +
+total triplet, small-caps section headers. These receipts use Helvetica
+stacks and a tight vertical rhythm — stresses both font-stack fallback
+and table column alignment.
+-->
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Receipt from Acme Cloud</title>
+</head>
+<body style="margin:0;padding:0;background:#f6f9fc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#32325d;">
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f6f9fc;">
+    <tr><td align="center" style="padding:40px 20px;">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="560" style="background:#ffffff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+        <tr><td style="padding:40px 48px 24px 48px;">
+          <div style="font-size:13px;color:#8898aa;text-transform:uppercase;letter-spacing:0.5px;font-weight:500;">Receipt from Acme Cloud</div>
+          <div style="font-size:32px;font-weight:700;margin-top:8px;letter-spacing:-0.5px;">$84.00 USD</div>
+          <div style="font-size:14px;color:#8898aa;margin-top:4px;">Paid March 12, 2026</div>
+        </td></tr>
+        <tr><td style="padding:0 48px;"><hr style="border:none;border-top:1px solid #e6ebf1;margin:0;"></td></tr>
+        <tr><td style="padding:24px 48px;">
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="font-size:13px;">
+            <tr>
+              <td style="color:#8898aa;padding:4px 0;" width="40%">Receipt number</td>
+              <td style="font-family:ui-monospace,'Menlo','Consolas',monospace;" align="right">1234-5678</td>
+            </tr>
+            <tr>
+              <td style="color:#8898aa;padding:4px 0;">Invoice number</td>
+              <td style="font-family:ui-monospace,'Menlo','Consolas',monospace;" align="right">ACME-AB19CD</td>
+            </tr>
+            <tr>
+              <td style="color:#8898aa;padding:4px 0;">Payment method</td>
+              <td align="right">Visa ending in 4242</td>
+            </tr>
+          </table>
+        </td></tr>
+        <tr><td style="padding:0 48px;"><hr style="border:none;border-top:1px solid #e6ebf1;margin:0;"></td></tr>
+        <tr><td style="padding:24px 48px;">
+          <div style="font-size:13px;color:#8898aa;text-transform:uppercase;letter-spacing:0.5px;font-weight:500;margin-bottom:12px;">Summary</div>
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="font-size:14px;">
+            <tr>
+              <td style="padding:8px 0;">Standard Plan · March</td>
+              <td style="font-family:ui-monospace,'Menlo','Consolas',monospace;" align="right">$80.00</td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0;color:#6b7c93;">Data transfer overage (2.4 GB)</td>
+              <td style="font-family:ui-monospace,'Menlo','Consolas',monospace;color:#6b7c93;" align="right">$4.00</td>
+            </tr>
+            <tr>
+              <td style="padding:12px 0 0 0;border-top:1px solid #e6ebf1;" colspan="2"></td>
+            </tr>
+            <tr>
+              <td style="padding:8px 0;color:#6b7c93;">Subtotal</td>
+              <td style="font-family:ui-monospace,'Menlo','Consolas',monospace;" align="right">$84.00</td>
+            </tr>
+            <tr>
+              <td style="padding:4px 0;color:#6b7c93;">Tax</td>
+              <td style="font-family:ui-monospace,'Menlo','Consolas',monospace;color:#6b7c93;" align="right">$0.00</td>
+            </tr>
+            <tr>
+              <td style="padding:12px 0 4px 0;border-top:1px solid #e6ebf1;font-weight:600;">Total</td>
+              <td style="padding:12px 0 4px 0;border-top:1px solid #e6ebf1;font-family:ui-monospace,'Menlo','Consolas',monospace;font-weight:600;" align="right">$84.00</td>
+            </tr>
+            <tr>
+              <td style="padding:4px 0;font-weight:600;">Paid</td>
+              <td style="padding:4px 0;font-family:ui-monospace,'Menlo','Consolas',monospace;font-weight:600;" align="right">$84.00</td>
+            </tr>
+          </table>
+        </td></tr>
+        <tr><td align="center" style="padding:8px 48px 40px 48px;border-top:1px solid #e6ebf1;">
+          <div style="font-size:13px;color:#8898aa;margin-top:16px;">
+            If you have questions, contact us at
+            <a href="mailto:support@example.com" style="color:#556cd6;text-decoration:none;">support@example.com</a>.
+          </div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

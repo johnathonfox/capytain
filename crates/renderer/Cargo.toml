@@ -33,6 +33,7 @@ servo = [
     "dep:tracing",
     "dep:url",
     "dep:thiserror",
+    "dep:image",
 ]
 
 [dependencies]
@@ -45,6 +46,14 @@ dpi = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Corpus harness (`tests/corpus.rs`) needs image to save PNGs, dpi for
+# sizing, and sha2 for the reference-hash check.
+dpi = { workspace = true }
+image = { workspace = true }
+sha2 = { workspace = true }
 
 [lints]
 workspace = true
