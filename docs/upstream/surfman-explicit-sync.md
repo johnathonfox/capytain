@@ -3,18 +3,22 @@ SPDX-FileCopyrightText: 2026 Capytain Contributors
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Draft upstream bug report — `servo/surfman`
+# Upstream bug report — `servo/surfman`
 
-**Status:** unsent. Reviewed + filed manually or via `gh issue create
---repo servo/surfman` when ready. See `docs/week-6-day-2-notes.md` §
-NVIDIA for the investigation this report summarizes.
+**Status:** **filed as
+[servo/surfman#354](https://github.com/servo/surfman/issues/354)**
+on 2026-04-22. This file is kept as the authored-locally copy so
+the body stays version-controlled alongside the investigation it
+summarizes (`docs/week-6-day-2-notes.md` § NVIDIA), and so future
+follow-up comments or re-filings against a different repo can draft
+from a tracked source.
 
-**Target repo:** `servo/surfman` (26 open issues at draft time, last
-commits November 2025, actively maintained). Happy to re-file
-against `servo/servo` or upstream NVIDIA if the surfman triage
-points us there.
+**Target repo:** `servo/surfman` (26 open issues, actively
+maintained). If the surfman triage redirects the report (e.g. to
+`servo/servo` or upstream NVIDIA), update the "Status" line above
+and the linked issue.
 
-**Suggested title:** `Wayland: missing acquire point on
+**Issue title as filed:** `Wayland: missing acquire point on
 wp_linux_drm_syncobj_surface_v1 commit with NVIDIA EGL driver (KWin
 disconnects with protocol error)`
 
