@@ -36,37 +36,32 @@
 //!     --features servo --test corpus -- --nocapture
 //! ```
 //!
-//! # CI gating (opt-in)
+//! # Platform gating
 //!
-//! Marked `#[ignore]` so default `cargo test` runs skip it. Servo's
-//! `SoftwareRenderingContext` is backed by `surfman`, which still needs
-//! a working EGL driver on the host even on the software path:
+//! Excluded from `windows-*` targets. Stock `windows-latest` runners
+//! ship no EGL driver, so `surfman`'s `SoftwareRenderingContext`
+//! construction panics with `"egl function was not loaded"` before
+//! this test gets a chance to do anything useful. Runtime validation
+//! on Windows is hardware-gated separately (see
+//! `crates/renderer/src/servo/windows.rs`).
 //!
-//! - `windows-latest` runners ship no EGL and panic with
-//!   `"egl function was not loaded"` when the test constructs a
-//!   context.
-//! - `ubuntu-latest` runners have Mesa EGL installed but the
-//!   `take_screenshot` callback never fires in the headless runner —
-//!   the test sits waiting until the 6h job timeout.
-//!
-//! Every main-branch merge since PR #19 (when this harness landed)
-//! has hit that Ubuntu hang, hence the opt-in gate. To run locally:
-//!
-//! ```bash
-//! cargo test -p capytain-renderer --features servo --test corpus \
-//!     -- --ignored --nocapture
-//! ```
-//!
-//! Runtime validation on Windows and on headless CI is hardware- or
-//! environment-gated separately; this harness is a maintainer-run
-//! regression tool, not a required CI gate.
+//! On Linux, the test calls
+//! [`capytain_renderer::apply_nvidia_wayland_workaround`] at startup,
+//! which sets `MESA_LOADER_DRIVER_OVERRIDE=llvmpipe` +
+//! `LIBGL_ALWAYS_SOFTWARE=1` +
+//! `__EGL_VENDOR_LIBRARY_FILENAMES=.../50_mesa.json` (only if unset).
+//! That forces Mesa's llvmpipe software EGL and bypasses NVIDIA's
+//! closed-source EGL-Wayland layer, which otherwise traps the
+//! `take_screenshot` callback on NVIDIA + Wayland boxes. See
+//! `docs/upstream/surfman-explicit-sync.md` for the upstream bug
+//! (servo/surfman#354).
 
-#![cfg(feature = "servo")]
+#![cfg(all(feature = "servo", not(target_os = "windows")))]
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use capytain_renderer::CorpusRenderer;
+use capytain_renderer::{apply_nvidia_wayland_workaround, CorpusRenderer};
 use dpi::PhysicalSize;
 use image::RgbaImage;
 
@@ -80,8 +75,14 @@ const RENDER_HEIGHT: u32 = 600;
 /// one `CorpusRenderer`, reuse it across all fixtures, and keep the
 /// harness trivially single-threaded.
 #[test]
-#[ignore = "maintainer-run regression harness; hangs on headless CI and panics on Windows — see module docs"]
 fn corpus_renders_every_fixture_without_panic() {
+    // Apply the Linux NVIDIA EGL-Wayland workaround before
+    // constructing the first `SoftwareRenderingContext`. No-op on
+    // non-Linux and a no-op if the caller has already exported the
+    // vars themselves (e.g. to reproduce the native-NVIDIA bug
+    // against an upstream surfman fix).
+    apply_nvidia_wayland_workaround();
+
     let fixtures_dir = workspace_path(&["crates", "renderer", "tests", "corpus", "fixtures"]);
     let reference_dir = workspace_path(&["crates", "renderer", "tests", "corpus", "reference"]);
 

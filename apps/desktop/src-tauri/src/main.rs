@@ -65,7 +65,7 @@ fn main() {
     // Mesa's llvmpipe EGL before Tauri / GTK / Servo touch GL. No-op
     // on non-Linux. See docs/upstream/surfman-explicit-sync.md.
     #[cfg(feature = "servo")]
-    renderer_bridge::apply_nvidia_wayland_workaround();
+    capytain_renderer::apply_nvidia_wayland_workaround();
 
     tauri::Builder::default()
         .setup(|app| {
