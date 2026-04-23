@@ -62,11 +62,24 @@ ignore = [
     "RUSTSEC-2024-0411", # atk / gtk-rs GTK3
     "RUSTSEC-2024-0412", # atk-sys / gtk-rs GTK3
     "RUSTSEC-2024-0413", # gdk / gtk-rs GTK3
+    "RUSTSEC-2024-0414", # gdk-pixbuf / gtk-rs GTK3 (direct dep via linux_gtk)
     "RUSTSEC-2024-0415", # gdk-sys / gtk-rs GTK3
     "RUSTSEC-2024-0416", # gdkx11 / gtk-rs GTK3
+    "RUSTSEC-2024-0417", # glib / gtk-rs GTK3 (direct dep via linux_gtk)
     "RUSTSEC-2024-0418", # gtk / gtk-rs GTK3
     "RUSTSEC-2024-0419", # gtk-sys / gtk-rs GTK3
     "RUSTSEC-2024-0420", # gtk3-macros / gtk-rs GTK3
+
+    # RUSTSEC-2024-0429 — `glib 0.18` `VariantStrIter::impl_get` unsound:
+    # `&p` passed to a C out-parameter function, which recent rustc
+    # optimizations now disregard, leading to NULL-deref panics on iter.
+    # Not reachable in Capytain: we never construct a `glib::Variant`
+    # containing nested strings, nor call `VariantStrIter`. The Tauri 2
+    # Linux backend uses glib GObject methods + signal handlers, not
+    # Variant container iteration. Revisit when Tauri / gtk-rs migrate
+    # to GTK4 (the issue is fixed in `glib 0.19+`, which requires the
+    # gtk-rs 0.19 / GTK4 family).
+    "RUSTSEC-2024-0429",
 
     # proc-macro-error — unmaintained (replaced by proc-macro-error2).
     # Pulled in transitively via tauri-codegen → rfd / file-dialog stacks.
