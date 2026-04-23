@@ -73,10 +73,28 @@ impl LinuxGtkParent {
 
         let drawing_area = gtk::DrawingArea::new();
         drawing_area.set_size_request(reader_width, -1);
+
+        // `app_paintable(true)` tells GTK's default draw path to
+        // leave the widget's backing surface alone so whatever
+        // Servo's `WindowRenderingContext` writes to the
+        // `gdk::Window` stays visible. Without this flag, GTK3
+        // clears the DrawingArea to the theme background on every
+        // draw cycle and Servo's paint disappears as soon as the
+        // widget is ever repainted.
+        drawing_area.set_app_paintable(true);
+
         paned.pack2(&drawing_area, true, false);
 
         app_window.add(&paned);
         app_window.show_all();
+
+        // Explicit split so the reader pane gets a predictable
+        // width on launch. `Paned`'s default position is
+        // unspecified (depends on first-child min-request); pinning
+        // it keeps the ratio stable across theme changes.
+        let allocation = app_window.allocation();
+        let total_width = allocation.width().max(reader_width + 200);
+        paned.set_position(total_width - reader_width);
 
         // Force realization so `gdk::Window` is available. GTK 3
         // normally defers realization until the widget is drawn;
