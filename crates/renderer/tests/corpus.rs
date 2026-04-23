@@ -35,6 +35,31 @@
 //! CAPYTAIN_CORPUS_REGEN=1 cargo test -p capytain-renderer \
 //!     --features servo --test corpus -- --nocapture
 //! ```
+//!
+//! # CI gating (opt-in)
+//!
+//! Marked `#[ignore]` so default `cargo test` runs skip it. Servo's
+//! `SoftwareRenderingContext` is backed by `surfman`, which still needs
+//! a working EGL driver on the host even on the software path:
+//!
+//! - `windows-latest` runners ship no EGL and panic with
+//!   `"egl function was not loaded"` when the test constructs a
+//!   context.
+//! - `ubuntu-latest` runners have Mesa EGL installed but the
+//!   `take_screenshot` callback never fires in the headless runner —
+//!   the test sits waiting until the 6h job timeout.
+//!
+//! Every main-branch merge since PR #19 (when this harness landed)
+//! has hit that Ubuntu hang, hence the opt-in gate. To run locally:
+//!
+//! ```bash
+//! cargo test -p capytain-renderer --features servo --test corpus \
+//!     -- --ignored --nocapture
+//! ```
+//!
+//! Runtime validation on Windows and on headless CI is hardware- or
+//! environment-gated separately; this harness is a maintainer-run
+//! regression tool, not a required CI gate.
 
 #![cfg(feature = "servo")]
 
@@ -55,6 +80,7 @@ const RENDER_HEIGHT: u32 = 600;
 /// one `CorpusRenderer`, reuse it across all fixtures, and keep the
 /// harness trivially single-threaded.
 #[test]
+#[ignore = "maintainer-run regression harness; hangs on headless CI and panics on Windows — see module docs"]
 fn corpus_renders_every_fixture_without_panic() {
     let fixtures_dir = workspace_path(&["crates", "renderer", "tests", "corpus", "fixtures"]);
     let reference_dir = workspace_path(&["crates", "renderer", "tests", "corpus", "reference"]);
