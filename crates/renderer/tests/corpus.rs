@@ -36,7 +36,7 @@
 //!     --features servo --test corpus -- --nocapture
 //! ```
 //!
-//! # CI gating
+//! # Platform gating
 //!
 //! File-level `#![cfg(not(target_os = "windows"))]` gate: stock
 //! `windows-latest` runners ship no EGL driver, so `surfman`'s
@@ -45,31 +45,24 @@
 //! Windows is hardware-gated separately (see
 //! `crates/renderer/src/servo/windows.rs`).
 //!
-//! On Linux the test is additionally marked `#[ignore]`. It runs
-//! reliably on a local dev box once
-//! [`capytain_renderer::apply_nvidia_wayland_workaround`] has set the
-//! Mesa/glvnd env vars that sidestep the NVIDIA EGL-Wayland
-//! explicit-sync bug (servo/surfman#354, see
-//! `docs/upstream/surfman-explicit-sync.md`). But on `ubuntu-latest`
-//! headless runners — which have Mesa EGL installed by default — the
-//! same test hangs in `take_screenshot` until the 6h job timeout.
-//! Root cause on the headless path is still open: PR #25 confirmed
-//! that `LIBGL_ALWAYS_SOFTWARE` combined with
-//! `MESA_LOADER_DRIVER_OVERRIDE=llvmpipe` is not enough on
-//! `ubuntu-latest`.
+//! On Linux (including `ubuntu-latest` CI) the test runs by default.
+//! Two pieces of setup make both local NVIDIA+Wayland and headless CI
+//! work without manual intervention:
 //!
-//! To run locally:
-//!
-//! ```bash
-//! cargo test -p capytain-renderer --features servo --test corpus \
-//!     -- --ignored --nocapture
-//! ```
-//!
-//! The workaround fn call at the top of the test body still runs when
-//! you opt in with `--ignored`, so the test works on NVIDIA + Wayland
-//! boxes without any manual env-var export.
-
-#![cfg(all(feature = "servo", not(target_os = "windows")))]
+//! - The test body calls
+//!   [`capytain_renderer::apply_nvidia_wayland_workaround`] before
+//!   constructing the first `SoftwareRenderingContext`. Forces Mesa
+//!   llvmpipe on NVIDIA+Wayland dev boxes, bypassing
+//!   servo/surfman#354.
+//! - `CorpusRenderer::render` runs a two-`requestAnimationFrame`
+//!   nudge before `take_screenshot`. Without this, the headless
+//!   compositor goes idle after load-complete and the screenshot's
+//!   internal "rendering pipeline up to date" wait never resolves
+//!   (ruled in by PR #27's xvfb experiment — giving surfman a
+//!   display didn't unstick it either; the cause is on the
+//!   frame-emit side, not the display side). Mirrors
+//!   `show_webview_and_wait_for_rendering_to_be_ready` in Servo's
+//!   own reftest harness.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -88,7 +81,6 @@ const RENDER_HEIGHT: u32 = 600;
 /// one `CorpusRenderer`, reuse it across all fixtures, and keep the
 /// harness trivially single-threaded.
 #[test]
-#[ignore = "hangs on ubuntu-latest headless runners even with Mesa env override (PR #25); run locally with -- --ignored"]
 fn corpus_renders_every_fixture_without_panic() {
     // Apply the Linux NVIDIA EGL-Wayland workaround before
     // constructing the first `SoftwareRenderingContext`. No-op on

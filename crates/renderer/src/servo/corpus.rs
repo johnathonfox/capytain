@@ -144,6 +144,21 @@ impl CorpusRenderer {
             std::thread::sleep(Duration::from_millis(1));
         }
 
+        // Force Servo's compositor to emit a post-load frame before we
+        // ask for a screenshot. On headless surfaces (`ubuntu-latest`
+        // CI runners, surfaceless EGL) the compositor goes idle after
+        // load-complete without ever emitting a frame, and
+        // `take_screenshot`'s internal "rendering pipeline up to date"
+        // wait never resolves. A double-rAF forces at least one
+        // post-layout paint tick, which mirrors what Servo's own
+        // reftest harness does in
+        // `show_webview_and_wait_for_rendering_to_be_ready`
+        // (components/servo/tests/common/mod.rs upstream).
+        //
+        // Runs before every `render` rather than once per renderer
+        // because each document load resets the compositor state.
+        self.wait_for_rendering_to_be_ready()?;
+
         // The screenshot callback runs on the main thread under Servo's
         // event-loop pump. Shuttle the result out via RefCell.
         let slot: Rc<RefCell<Option<Result<RgbaImage, String>>>> = Rc::new(RefCell::new(None));
@@ -175,6 +190,49 @@ impl CorpusRenderer {
                 "screenshot failed: {e}"
             ))),
         }
+    }
+
+    /// Block until the current document has produced at least one
+    /// post-layout paint frame, by waiting on a two-rAF JS promise.
+    /// First rAF fires before the next paint, second fires after —
+    /// returning from the second callback guarantees the compositor
+    /// has emitted at least one frame since the most recent load.
+    fn wait_for_rendering_to_be_ready(&self) -> Result<(), RendererError> {
+        let done: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
+        {
+            let done = Rc::clone(&done);
+            self.webview.evaluate_javascript(
+                // Touching `documentElement.getBoundingClientRect()` inside
+                // the inner rAF forces layout to finish before the promise
+                // resolves; the outer rAF ensures we're past the next paint.
+                "new Promise(r => requestAnimationFrame(() => \
+                    requestAnimationFrame(() => { \
+                        document.documentElement.getBoundingClientRect(); \
+                        r(null); \
+                    }) \
+                 ))",
+                move |_| {
+                    *done.borrow_mut() = true;
+                },
+            );
+        }
+
+        // Short deadline. If the rAF nudge doesn't fire in 10s,
+        // something is already broken at a deeper layer than the
+        // screenshot wait — the outer `take_screenshot` loop
+        // below won't rescue us, so fail fast instead of hanging
+        // the whole test.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !*done.borrow() {
+            if Instant::now() > deadline {
+                return Err(RendererError::RenderingContext(
+                    "rAF nudge timed out (>10s) before take_screenshot".into(),
+                ));
+            }
+            self.servo.spin_event_loop();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
     }
 }
 
