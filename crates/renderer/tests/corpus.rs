@@ -36,7 +36,7 @@
 //!     --features servo --test corpus -- --nocapture
 //! ```
 //!
-//! # CI gating
+//! # Platform gating
 //!
 //! File-level `#![cfg(not(target_os = "windows"))]` gate: stock
 //! `windows-latest` runners ship no EGL driver, so `surfman`'s
@@ -45,29 +45,20 @@
 //! Windows is hardware-gated separately (see
 //! `crates/renderer/src/servo/windows.rs`).
 //!
-//! On Linux the test is additionally marked `#[ignore]`. It runs
-//! reliably on a local dev box once
-//! [`capytain_renderer::apply_nvidia_wayland_workaround`] has set the
-//! Mesa/glvnd env vars that sidestep the NVIDIA EGL-Wayland
-//! explicit-sync bug (servo/surfman#354, see
-//! `docs/upstream/surfman-explicit-sync.md`). But on `ubuntu-latest`
-//! headless runners — which have Mesa EGL installed by default — the
-//! same test hangs in `take_screenshot` until the 6h job timeout.
-//! Root cause on the headless path is still open: PR #25 confirmed
-//! that `LIBGL_ALWAYS_SOFTWARE` combined with
-//! `MESA_LOADER_DRIVER_OVERRIDE=llvmpipe` is not enough on
-//! `ubuntu-latest`.
+//! On Linux the test runs by default. Two pieces of environment
+//! setup make the headless / NVIDIA paths both work:
 //!
-//! To run locally:
-//!
-//! ```bash
-//! cargo test -p capytain-renderer --features servo --test corpus \
-//!     -- --ignored --nocapture
-//! ```
-//!
-//! The workaround fn call at the top of the test body still runs when
-//! you opt in with `--ignored`, so the test works on NVIDIA + Wayland
-//! boxes without any manual env-var export.
+//! - The test body calls
+//!   [`capytain_renderer::apply_nvidia_wayland_workaround`] before
+//!   constructing the first `SoftwareRenderingContext`. Forces Mesa
+//!   llvmpipe on NVIDIA+Wayland dev boxes, bypassing
+//!   servo/surfman#354 (see `docs/upstream/surfman-explicit-sync.md`).
+//! - CI runs the whole `cargo test --workspace` under `xvfb-run -a`
+//!   on `ubuntu-latest` (see `.github/workflows/ci.yml`). Without a
+//!   real or virtual X display, surfman's headless surfaceless EGL
+//!   path hangs in `take_screenshot` — the compositor never emits a
+//!   post-load frame. With xvfb providing `$DISPLAY`, surfman latches
+//!   onto the X11 backend and `take_screenshot` completes.
 
 #![cfg(all(feature = "servo", not(target_os = "windows")))]
 
@@ -88,7 +79,6 @@ const RENDER_HEIGHT: u32 = 600;
 /// one `CorpusRenderer`, reuse it across all fixtures, and keep the
 /// harness trivially single-threaded.
 #[test]
-#[ignore = "hangs on ubuntu-latest headless runners even with Mesa env override (PR #25); run locally with -- --ignored"]
 fn corpus_renders_every_fixture_without_panic() {
     // Apply the Linux NVIDIA EGL-Wayland workaround before
     // constructing the first `SoftwareRenderingContext`. No-op on

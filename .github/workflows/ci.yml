@@ -71,7 +71,8 @@ jobs:
             libgstreamer-plugins-bad1.0-dev \
             gstreamer1.0-plugins-base \
             gstreamer1.0-plugins-good \
-            libglib2.0-dev
+            libglib2.0-dev \
+            xvfb
 
       - name: Format
         run: cargo fmt --all --check
@@ -80,7 +81,19 @@ jobs:
 
       - name: Clippy (workspace, Servo on)
         run: cargo clippy --workspace --all-targets
+      # Ubuntu tests run under `xvfb-run` so surfman's Wayland / X11
+      # probing in `SoftwareRenderingContext::new` can latch onto a
+      # virtual X display. Without it, the surfaceless EGL path on
+      # headless runners hangs the corpus test inside
+      # `WebView::take_screenshot` (the compositor never emits the
+      # post-load frame the screenshot waits for). Windows runs
+      # `cargo test` directly — no display server at all there, and
+      # the corpus test is `cfg`'d off on Windows anyway.
       - name: Test (workspace)
+        if: matrix.os == 'ubuntu-latest'
+        run: xvfb-run -a cargo test --workspace
+      - name: Test (workspace)
+        if: matrix.os != 'ubuntu-latest'
         run: cargo test --workspace
       - name: Check capytain-renderer with servo feature explicitly
         run: cargo check -p capytain-renderer --features servo
