@@ -19,33 +19,12 @@
 
 use std::sync::Arc;
 
-use capytain_core::{EmailRenderer, RenderPolicy};
+use capytain_core::EmailRenderer;
 use capytain_renderer::{MainThreadDispatch, ServoRenderer};
 use dpi::PhysicalSize;
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::state::AppState;
-
-/// Phase 0 placeholder HTML. Rendered once at install time so visual
-/// validation of the reader pane doesn't require wiring the Dioxus
-/// UI to invoke `reader_render` first. Mirrors
-/// `commands::reader::HELLO_FROM_SERVO_HTML` — kept as a copy here
-/// rather than cross-importing so the `commands::reader` module
-/// doesn't gain an API surface just for a Phase 0 validation fixture.
-/// Remove once Phase 1 swaps the reader pane to on-demand
-/// message-body rendering.
-const INSTALL_TIME_TEST_HTML: &str = r#"<!DOCTYPE html>
-<html>
-<body>
-  <h1>Hello from Servo</h1>
-  <p>Phase 0 Week 6 Day 4 — reader pane rendered via the Servo-backed
-     <code>EmailRenderer</code> as a child widget of the main Tauri
-     window.</p>
-  <p><a href="https://example.com/capytain-link-click-test">
-     Click this link to exercise the navigation callback
-  </a>.</p>
-</body>
-</html>"#;
 
 /// Logical size of the Servo reader window in device-independent pixels.
 /// Fixed for Day 2; the resize path (tracking the GTK/AppKit/HWND parent)
@@ -117,12 +96,6 @@ pub fn install_servo_renderer<R: Runtime>(
     renderer.on_link_click(Box::new(|url| {
         tracing::info!(%url, "capytain-desktop: link clicked in reader pane");
     }));
-
-    // Kick a one-shot render of the Phase 0 placeholder HTML so the
-    // reader pane has visible content at launch without waiting on
-    // the Dioxus UI to invoke `reader_render`. Remove once Phase 1
-    // swaps the reader pane to on-demand message-body rendering.
-    let _handle = renderer.render(INSTALL_TIME_TEST_HTML, RenderPolicy::strict());
 
     // Drop the renderer into AppState. `try_state` because setup() can
     // run before `manage()` in some Tauri configurations — in ours
