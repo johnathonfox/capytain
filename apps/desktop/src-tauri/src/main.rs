@@ -58,6 +58,15 @@ fn main() {
         tracing::debug!("rustls CryptoProvider was already installed; continuing");
     }
 
+    // On Linux + NVIDIA proprietary driver + Wayland + KWin (and
+    // plausibly other explicit-sync-advertising compositors), the
+    // first surfman commit tears the Wayland connection with
+    // `wp_linux_drm_syncobj_surface_v1` protocol error 71. Force
+    // Mesa's llvmpipe EGL before Tauri / GTK / Servo touch GL. No-op
+    // on non-Linux. See docs/upstream/surfman-explicit-sync.md.
+    #[cfg(feature = "servo")]
+    renderer_bridge::apply_nvidia_wayland_workaround();
+
     tauri::Builder::default()
         .setup(|app| {
             // Resolve data dir + open DB on the Tauri async runtime so
