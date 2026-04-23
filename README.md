@@ -47,7 +47,7 @@ Capytain makes the opposite bet on each: pure-Rust end to end, no intermediary s
 
 - **macOS** 12 Monterey or newer (x86_64 or Apple Silicon)
 - **Windows** 10 22H2 or newer (x86_64)
-- **Linux** with a modern Wayland or X11 session (x86_64); GTK 3.24+ for the webview
+- **Linux** with a modern Wayland or X11 session (x86_64); GTK 3.24+ for the webview. On **NVIDIA proprietary driver + Wayland** the reader pane falls back to software rendering by default — see [Linux: NVIDIA + Wayland note](#linux-nvidia--wayland-note) below.
 
 ## Getting started (for developers)
 
@@ -61,6 +61,24 @@ Capytain makes the opposite bet on each: pure-Rust end to end, no intermediary s
   - **macOS:** Xcode command-line tools
   - **Windows:** Visual Studio 2022 with "Desktop development with C++"
   - **Linux:** `build-essential`, `libwebkit2gtk-4.1-dev`, `libssl-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`
+
+### Linux: NVIDIA + Wayland note
+
+On Linux + NVIDIA proprietary driver + a Wayland compositor that advertises the `wp_linux_drm_syncobj_surface_v1` explicit-sync protocol (KWin, and likely others), the first surfman commit tears the Wayland connection with a protocol error — NVIDIA's closed-source EGL-Wayland layer auto-joins the protocol but doesn't supply an acquire timeline point. Tracked upstream as [servo/surfman#354](https://github.com/servo/surfman/issues/354); full investigation in [`docs/upstream/surfman-explicit-sync.md`](./docs/upstream/surfman-explicit-sync.md).
+
+To work around this without waiting on the upstream fix, `capytain-desktop` sets three environment variables at startup (only if they are not already set) that force Mesa's llvmpipe software EGL and bypass the NVIDIA EGL-Wayland path entirely:
+
+```
+MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
+LIBGL_ALWAYS_SOFTWARE=1
+__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+```
+
+The reader pane then renders on CPU rather than GPU. For 720×560 email HTML this is fine; the reader is not a GPU-bound workload.
+
+If you want to **reproduce the native-NVIDIA bug** (e.g. to test a driver fix or an upstream surfman patch), export any one of those variables to a different value — e.g. `LIBGL_ALWAYS_SOFTWARE=0` — before launching. The code only overrides unset variables, so your export wins.
+
+Non-Linux platforms are unaffected; the workaround is a no-op on macOS and Windows.
 
 ### Building from source
 
