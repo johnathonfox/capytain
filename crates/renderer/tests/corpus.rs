@@ -64,6 +64,8 @@
 //!   `show_webview_and_wait_for_rendering_to_be_ready` in Servo's
 //!   own reftest harness.
 
+#![cfg(all(feature = "servo", not(target_os = "windows")))]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
