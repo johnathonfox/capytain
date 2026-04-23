@@ -8,6 +8,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
+  # `capytain-desktop`'s build.rs invokes `dx build --platform web` on
+  # the Dioxus UI so `cargo run` produces a working bundle. CI only
+  # runs check / clippy / test — it never launches the binary — and
+  # installing `dioxus-cli` from source would add ~4 minutes to every
+  # job. Skip the UI build step for CI builds.
+  CAPYTAIN_SKIP_UI_BUILD: "1"
 
 jobs:
   check:
