@@ -66,5 +66,18 @@ tauri = { workspace = true, features = ["devtools", "unstable"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
+# Linux-only: the child-widget integration for the Servo reader pane.
+# See `apps/desktop/src-tauri/src/linux_gtk.rs` and
+# `docs/week-6-day-4-gtk-integration.md`. All pulled in transitively
+# by Tauri 2's Linux backend already; listing here promotes them to
+# direct deps so the linux_gtk module can import them without relying
+# on transitive versioning.
+[target.'cfg(target_os = "linux")'.dependencies]
+gdk = "0.18"
+gdkwayland-sys = "0.18"
+gdkx11 = "0.18"
+glib = "0.18"
+gtk = "0.18"
+
 [lints]
 workspace = true

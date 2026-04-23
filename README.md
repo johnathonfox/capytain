@@ -57,6 +57,7 @@ Capytain makes the opposite bet on each: pure-Rust end to end, no intermediary s
 
 - Rust toolchain (version pinned in `rust-toolchain.toml`; install via [rustup](https://rustup.rs/))
 - Node.js 20+ (only for the Tauri CLI tooling)
+- `dioxus-cli` for the UI build: `cargo install dioxus-cli --locked`. `apps/desktop/src-tauri/build.rs` invokes `dx build --platform web` so `cargo run -p capytain-desktop` produces a working UI bundle. Set `CAPYTAIN_SKIP_UI_BUILD=1` to skip this step (CI already does).
 - Platform build deps:
   - **macOS:** Xcode command-line tools
   - **Windows:** Visual Studio 2022 with "Desktop development with C++"

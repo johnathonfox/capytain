@@ -69,39 +69,16 @@ pub fn install_servo_renderer<R: Runtime>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_handle = app.handle().clone();
 
-    // Dedicated auxiliary OS window for the Servo surface. **Plain**
-    // `tauri::window::WindowBuilder`, not `WebviewWindowBuilder`: if we
-    // create a second webkit2gtk-backed window here and then attach
-    // Servo's surfman context on top, both GL contexts fight over the
-    // same `wl_surface` and Wayland disconnects with protocol error
-    // 71. The Dioxus chrome stays in the *main* Tauri webview window;
-    // this window is a bare OS surface used exclusively by Servo.
-    //
-    // Kept as a separate OS window rather than embedded inside the
-    // main Tauri window because `WindowRenderingContext` paints over
-    // its target's full surface — §4.3 of the design doc describes
-    // the proper in-window child-widget integration that's deferred
-    // to Phase 1 (see docs/week-6-day-2-notes.md).
-    let reader_window = tauri::window::WindowBuilder::new(&app_handle, "servo-reader")
-        .title("Capytain Reader (Servo)")
-        .inner_size(
-            f64::from(READER_WINDOW_WIDTH),
-            f64::from(READER_WINDOW_HEIGHT),
-        )
-        .resizable(true)
-        .visible(true)
-        .build()?;
-
-    // Ensure the OS window is realized before we query its raw handle —
-    // on X11/XWayland the underlying `Window` handle isn't available
-    // until the window has been mapped at least once.
-    reader_window.show()?;
-
     let dispatcher: Arc<dyn MainThreadDispatch> = TauriDispatcher::new(app_handle.clone());
 
-    // Construct the platform-appropriate renderer. Unsupported platforms
-    // (Windows for now) skip the Servo install entirely.
-    let servo_renderer = build_servo_renderer(&reader_window, Arc::clone(&dispatcher));
+    // Construct the platform-appropriate renderer. On Linux, this
+    // reparents the Tauri main window through a `gtk::Paned` so the
+    // Servo surface becomes a sibling of the Dioxus webkit2gtk view
+    // inside the same top-level window. macOS / Windows still go
+    // through a separate OS window until their respective
+    // `NSView` / `HWND` child-surface wiring lands (week-6-day-4
+    // doc, §"Relationship to other Week 6 deferred work").
+    let servo_renderer = build_servo_renderer(app, &app_handle, Arc::clone(&dispatcher));
 
     let mut renderer: Box<dyn EmailRenderer> = match servo_renderer {
         Ok(r) => {
@@ -131,54 +108,104 @@ pub fn install_servo_renderer<R: Runtime>(
     Ok(())
 }
 
-/// Platform fan-out. Kept as a free function so the `install_servo_renderer`
-/// body reads linearly regardless of how many platforms we support.
-#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
+/// Platform fan-out. Kept as a free function so the
+/// `install_servo_renderer` body reads linearly regardless of how
+/// many platforms we support. Linux uses a child-widget attached to
+/// the main Tauri window (see `linux_gtk::LinuxGtkParent`); macOS /
+/// Windows still create a sibling OS window until their respective
+/// child-surface wiring lands.
+#[cfg(target_os = "linux")]
 fn build_servo_renderer<R: Runtime>(
-    parent: &tauri::Window<R>,
+    app: &tauri::App<R>,
+    _app_handle: &AppHandle<R>,
     dispatcher: Arc<dyn MainThreadDispatch>,
 ) -> Result<ServoRenderer, Box<dyn std::error::Error>> {
-    Ok(ServoRenderer::new_linux(
+    use crate::linux_gtk::LinuxGtkParent;
+
+    let main_window = app
+        .get_webview_window("main")
+        .ok_or("main Tauri webview window missing at Servo install time")?;
+    let gtk_window = main_window
+        .gtk_window()
+        .map_err(|e| format!("cannot resolve GTK ApplicationWindow from Tauri main window: {e}"))?;
+
+    // `Box::leak` rather than store in `AppState`: the `gtk::Paned`
+    // + `DrawingArea` are `!Send` (GTK objects live on the main
+    // thread), and AppState must be `Send + Sync` for Tauri's
+    // `State<T>`. The parent's actual lifetime requirement is
+    // "as long as Servo holds a raw handle to the `gdk::Window`",
+    // which is the lifetime of the process — leak matches that
+    // exactly and avoids a `!Send` field in AppState.
+    let parent: &'static LinuxGtkParent = Box::leak(Box::new(LinuxGtkParent::install(
+        &gtk_window,
+        READER_WINDOW_WIDTH as i32,
+    )?));
+
+    let renderer = ServoRenderer::new_linux(
         dispatcher,
         parent,
         PhysicalSize::new(READER_WINDOW_WIDTH, READER_WINDOW_HEIGHT),
-    )?)
+    )?;
+
+    Ok(renderer)
 }
 
 #[cfg(target_os = "macos")]
 fn build_servo_renderer<R: Runtime>(
-    parent: &tauri::Window<R>,
+    _app: &tauri::App<R>,
+    app_handle: &AppHandle<R>,
     dispatcher: Arc<dyn MainThreadDispatch>,
 ) -> Result<ServoRenderer, Box<dyn std::error::Error>> {
+    let reader_window = build_auxiliary_window(app_handle)?;
     Ok(ServoRenderer::new_macos(
         dispatcher,
-        parent,
+        &reader_window,
         PhysicalSize::new(READER_WINDOW_WIDTH, READER_WINDOW_HEIGHT),
     )?)
 }
 
 #[cfg(target_os = "windows")]
 fn build_servo_renderer<R: Runtime>(
-    parent: &tauri::Window<R>,
+    _app: &tauri::App<R>,
+    app_handle: &AppHandle<R>,
     dispatcher: Arc<dyn MainThreadDispatch>,
 ) -> Result<ServoRenderer, Box<dyn std::error::Error>> {
+    let reader_window = build_auxiliary_window(app_handle)?;
     Ok(ServoRenderer::new_windows(
         dispatcher,
-        parent,
+        &reader_window,
         PhysicalSize::new(READER_WINDOW_WIDTH, READER_WINDOW_HEIGHT),
     )?)
 }
 
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "macos",
-    target_os = "windows",
-    target_os = "freebsd",
-    target_os = "netbsd"
-)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn build_servo_renderer<R: Runtime>(
-    _parent: &tauri::Window<R>,
+    _app: &tauri::App<R>,
+    _app_handle: &AppHandle<R>,
     _dispatcher: Arc<dyn MainThreadDispatch>,
 ) -> Result<ServoRenderer, Box<dyn std::error::Error>> {
     Err("Servo renderer is not yet implemented on this platform".into())
+}
+
+/// Auxiliary OS window used on the platforms that don't yet have
+/// native child-surface wiring (macOS, Windows). Linux now uses the
+/// `linux_gtk::LinuxGtkParent` reparenting path instead.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn build_auxiliary_window<R: Runtime>(
+    app_handle: &AppHandle<R>,
+) -> Result<tauri::Window<R>, Box<dyn std::error::Error>> {
+    let reader_window = tauri::window::WindowBuilder::new(app_handle, "servo-reader")
+        .title("Capytain Reader (Servo)")
+        .inner_size(
+            f64::from(READER_WINDOW_WIDTH),
+            f64::from(READER_WINDOW_HEIGHT),
+        )
+        .resizable(true)
+        .visible(true)
+        .build()?;
+    // Ensure the OS window is realized before its raw handle is
+    // queried — X11/XWayland doesn't expose the native window handle
+    // until the surface has been mapped.
+    reader_window.show()?;
+    Ok(reader_window)
 }
