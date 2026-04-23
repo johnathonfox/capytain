@@ -102,7 +102,12 @@ capytain-storage = { path = "crates/storage", version = "=0.0.0" }
 capytain-telemetry = { path = "crates/telemetry", version = "=0.0.0" }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny` (rather than `forbid`) so narrow, documented `#[allow(unsafe_code)]`
+# escapes are possible in crates that cross FFI boundaries — specifically
+# `apps/desktop/src-tauri/src/linux_gtk.rs`, which extracts raw Wayland /
+# X11 handles from GTK for Servo's `WindowRenderingContext`. Every such
+# allowance must include a SAFETY comment at the unsafe block.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

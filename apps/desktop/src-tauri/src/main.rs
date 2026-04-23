@@ -20,6 +20,8 @@
 //!   main thread, where the Tauri `setup` hook runs.
 
 mod commands;
+#[cfg(all(feature = "servo", target_os = "linux"))]
+mod linux_gtk;
 #[cfg(feature = "servo")]
 mod renderer_bridge;
 mod state;
