@@ -36,37 +36,45 @@
 //!     --features servo --test corpus -- --nocapture
 //! ```
 //!
-//! # CI gating (opt-in)
+//! # CI gating
 //!
-//! Marked `#[ignore]` so default `cargo test` runs skip it. Servo's
-//! `SoftwareRenderingContext` is backed by `surfman`, which still needs
-//! a working EGL driver on the host even on the software path:
+//! File-level `#![cfg(not(target_os = "windows"))]` gate: stock
+//! `windows-latest` runners ship no EGL driver, so `surfman`'s
+//! `SoftwareRenderingContext` construction panics with `"egl function
+//! was not loaded"` before the test body runs. Runtime validation on
+//! Windows is hardware-gated separately (see
+//! `crates/renderer/src/servo/windows.rs`).
 //!
-//! - `windows-latest` runners ship no EGL and panic with
-//!   `"egl function was not loaded"` when the test constructs a
-//!   context.
-//! - `ubuntu-latest` runners have Mesa EGL installed but the
-//!   `take_screenshot` callback never fires in the headless runner —
-//!   the test sits waiting until the 6h job timeout.
+//! On Linux the test is additionally marked `#[ignore]`. It runs
+//! reliably on a local dev box once
+//! [`capytain_renderer::apply_nvidia_wayland_workaround`] has set the
+//! Mesa/glvnd env vars that sidestep the NVIDIA EGL-Wayland
+//! explicit-sync bug (servo/surfman#354, see
+//! `docs/upstream/surfman-explicit-sync.md`). But on `ubuntu-latest`
+//! headless runners — which have Mesa EGL installed by default — the
+//! same test hangs in `take_screenshot` until the 6h job timeout.
+//! Root cause on the headless path is still open: PR #25 confirmed
+//! that `LIBGL_ALWAYS_SOFTWARE` combined with
+//! `MESA_LOADER_DRIVER_OVERRIDE=llvmpipe` is not enough on
+//! `ubuntu-latest`.
 //!
-//! Every main-branch merge since PR #19 (when this harness landed)
-//! has hit that Ubuntu hang, hence the opt-in gate. To run locally:
+//! To run locally:
 //!
 //! ```bash
 //! cargo test -p capytain-renderer --features servo --test corpus \
 //!     -- --ignored --nocapture
 //! ```
 //!
-//! Runtime validation on Windows and on headless CI is hardware- or
-//! environment-gated separately; this harness is a maintainer-run
-//! regression tool, not a required CI gate.
+//! The workaround fn call at the top of the test body still runs when
+//! you opt in with `--ignored`, so the test works on NVIDIA + Wayland
+//! boxes without any manual env-var export.
 
-#![cfg(feature = "servo")]
+#![cfg(all(feature = "servo", not(target_os = "windows")))]
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use capytain_renderer::CorpusRenderer;
+use capytain_renderer::{apply_nvidia_wayland_workaround, CorpusRenderer};
 use dpi::PhysicalSize;
 use image::RgbaImage;
 
@@ -80,8 +88,15 @@ const RENDER_HEIGHT: u32 = 600;
 /// one `CorpusRenderer`, reuse it across all fixtures, and keep the
 /// harness trivially single-threaded.
 #[test]
-#[ignore = "maintainer-run regression harness; hangs on headless CI and panics on Windows — see module docs"]
+#[ignore = "hangs on ubuntu-latest headless runners even with Mesa env override (PR #25); run locally with -- --ignored"]
 fn corpus_renders_every_fixture_without_panic() {
+    // Apply the Linux NVIDIA EGL-Wayland workaround before
+    // constructing the first `SoftwareRenderingContext`. No-op on
+    // non-Linux and a no-op if the caller has already exported the
+    // vars themselves (e.g. to reproduce the native-NVIDIA bug
+    // against an upstream surfman fix).
+    apply_nvidia_wayland_workaround();
+
     let fixtures_dir = workspace_path(&["crates", "renderer", "tests", "corpus", "fixtures"]);
     let reference_dir = workspace_path(&["crates", "renderer", "tests", "corpus", "reference"]);
 

@@ -13,11 +13,9 @@
 //!    dedicated Servo reader window, attaches the renderer to it, and
 //!    registers the link-click callback.
 //!
-//! 3. [`apply_nvidia_wayland_workaround`] — a Linux-only env-var
-//!    override that forces Mesa's llvmpipe EGL path, sidestepping the
-//!    NVIDIA EGL-Wayland explicit-sync protocol error tracked in
-//!    `docs/upstream/surfman-explicit-sync.md` (servo/surfman#354).
-//!    Called from `main` before Tauri starts the event loop.
+//! The Linux NVIDIA EGL-Wayland env-var workaround lives in
+//! `capytain_renderer::apply_nvidia_wayland_workaround` and is called
+//! directly from `main` — shared with the corpus integration test.
 
 use std::sync::Arc;
 
@@ -183,52 +181,4 @@ fn build_servo_renderer<R: Runtime>(
     _dispatcher: Arc<dyn MainThreadDispatch>,
 ) -> Result<ServoRenderer, Box<dyn std::error::Error>> {
     Err("Servo renderer is not yet implemented on this platform".into())
-}
-
-/// On Linux, force Mesa's llvmpipe software EGL before any GL code
-/// runs. Bypasses the `wp_linux_drm_syncobj_surface_v1` protocol error
-/// NVIDIA's closed-source EGL-Wayland layer triggers when the
-/// compositor advertises explicit sync — see
-/// `docs/upstream/surfman-explicit-sync.md` (filed as
-/// servo/surfman#354).
-///
-/// Each variable is only set if currently unset, so a developer can
-/// override with native EGL to reproduce the bug (or test against a
-/// driver fix) by exporting the variable before launch. Intended for
-/// call from `main` after the telemetry init and before any Tauri /
-/// GTK / Servo code touches GL.
-///
-/// Linux software rendering is fine for the reader pane: CPU cost of
-/// rendering email HTML at 720x560 is negligible.
-pub fn apply_nvidia_wayland_workaround() {
-    #[cfg(target_os = "linux")]
-    {
-        const OVERRIDES: &[(&str, &str)] = &[
-            ("MESA_LOADER_DRIVER_OVERRIDE", "llvmpipe"),
-            ("LIBGL_ALWAYS_SOFTWARE", "1"),
-            (
-                "__EGL_VENDOR_LIBRARY_FILENAMES",
-                "/usr/share/glvnd/egl_vendor.d/50_mesa.json",
-            ),
-        ];
-
-        let mut applied: Vec<&'static str> = Vec::new();
-        for (name, value) in OVERRIDES {
-            if std::env::var_os(name).is_none() {
-                std::env::set_var(name, value);
-                applied.push(name);
-            }
-        }
-
-        if applied.is_empty() {
-            tracing::debug!(
-                "capytain-desktop: NVIDIA EGL-Wayland workaround skipped (all vars already set)"
-            );
-        } else {
-            tracing::info!(
-                vars = ?applied,
-                "capytain-desktop: applied NVIDIA EGL-Wayland workaround (servo/surfman#354)"
-            );
-        }
-    }
 }

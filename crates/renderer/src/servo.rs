@@ -55,6 +55,54 @@ mod windows;
 pub use corpus::{render_html_to_image, CorpusRenderer};
 use delegate::{CapytainDelegate, LinkCb};
 
+/// On Linux, force Mesa's llvmpipe software EGL before any GL code
+/// runs. Bypasses the `wp_linux_drm_syncobj_surface_v1` protocol error
+/// NVIDIA's closed-source EGL-Wayland layer triggers when the
+/// compositor advertises explicit sync (KWin on Wayland) — filed
+/// upstream as servo/surfman#354 and documented in
+/// `docs/upstream/surfman-explicit-sync.md`.
+///
+/// Each variable is only set if currently unset, so a developer can
+/// override with native EGL to reproduce the bug (or test against a
+/// driver fix) by exporting the variable before launch. Safe to call
+/// from anywhere before the first `RenderingContext` construction —
+/// callers include the desktop bin at `main()` entry and the corpus
+/// integration test at the top of its single `#[test]` function.
+///
+/// Software rendering is the right default for the reader pane
+/// (~720×560 email HTML) and for the corpus harness (800×600 static
+/// documents); neither is a GPU-bound workload.
+pub fn apply_nvidia_wayland_workaround() {
+    #[cfg(target_os = "linux")]
+    {
+        const OVERRIDES: &[(&str, &str)] = &[
+            ("MESA_LOADER_DRIVER_OVERRIDE", "llvmpipe"),
+            ("LIBGL_ALWAYS_SOFTWARE", "1"),
+            (
+                "__EGL_VENDOR_LIBRARY_FILENAMES",
+                "/usr/share/glvnd/egl_vendor.d/50_mesa.json",
+            ),
+        ];
+
+        let mut applied: Vec<&'static str> = Vec::new();
+        for (name, value) in OVERRIDES {
+            if std::env::var_os(name).is_none() {
+                std::env::set_var(name, value);
+                applied.push(name);
+            }
+        }
+
+        if applied.is_empty() {
+            tracing::debug!("NVIDIA EGL-Wayland workaround skipped (all vars already set)");
+        } else {
+            tracing::info!(
+                vars = ?applied,
+                "applied NVIDIA EGL-Wayland workaround (servo/surfman#354)"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public surface
 // ---------------------------------------------------------------------------
