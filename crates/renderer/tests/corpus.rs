@@ -36,25 +36,37 @@
 //!     --features servo --test corpus -- --nocapture
 //! ```
 //!
-//! # Platform gating
+//! # CI gating
 //!
-//! Excluded from `windows-*` targets. Stock `windows-latest` runners
-//! ship no EGL driver, so `surfman`'s `SoftwareRenderingContext`
-//! construction panics with `"egl function was not loaded"` before
-//! this test gets a chance to do anything useful. Runtime validation
-//! on Windows is hardware-gated separately (see
+//! File-level `#![cfg(not(target_os = "windows"))]` gate: stock
+//! `windows-latest` runners ship no EGL driver, so `surfman`'s
+//! `SoftwareRenderingContext` construction panics with `"egl function
+//! was not loaded"` before the test body runs. Runtime validation on
+//! Windows is hardware-gated separately (see
 //! `crates/renderer/src/servo/windows.rs`).
 //!
-//! On Linux, the test calls
-//! [`capytain_renderer::apply_nvidia_wayland_workaround`] at startup,
-//! which sets `MESA_LOADER_DRIVER_OVERRIDE=llvmpipe` +
-//! `LIBGL_ALWAYS_SOFTWARE=1` +
-//! `__EGL_VENDOR_LIBRARY_FILENAMES=.../50_mesa.json` (only if unset).
-//! That forces Mesa's llvmpipe software EGL and bypasses NVIDIA's
-//! closed-source EGL-Wayland layer, which otherwise traps the
-//! `take_screenshot` callback on NVIDIA + Wayland boxes. See
-//! `docs/upstream/surfman-explicit-sync.md` for the upstream bug
-//! (servo/surfman#354).
+//! On Linux the test is additionally marked `#[ignore]`. It runs
+//! reliably on a local dev box once
+//! [`capytain_renderer::apply_nvidia_wayland_workaround`] has set the
+//! Mesa/glvnd env vars that sidestep the NVIDIA EGL-Wayland
+//! explicit-sync bug (servo/surfman#354, see
+//! `docs/upstream/surfman-explicit-sync.md`). But on `ubuntu-latest`
+//! headless runners — which have Mesa EGL installed by default — the
+//! same test hangs in `take_screenshot` until the 6h job timeout.
+//! Root cause on the headless path is still open; `LIBGL_ALWAYS_SOFTWARE`
+//! + `MESA_LOADER_DRIVER_OVERRIDE=llvmpipe` were confirmed not enough
+//! by PR #25.
+//!
+//! To run locally:
+//!
+//! ```bash
+//! cargo test -p capytain-renderer --features servo --test corpus \
+//!     -- --ignored --nocapture
+//! ```
+//!
+//! The workaround fn call at the top of the test body still runs when
+//! you opt in with `--ignored`, so the test works on NVIDIA + Wayland
+//! boxes without any manual env-var export.
 
 #![cfg(all(feature = "servo", not(target_os = "windows")))]
 
@@ -75,6 +87,7 @@ const RENDER_HEIGHT: u32 = 600;
 /// one `CorpusRenderer`, reuse it across all fixtures, and keep the
 /// harness trivially single-threaded.
 #[test]
+#[ignore = "hangs on ubuntu-latest headless runners even with Mesa env override (PR #25); run locally with -- --ignored"]
 fn corpus_renders_every_fixture_without_panic() {
     // Apply the Linux NVIDIA EGL-Wayland workaround before
     // constructing the first `SoftwareRenderingContext`. No-op on
