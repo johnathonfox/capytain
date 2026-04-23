@@ -101,6 +101,19 @@ impl LinuxGtkParent {
         // Servo wants the window handle immediately.
         drawing_area.realize();
 
+        // Force the DrawingArea's `gdk::Window` to have a real
+        // native backing (wl_subsurface on Wayland, separate X
+        // Window on X11). GTK3 by default implements child widget
+        // windows as client-side regions inside the parent's native
+        // surface — cheap, but surfman can't bind a GL context to a
+        // client-side region because there's no real surface to
+        // swap buffers on. Without `ensure_native`, Servo paints
+        // into a synthetic window that GDK never presents to the
+        // compositor, and the reader pane stays blank.
+        if let Some(gdk_window) = drawing_area.window() {
+            gdk_window.ensure_native();
+        }
+
         Ok(Self {
             _paned: paned,
             drawing_area,
