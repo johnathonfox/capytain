@@ -53,9 +53,10 @@
 //! `docs/upstream/surfman-explicit-sync.md`). But on `ubuntu-latest`
 //! headless runners — which have Mesa EGL installed by default — the
 //! same test hangs in `take_screenshot` until the 6h job timeout.
-//! Root cause on the headless path is still open; `LIBGL_ALWAYS_SOFTWARE`
-//! + `MESA_LOADER_DRIVER_OVERRIDE=llvmpipe` were confirmed not enough
-//! by PR #25.
+//! Root cause on the headless path is still open: PR #25 confirmed
+//! that `LIBGL_ALWAYS_SOFTWARE` combined with
+//! `MESA_LOADER_DRIVER_OVERRIDE=llvmpipe` is not enough on
+//! `ubuntu-latest`.
 //!
 //! To run locally:
 //!
