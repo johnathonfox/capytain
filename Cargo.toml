@@ -31,6 +31,7 @@ authors = ["Capytain Contributors"]
 publish = false
 
 [workspace.dependencies]
+ammonia = "4"
 async-trait = "0.1"
 base64 = "0.22"
 futures-core = "0.3"

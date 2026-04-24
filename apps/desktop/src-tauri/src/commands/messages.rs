@@ -10,7 +10,7 @@
 //! outbox / optimistic-mutation engine.
 
 use capytain_ipc::{FolderId, IpcResult, MessageId, MessagePage, RenderedMessage, SortOrder};
-use capytain_mime::{parse_rfc822, MessageIdentity};
+use capytain_mime::{parse_rfc822, sanitize_email_html, MessageIdentity};
 use capytain_storage::{repos::messages as messages_repo, BlobStore};
 use serde::Deserialize;
 use tauri::State;
@@ -101,7 +101,7 @@ pub async fn messages_get(
     let body_path = messages_repo::body_path(&*db, &input.id).await?;
     drop(db);
 
-    let (body_text, attachments) = if body_path.is_some() {
+    let (body_text, sanitized_html, attachments) = if body_path.is_some() {
         // We persist blobs under the canonical path the BlobStore
         // resolves for (account, folder, message). Re-deriving it
         // through `BlobStore::path_for` keeps the reader symmetric
@@ -123,8 +123,21 @@ pub async fn messages_get(
                     labels: &headers.labels,
                 },
             ) {
-                Some(body) => (body.body_text, body.attachments),
-                None => (None, Vec::new()),
+                Some(body) => {
+                    // Phase 1 Week 7: pass the HTML alternative
+                    // through the ammonia-based sanitizer before
+                    // handing it to the UI. `body_html` is the raw
+                    // `text/html` part straight out of the message;
+                    // `sanitize_email_html` strips scripts, inline
+                    // event handlers, `javascript:` URLs, and every
+                    // non-presentational element. Remote-content
+                    // blocking (Week 8) is a separate pipeline stage
+                    // that runs inside Servo's resource resolver;
+                    // the sanitizer only touches markup.
+                    let sanitized = body.body_html.as_deref().map(sanitize_email_html);
+                    (body.body_text, sanitized, body.attachments)
+                }
+                None => (None, None, Vec::new()),
             },
             Err(e) => {
                 // A stale `body_path` with no blob on disk is a cache
@@ -134,16 +147,16 @@ pub async fn messages_get(
                     id = %headers.id.0,
                     "messages_get: body blob missing: {e}"
                 );
-                (None, Vec::new())
+                (None, None, Vec::new())
             }
         }
     } else {
-        (None, Vec::new())
+        (None, None, Vec::new())
     };
 
     Ok(RenderedMessage {
         headers,
-        sanitized_html: None,
+        sanitized_html,
         body_text,
         attachments,
         sender_is_trusted: false,

@@ -93,19 +93,26 @@ pub fn App() -> Element {
     }
 }
 
-// ---------- Phase 0 reader-pane HTML composer ----------
+// ---------- Reader-pane HTML composer ----------
 
 /// Build the HTML document the Servo reader pane renders when a
-/// message is selected. Phase 0 composes the document in the UI
-/// from `RenderedMessage` fields so the Servo seam (`reader_render`)
-/// can stay a pure "render this HTML" command; Phase 1 swaps this
-/// for `rendered.sanitized_html` once the ammonia / adblock pipelines
-/// populate it server-side.
+/// message is selected.
 ///
-/// Plaintext body content is passed through [`minimal_escape`] before
-/// injection to prevent inline `<script>` or other HTML smuggling
-/// via otherwise-innocent text/plain bodies. Headers (subject, from,
-/// date) are already escaped the same way.
+/// Preference order for the body section:
+///
+/// 1. `rendered.sanitized_html` — populated by `messages_get` via
+///    `capytain_mime::sanitize_email_html` (Phase 1 Week 7). This
+///    is the normal path for modern email and carries the original
+///    layout, tables, inline styles, etc.
+/// 2. `rendered.body_text` escaped through [`minimal_escape`] and
+///    wrapped in `<pre>` — fallback for messages that have no
+///    `text/html` alternative or whose sanitized HTML came back
+///    empty (very aggressive strip).
+/// 3. A small "no body cached yet" hint otherwise.
+///
+/// Headers (subject, from, date) are always escaped via
+/// `minimal_escape`; they never go through the ammonia pipeline
+/// because they're always plain text at source.
 fn compose_reader_html(rendered: &RenderedMessage) -> String {
     let subject = minimal_escape(&rendered.headers.subject);
     let from = rendered
@@ -124,14 +131,8 @@ fn compose_reader_html(rendered: &RenderedMessage) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     let date = rendered.headers.date.to_rfc2822();
-    let body = rendered
-        .body_text
-        .as_deref()
-        .map(minimal_escape)
-        .unwrap_or_else(|| {
-            "<em>No plaintext body stored locally. Run <code>mailcli sync</code> to fetch.</em>"
-                .to_string()
-        });
+
+    let body_section = render_body_section(rendered);
 
     format!(
         r#"<!DOCTYPE html>
@@ -140,18 +141,40 @@ fn compose_reader_html(rendered: &RenderedMessage) -> String {
   <meta charset="utf-8">
   <style>
     body {{ font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; color: #e6e8eb; background: #0f1115; margin: 0; padding: 1.25rem; }}
-    h1 {{ font-size: 1.15rem; margin: 0 0 0.5rem; }}
-    .meta {{ color: #8a929b; font-size: 0.85em; margin-bottom: 1rem; }}
-    pre {{ white-space: pre-wrap; word-wrap: break-word; margin: 0; font: inherit; }}
+    h1.capytain-subject {{ font-size: 1.15rem; margin: 0 0 0.5rem; }}
+    .capytain-meta {{ color: #8a929b; font-size: 0.85em; margin-bottom: 1rem; }}
+    .capytain-body {{ color: inherit; }}
+    .capytain-body pre {{ white-space: pre-wrap; word-wrap: break-word; margin: 0; font: inherit; }}
+    .capytain-body a {{ color: #74b4ff; }}
   </style>
 </head>
 <body>
-  <h1>{subject}</h1>
-  <div class="meta">From: {from} · {date}</div>
-  <pre>{body}</pre>
+  <h1 class="capytain-subject">{subject}</h1>
+  <div class="capytain-meta">From: {from} · {date}</div>
+  <div class="capytain-body">{body_section}</div>
 </body>
 </html>"#
     )
+}
+
+/// Pick the right body rendering for the reader pane. Separated
+/// from `compose_reader_html` so the preference order is easy to
+/// read and test.
+fn render_body_section(rendered: &RenderedMessage) -> String {
+    // 1. Sanitized HTML if present and non-empty after trim.
+    if let Some(html) = rendered.sanitized_html.as_deref() {
+        if !html.trim().is_empty() {
+            return html.to_string();
+        }
+    }
+    // 2. Plaintext body through minimal_escape + <pre>.
+    if let Some(text) = rendered.body_text.as_deref() {
+        if !text.trim().is_empty() {
+            return format!("<pre>{}</pre>", minimal_escape(text));
+        }
+    }
+    // 3. "Nothing to show" hint.
+    "<em>No body cached locally. Run <code>mailcli sync</code> to fetch.</em>".to_string()
 }
 
 /// Minimal HTML escaping for text content. Not a full sanitizer —
