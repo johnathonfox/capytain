@@ -106,7 +106,28 @@ pub fn App() -> Element {
 /// sanitized HTML body → render via `reader_render`) wires up.
 #[component]
 fn ServoTestButton() -> Element {
-    let trigger = move |_| {
+    // In-flight flag: disable the button while an invoke is pending
+    // so a single click can't spam `reader_render` through multiple
+    // synthetic fires (observed during phase-0 headless probing —
+    // `reader_render` logged ~6 times per physical click, suspected
+    // focus/auto-activation in the webview's event path). Also
+    // surfaces the call as user feedback — the button reads
+    // "Rendering…" while the command is in flight.
+    let mut in_flight = use_signal(|| false);
+
+    let trigger = move |evt: Event<MouseData>| {
+        // `stop_propagation` + `prevent_default` cover the two easy
+        // paths for duplicate fires: event bubbling up to an ancestor
+        // with its own click handler, and any latent form-submit
+        // semantics the webview might layer on top of <button>.
+        evt.stop_propagation();
+        evt.prevent_default();
+
+        if *in_flight.read() {
+            return;
+        }
+        in_flight.set(true);
+
         spawn(async move {
             // Errors here are only observable from the Tauri-side
             // backend log (`tracing::warn!("reader_render: ...")`);
@@ -118,14 +139,25 @@ fn ServoTestButton() -> Element {
                 serde_json::json!({ "input": { "id": MessageId("phase0-servo-test".into()) } }),
             )
             .await;
+            in_flight.set(false);
         });
     };
 
     rsx! {
         button {
             class: "servo-test",
+            // `type="button"` so the webview never treats this as a
+            // form submit (the default `type` is `submit` inside a
+            // form context; we aren't in one here, but belt +
+            // suspenders).
+            r#type: "button",
+            disabled: *in_flight.read(),
             onclick: trigger,
-            "Render test page in Servo"
+            if *in_flight.read() {
+                "Rendering…"
+            } else {
+                "Render test page in Servo"
+            }
         }
     }
 }
