@@ -36,7 +36,7 @@
 //!     --features servo --test corpus -- --nocapture
 //! ```
 //!
-//! # CI gating
+//! # Platform gating
 //!
 //! File-level `#![cfg(not(target_os = "windows"))]` gate: stock
 //! `windows-latest` runners ship no EGL driver, so `surfman`'s
@@ -45,18 +45,28 @@
 //! Windows is hardware-gated separately (see
 //! `crates/renderer/src/servo/windows.rs`).
 //!
-//! On Linux the test is additionally marked `#[ignore]`. It runs
-//! reliably on a local dev box once
+//! On Linux the test runs reliably once
 //! [`capytain_renderer::apply_nvidia_wayland_workaround`] has set the
 //! Mesa/glvnd env vars that sidestep the NVIDIA EGL-Wayland
-//! explicit-sync bug (servo/surfman#354, see
-//! `docs/upstream/surfman-explicit-sync.md`). But on `ubuntu-latest`
-//! headless runners — which have Mesa EGL installed by default — the
-//! same test hangs in `take_screenshot` until the 6h job timeout.
-//! Root cause on the headless path is still open: PR #25 confirmed
-//! that `LIBGL_ALWAYS_SOFTWARE` combined with
-//! `MESA_LOADER_DRIVER_OVERRIDE=llvmpipe` is not enough on
-//! `ubuntu-latest`.
+//! explicit-sync bug (servo/surfman#354). The test calls that helper
+//! automatically.
+//!
+//! The test is still marked `#[ignore]` on CI. Two separate
+//! experiments have ruled out the simpler fixes:
+//!
+//! - PR #27 (xvfb-run): giving surfman a virtual `$DISPLAY` doesn't
+//!   unstick `take_screenshot` on `ubuntu-latest`.
+//! - PR #28 (this one, originally): the harness-side rAF nudge in
+//!   `CorpusRenderer::wait_for_rendering_to_be_ready` mirrors Servo's
+//!   own reftest harness; the nudge itself completes, but
+//!   `take_screenshot` still hangs past 40 min. The hang is further
+//!   into Servo's screenshot wait than a single post-load frame gate.
+//!
+//! The rAF nudge stays in `CorpusRenderer::render` — it's correct
+//! defensive code that speeds up local runs and may unblock other
+//! headless environments — but the `#[ignore]` stays until either
+//! a Servo upstream fix lands in `take_screenshot` or a hardware CI
+//! runner slots in.
 //!
 //! To run locally:
 //!
@@ -64,10 +74,6 @@
 //! cargo test -p capytain-renderer --features servo --test corpus \
 //!     -- --ignored --nocapture
 //! ```
-//!
-//! The workaround fn call at the top of the test body still runs when
-//! you opt in with `--ignored`, so the test works on NVIDIA + Wayland
-//! boxes without any manual env-var export.
 
 #![cfg(all(feature = "servo", not(target_os = "windows")))]
 
@@ -88,7 +94,7 @@ const RENDER_HEIGHT: u32 = 600;
 /// one `CorpusRenderer`, reuse it across all fixtures, and keep the
 /// harness trivially single-threaded.
 #[test]
-#[ignore = "hangs on ubuntu-latest headless runners even with Mesa env override (PR #25); run locally with -- --ignored"]
+#[ignore = "take_screenshot hangs on ubuntu-latest beyond the rAF-nudge gate (PR #28); run locally with -- --ignored"]
 fn corpus_renders_every_fixture_without_panic() {
     // Apply the Linux NVIDIA EGL-Wayland workaround before
     // constructing the first `SoftwareRenderingContext`. No-op on
