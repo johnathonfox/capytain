@@ -43,6 +43,31 @@ pub fn parse_rfc822(raw: &[u8], identity: MessageIdentity<'_>) -> Option<Message
 
 /// Parse just the headers plus a short snippet — used in list responses
 /// where we don't want to buffer the full body.
+/// Decode a single RFC-2047 encoded-word header value
+/// (`=?UTF-8?Q?…?=`, `=?UTF-8?B?…?=`, etc.) into a plain `String`.
+///
+/// IMAP `ENVELOPE` responses surface raw header bytes with their
+/// encoded-word wrappers intact; `mail-parser`'s `Message::subject()`
+/// handles decoding as part of full-message parsing but there's no
+/// exposed standalone "decode this header value" helper. Work around
+/// that by parsing a synthetic one-header message and pulling the
+/// decoded subject back out.
+///
+/// Returns the input unchanged if the parser can't build a Message
+/// (shouldn't happen for well-formed input, but staying lenient
+/// beats losing the raw text entirely).
+pub fn decode_header_value(raw: &str) -> String {
+    if !raw.contains("=?") {
+        // Fast path: not an encoded word, nothing to do.
+        return raw.to_string();
+    }
+    let synthetic = format!("Subject: {raw}\r\n\r\n");
+    MessageParser::default()
+        .parse(synthetic.as_bytes())
+        .and_then(|m| m.subject().map(|s| s.to_string()))
+        .unwrap_or_else(|| raw.to_string())
+}
+
 pub fn parse_headers(raw: &[u8], identity: MessageIdentity<'_>) -> Option<MessageHeaders> {
     let parsed = MessageParser::default().parse(raw)?;
     Some(headers_from(&parsed, &identity))
