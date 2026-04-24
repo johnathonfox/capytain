@@ -64,7 +64,9 @@ impl LinuxGtkParent {
         // ApplicationWindow, our reparenting walks the wrong
         // hierarchy and Servo ends up getting a handle to a surface
         // that doesn't live inside the user-visible main window.
-        tracing::info!(
+        // Demoted to `debug!` post-validation — it was useful for
+        // the PR #30 investigation but is noise in normal operation.
+        tracing::debug!(
             widget_type = %glib::ObjectExt::type_(app_window).name(),
             is_toplevel = app_window.is_toplevel(),
             "linux_gtk: reparenting into Tauri's main gtk_window"
@@ -75,7 +77,7 @@ impl LinuxGtkParent {
         let original = app_window
             .child()
             .ok_or("main window has no child widget")?;
-        tracing::info!(
+        tracing::debug!(
             child_type = %glib::ObjectExt::type_(&original).name(),
             "linux_gtk: removing original child from app_window"
         );
@@ -162,13 +164,17 @@ impl LinuxGtkParent {
         if let Some(gdk_window) = drawing_area.window() {
             let (w, h) = (gdk_window.width(), gdk_window.height());
             let parent = gdk_window.effective_parent();
-            tracing::info!(
+            tracing::debug!(
                 drawing_area_size = ?(w, h),
                 window_type = ?gdk_window.window_type(),
                 has_parent = parent.is_some(),
                 "linux_gtk: DrawingArea gdk::Window after layout pump"
             );
             if w <= 1 || h <= 1 {
+                // Stays at `warn!` — this would mean Servo is about
+                // to get a bad handle and render to a detached
+                // surface, which is a visible user-level bug worth
+                // surfacing loudly.
                 tracing::warn!(
                     size = ?(w, h),
                     "linux_gtk: DrawingArea still 0/1 pixel at handle-extract time — Servo \
