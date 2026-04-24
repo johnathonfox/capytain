@@ -8,8 +8,12 @@
 //! and `capytain-jmap-client` call into [`parse_rfc822`] when a
 //! `fetch_message` response comes back as raw bytes.
 
+use std::borrow::Cow;
+
 use chrono::{TimeZone, Utc};
 use mail_parser::{Address, HeaderValue, Message, MessageParser, MimeHeaders, PartType};
+
+pub mod remote_content;
 
 // mail-parser's Address::iter() returns Box<dyn DoubleEndedIterator<...>>,
 // which gives us one uniform shape regardless of whether the underlying
@@ -55,26 +59,50 @@ pub fn parse_rfc822(raw: &[u8], identity: MessageIdentity<'_>) -> Option<Message
 ///   we're rendering via Servo with JavaScript disabled anyway
 ///   (belt + suspenders). The `<style>` **element** remains
 ///   stripped: it can load external resources via `@import url(...)`
-///   which would bypass the Phase 1 Week 8 remote-content policy
-///   before it's in place.
+///   which would bypass the remote-content policy.
 /// - Tag stripping list (`script`, `iframe`, `object`, `embed`,
 ///   `form`, `input`, `button`, `textarea`, `select`, `style`,
 ///   `link`) is redundant with ammonia's default allowlist but
 ///   explicit — if ammonia ever loosens its defaults in a minor
 ///   release, these stay stripped.
 ///
+/// Phase 1 Week 8 adds **remote-content blocking**: every URL in a
+/// `src` / `background` / `poster` / `srcset` attribute runs
+/// through [`remote_content::is_blocked`] against the default
+/// curated adblock engine. Blocked URLs get the attribute dropped,
+/// which neutralizes the resource load (browsers render the
+/// placeholder "missing image" glyph when `<img>` has no `src`).
+/// Link hrefs are deliberately not filtered here — blocking an
+/// outbound anchor is user-hostile; link-click cleaning (utm_*
+/// stripping, Mailchimp/SendGrid redirect unwrapping) is a
+/// separate pipeline stage in the renderer's `on_link_click`
+/// callback.
+///
 /// Returns empty-ish output is acceptable: the reader UI's
 /// `compose_reader_html` falls back to the plaintext path when the
-/// sanitized result is empty or whitespace-only. That matches the
-/// behavior of a well-intentioned but stripping-heavy sanitizer on
-/// a message whose HTML was almost entirely script content.
+/// sanitized result is empty or whitespace-only.
 pub fn sanitize_email_html(raw_html: &str) -> String {
+    let engine = remote_content::default_engine();
     ammonia::Builder::default()
         .add_generic_attributes(["style"])
         .rm_tags([
             "script", "iframe", "object", "embed", "form", "input", "button", "textarea", "select",
             "style", "link",
         ])
+        .attribute_filter(move |_element, attribute, value| -> Option<Cow<'_, str>> {
+            // Only URL-bearing attributes on media elements go
+            // through the blocker. Everything else passes.
+            match attribute {
+                "src" | "background" | "poster" | "srcset" => {
+                    if remote_content::is_blocked(engine, value, "image") {
+                        None
+                    } else {
+                        Some(Cow::Borrowed(value))
+                    }
+                }
+                _ => Some(Cow::Borrowed(value)),
+            }
+        })
         .clean(raw_html)
         .to_string()
 }
@@ -394,6 +422,50 @@ Just checking in.\r\n";
         assert!(
             out.contains(r#"style="color: #c00;""#),
             "inline style attr lost: {out}"
+        );
+    }
+
+    #[test]
+    fn sanitize_strips_mailchimp_tracking_pixel() {
+        // Realistic Mailchimp open-tracking pixel URL.
+        let probe = r#"<p>body</p><img src="https://acme.list-manage.com/track/open.php?u=abc&id=xyz" width="1" height="1">"#;
+        let out = sanitize_email_html(probe);
+        // The `src` is gone — ammonia drops just that attribute
+        // when the filter returns None; the `<img>` wrapper stays
+        // but is now sourceless and won't load anything.
+        assert!(!out.contains("list-manage"), "pixel URL survived: {out}");
+        assert!(!out.contains(r#"src=""#), "src attr survived: {out}");
+    }
+
+    #[test]
+    fn sanitize_strips_google_analytics_pixel() {
+        let probe = r#"<img src="https://www.google-analytics.com/collect?tid=UA-99">"#;
+        let out = sanitize_email_html(probe);
+        assert!(!out.contains("google-analytics"), "GA URL survived: {out}");
+    }
+
+    #[test]
+    fn sanitize_preserves_benign_image_src() {
+        // Not in any filter rule — should pass through intact.
+        let probe = r#"<img src="https://example.com/logo.png" alt="logo">"#;
+        let out = sanitize_email_html(probe);
+        assert!(
+            out.contains(r#"src="https://example.com/logo.png""#),
+            "benign src lost: {out}"
+        );
+        assert!(out.contains(r#"alt="logo""#), "alt lost: {out}");
+    }
+
+    #[test]
+    fn sanitize_preserves_href_even_when_host_matches_tracker() {
+        // Link hrefs go through unfiltered — link-click cleaning
+        // is a separate pipeline stage, and blocking an outbound
+        // anchor is user-hostile.
+        let probe = r#"<a href="https://acme.list-manage.com/subscribe/confirm">Confirm</a>"#;
+        let out = sanitize_email_html(probe);
+        assert!(
+            out.contains(r#"href="https://acme.list-manage.com/subscribe/confirm""#),
+            "href erroneously dropped: {out}"
         );
     }
 

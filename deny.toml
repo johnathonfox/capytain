@@ -149,6 +149,15 @@ allow = [
 # these crates, that specific entry needs re-review — the unmodified-
 # consumer reasoning no longer applies.
 exceptions = [
+    # --- Phase 1 Week 8: remote-content blocking ---
+
+    # Brave's ad-block engine, MPL-2.0. Direct dep of
+    # `capytain-mime` for the reader-pane filter list. We consume
+    # the crate unmodified; if we ever need to carry patches, this
+    # entry needs re-review under the same §3.3 reasoning as the
+    # rest of the MPL-2.0 family.
+    { allow = ["MPL-2.0"], crate = "adblock" },
+
     # --- Pre-Servo MPL-2.0 deps (Phase 0 Week 5, Tauri / Dioxus stack) ---
 
     # Transitive dep via `directories` → `dirs-sys`.

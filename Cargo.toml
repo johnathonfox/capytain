@@ -31,6 +31,15 @@ authors = ["Capytain Contributors"]
 publish = false
 
 [workspace.dependencies]
+# `adblock` (brave/adblock-rust) powers the remote-content-blocking
+# engine for the reader pane. Phase 1 Week 8 ships it with a small
+# curated filter list covering the common trackers; full EasyList /
+# EasyPrivacy / uBlock-unbreak bundling lands as a follow-up when we
+# pick a strategy (compile-time include vs first-launch fetch).
+# `embedded-domain-resolver` bundles the Mozilla Public Suffix List
+# so the engine can compute third-party-ness without a runtime
+# callback. Adds some KB to the binary; worth it for "just works."
+adblock = { version = "0.12", default-features = false, features = ["embedded-domain-resolver"] }
 ammonia = "4"
 async-trait = "0.1"
 base64 = "0.22"
