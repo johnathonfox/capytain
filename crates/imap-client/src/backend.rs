@@ -90,10 +90,20 @@ impl ImapBackend {
             .capabilities()
             .await
             .map_err(|e| MailError::Protocol(format!("CAPABILITY: {e}")))?;
+        // `async_imap::types::Capability` is an enum (`Imap4rev1`,
+        // `Auth(String)`, `Atom(String)`). Debug-formatting it — what
+        // this code used to do — yielded strings like `Atom("IDLE")`
+        // that never matched the uppercase atom names the capabilities
+        // check expects. Pattern-match explicitly instead.
         let cap_strings: Vec<String> = caps
             .iter()
-            .map(|c| format!("{c:?}").trim_matches('"').to_string())
+            .map(|c| match c {
+                async_imap::types::Capability::Imap4rev1 => "IMAP4REV1".to_string(),
+                async_imap::types::Capability::Auth(s) => format!("AUTH={s}"),
+                async_imap::types::Capability::Atom(s) => s.clone(),
+            })
             .collect();
+        tracing::debug!(capabilities = ?cap_strings, "IMAP server capabilities");
         require_caps(&cap_strings)?;
 
         info!(host, email, "IMAP connected and authenticated");

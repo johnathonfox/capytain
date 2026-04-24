@@ -45,43 +45,67 @@ impl TokenVault {
         }
     }
 
-    fn entry(&self, account: &AccountId) -> Result<Entry, AuthError> {
-        Ok(Entry::new(&self.service, &account.0)?)
-    }
+    // All public methods are `async` and dispatch the keyring call
+    // through `tokio::task::spawn_blocking`. The Linux
+    // `async-secret-service` feature of the `keyring` crate wraps the
+    // async `secret_service` crate in a **blocking** facade that
+    // calls `block_on` internally — which panics if it's already
+    // inside a tokio runtime (the mailcli `#[tokio::main]` entry,
+    // the desktop bin's Tauri runtime). Moving the call to a
+    // blocking thread pool sidesteps that cleanly and keeps the
+    // public API honest about the I/O cost. `spawn_blocking` joins
+    // via a `JoinError` which we flatten into `AuthError::Other`.
 
     /// Store (or overwrite) the refresh token for an account.
-    pub fn put(&self, account: &AccountId, token: &RefreshToken) -> Result<(), AuthError> {
+    pub async fn put(&self, account: &AccountId, token: &RefreshToken) -> Result<(), AuthError> {
         debug!(account = %account.0, "storing refresh token in keychain");
-        self.entry(account)?.set_password(token.expose())?;
-        Ok(())
+        let service = self.service.clone();
+        let id = account.0.clone();
+        let password = token.expose().to_owned();
+        blocking(move || {
+            Entry::new(&service, &id)?.set_password(&password)?;
+            Ok(())
+        })
+        .await
     }
 
     /// Retrieve a previously-stored refresh token. Returns
     /// [`AuthError::Keyring`] if the entry doesn't exist.
-    pub fn get(&self, account: &AccountId) -> Result<RefreshToken, AuthError> {
-        let raw = self.entry(account)?.get_password()?;
-        Ok(RefreshToken(raw))
+    pub async fn get(&self, account: &AccountId) -> Result<RefreshToken, AuthError> {
+        let service = self.service.clone();
+        let id = account.0.clone();
+        blocking(move || {
+            let raw = Entry::new(&service, &id)?.get_password()?;
+            Ok(RefreshToken(raw))
+        })
+        .await
     }
 
     /// Remove the stored refresh token for an account. Missing entries
     /// are treated as success.
-    pub fn delete(&self, account: &AccountId) -> Result<(), AuthError> {
+    pub async fn delete(&self, account: &AccountId) -> Result<(), AuthError> {
         debug!(account = %account.0, "deleting refresh token from keychain");
-        match self.entry(account)?.delete_credential() {
+        let service = self.service.clone();
+        let id = account.0.clone();
+        blocking(move || match Entry::new(&service, &id)?.delete_credential() {
             Ok(()) => Ok(()),
             Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(e.into()),
-        }
+        })
+        .await
     }
 
     /// Best-effort existence check. Returns `Ok(false)` when the entry
     /// is missing; other keyring errors bubble up.
-    pub fn contains(&self, account: &AccountId) -> Result<bool, AuthError> {
-        match self.entry(account)?.get_password() {
+    pub async fn contains(&self, account: &AccountId) -> Result<bool, AuthError> {
+        let service = self.service.clone();
+        let id = account.0.clone();
+        blocking(move || match Entry::new(&service, &id)?.get_password() {
             Ok(_) => Ok(true),
             Err(keyring::Error::NoEntry) => Ok(false),
             Err(e) => Err(e.into()),
-        }
+        })
+        .await
     }
 
     /// Service name this vault writes under.
@@ -94,4 +118,16 @@ impl Default for TokenVault {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Run a keyring-touching closure on a blocking tokio thread pool,
+/// flattening the `JoinError` into `AuthError::Other`.
+async fn blocking<T, F>(f: F) -> Result<T, AuthError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, AuthError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| AuthError::Other(format!("keyring join error: {e}")))?
 }

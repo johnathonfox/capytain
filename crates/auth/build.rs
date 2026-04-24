@@ -18,14 +18,18 @@
 
 fn main() {
     // Invalidate the cache whenever the env var changes so changing client
-    // IDs doesn't require a `cargo clean`.
-    println!("cargo:rerun-if-env-changed=CAPYTAIN_GMAIL_CLIENT_ID");
-    println!("cargo:rerun-if-env-changed=CAPYTAIN_FASTMAIL_CLIENT_ID");
-
-    // Always set the rustc env vars — empty string if unset. Provider
-    // profiles guard against empty values at flow-start time.
-    let gmail = std::env::var("CAPYTAIN_GMAIL_CLIENT_ID").unwrap_or_default();
-    let fastmail = std::env::var("CAPYTAIN_FASTMAIL_CLIENT_ID").unwrap_or_default();
-    println!("cargo:rustc-env=CAPYTAIN_GMAIL_CLIENT_ID={gmail}");
-    println!("cargo:rustc-env=CAPYTAIN_FASTMAIL_CLIENT_ID={fastmail}");
+    // IDs / secrets doesn't require a `cargo clean`.
+    for var in [
+        "CAPYTAIN_GMAIL_CLIENT_ID",
+        "CAPYTAIN_GMAIL_CLIENT_SECRET",
+        "CAPYTAIN_FASTMAIL_CLIENT_ID",
+        "CAPYTAIN_FASTMAIL_CLIENT_SECRET",
+    ] {
+        println!("cargo:rerun-if-env-changed={var}");
+        // Always set the rustc env vars — empty string if unset. Provider
+        // profiles guard against empty `client_id` at flow-start time; an
+        // empty `client_secret` means "PKCE-only, no confidential client."
+        let value = std::env::var(var).unwrap_or_default();
+        println!("cargo:rustc-env={var}={value}");
+    }
 }

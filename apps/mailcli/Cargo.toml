@@ -25,6 +25,11 @@ capytain-telemetry = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 directories = { workspace = true }
+# Same rustls story as `capytain-desktop/src-tauri` (see its Cargo.toml
+# comment): both `ring` and `aws-lc-rs` end up in the graph
+# transitively, so rustls refuses to auto-pick a `CryptoProvider` and
+# panics on the first HTTPS call. Install `ring` explicitly at startup.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

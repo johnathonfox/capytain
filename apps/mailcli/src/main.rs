@@ -121,6 +121,19 @@ async fn main() -> std::process::ExitCode {
         return std::process::ExitCode::from(1);
     }
 
+    // Install a rustls `CryptoProvider` before any TLS traffic starts.
+    // Both `ring` and `aws-lc-rs` end up enabled transitively (reqwest
+    // + async-imap + tokio-rustls + servo-side crypto in the larger
+    // workspace), so rustls refuses to auto-pick and panics at the
+    // first HTTPS resolution. Mirror `capytain-desktop/src/main.rs` —
+    // prefer `ring` explicitly.
+    if rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_err()
+    {
+        tracing::debug!("rustls CryptoProvider was already installed; continuing");
+    }
+
     match run(cli).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
@@ -200,7 +213,7 @@ async fn auth_add(provider_slug: &str, email: &str, paths: &DataPaths) -> Result
             repos::accounts::insert(&conn, &account).await?;
         }
     }
-    vault.put(&account_id, &refresh)?;
+    vault.put(&account_id, &refresh).await?;
 
     println!(
         "added {email} ({} provider, backend={kind:?}, {} scope(s))",
@@ -224,7 +237,7 @@ async fn auth_list(paths: &DataPaths) -> Result<(), MailcliError> {
         "account_id", "backend", "keychain"
     );
     for a in accounts {
-        let has_token = vault.contains(&a.id).unwrap_or(false);
+        let has_token = vault.contains(&a.id).await.unwrap_or(false);
         println!(
             "{:<40}  {:<10}  {:<8}  {}",
             a.id.0,
@@ -251,7 +264,7 @@ async fn auth_remove(email: &str, paths: &DataPaths) -> Result<(), MailcliError>
         return Err(MailcliError::Usage(format!("no account found for {email}")));
     }
     for a in matches {
-        vault.delete(&a.id)?;
+        vault.delete(&a.id).await?;
         repos::accounts::delete(&conn, &a.id).await?;
         println!("removed {}", a.id.0);
     }
