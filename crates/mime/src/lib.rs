@@ -41,8 +41,44 @@ pub fn parse_rfc822(raw: &[u8], identity: MessageIdentity<'_>) -> Option<Message
     })
 }
 
-/// Parse just the headers plus a short snippet — used in list responses
-/// where we don't want to buffer the full body.
+/// Sanitize HTML email content for rendering in the Servo reader pane.
+///
+/// Uses `ammonia` with its conservative default allowlist plus two
+/// project-specific adjustments:
+///
+/// - `style` attribute allowed on every accepted tag. HTML emails
+///   rely heavily on inline styles for presentational layout
+///   (centered tables, branded colors, etc.). Not allowing them
+///   would render most marketing and transactional email as
+///   unstyled text. Inline `style="..."` can't inject script — CSS
+///   expressions were deprecated in every browser a decade ago, and
+///   we're rendering via Servo with JavaScript disabled anyway
+///   (belt + suspenders). The `<style>` **element** remains
+///   stripped: it can load external resources via `@import url(...)`
+///   which would bypass the Phase 1 Week 8 remote-content policy
+///   before it's in place.
+/// - Tag stripping list (`script`, `iframe`, `object`, `embed`,
+///   `form`, `input`, `button`, `textarea`, `select`, `style`,
+///   `link`) is redundant with ammonia's default allowlist but
+///   explicit — if ammonia ever loosens its defaults in a minor
+///   release, these stay stripped.
+///
+/// Returns empty-ish output is acceptable: the reader UI's
+/// `compose_reader_html` falls back to the plaintext path when the
+/// sanitized result is empty or whitespace-only. That matches the
+/// behavior of a well-intentioned but stripping-heavy sanitizer on
+/// a message whose HTML was almost entirely script content.
+pub fn sanitize_email_html(raw_html: &str) -> String {
+    ammonia::Builder::default()
+        .add_generic_attributes(["style"])
+        .rm_tags([
+            "script", "iframe", "object", "embed", "form", "input", "button", "textarea", "select",
+            "style", "link",
+        ])
+        .clean(raw_html)
+        .to_string()
+}
+
 /// Decode a single RFC-2047 encoded-word header value
 /// (`=?UTF-8?Q?…?=`, `=?UTF-8?B?…?=`, etc.) into a plain `String`.
 ///
@@ -68,6 +104,8 @@ pub fn decode_header_value(raw: &str) -> String {
         .unwrap_or_else(|| raw.to_string())
 }
 
+/// Parse just the headers plus a short snippet — used in list responses
+/// where we don't want to buffer the full body.
 pub fn parse_headers(raw: &[u8], identity: MessageIdentity<'_>) -> Option<MessageHeaders> {
     let parsed = MessageParser::default().parse(raw)?;
     Some(headers_from(&parsed, &identity))
@@ -284,5 +322,104 @@ Just checking in.\r\n";
 
         let hdrs = parse_headers(SAMPLE, ident(&msg_id, &acct, &folder, &flags)).unwrap();
         assert_eq!(hdrs.subject, "Hello");
+    }
+
+    // ---------------------------------------------------------------
+    // `sanitize_email_html` — XSS probes + benign HTML preservation.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn sanitize_strips_script_tag() {
+        let out = sanitize_email_html("<p>hi</p><script>alert('xss')</script>");
+        assert!(!out.contains("<script"), "script tag survived: {out}");
+        assert!(!out.contains("alert"), "script body survived: {out}");
+        assert!(out.contains("<p>hi</p>"), "benign content lost: {out}");
+    }
+
+    #[test]
+    fn sanitize_strips_iframe_object_embed() {
+        for probe in [
+            r#"<iframe src="https://attacker.example/"></iframe>"#,
+            r#"<object data="evil.swf"></object>"#,
+            r#"<embed src="evil.swf">"#,
+        ] {
+            let out = sanitize_email_html(probe);
+            assert!(
+                !out.contains("<iframe") && !out.contains("<object") && !out.contains("<embed"),
+                "frame/object/embed survived on {probe:?} → {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_strips_event_handler_attributes() {
+        let out = sanitize_email_html(r#"<img src="x" onerror="alert(1)" alt="pic">"#);
+        assert!(!out.contains("onerror"), "onerror survived: {out}");
+        // The <img> itself is safe and should be preserved (remote
+        // content blocking happens in a later Phase 1 step, not in
+        // the sanitizer).
+        assert!(out.contains("<img"), "img tag lost: {out}");
+        assert!(out.contains(r#"alt="pic""#), "alt attribute lost: {out}");
+    }
+
+    #[test]
+    fn sanitize_strips_javascript_urls() {
+        let out = sanitize_email_html(r#"<a href="javascript:alert(1)">click</a>"#);
+        assert!(
+            !out.contains("javascript:"),
+            "javascript URL survived: {out}"
+        );
+        // The anchor text stays; the href is just removed.
+        assert!(out.contains("click"), "anchor text lost: {out}");
+    }
+
+    #[test]
+    fn sanitize_strips_form_and_input() {
+        let out = sanitize_email_html(
+            r#"<form action="/steal"><input name="password" type="password"></form>"#,
+        );
+        assert!(!out.contains("<form"), "form survived: {out}");
+        assert!(!out.contains("<input"), "input survived: {out}");
+        assert!(!out.contains("password"), "field name survived: {out}");
+    }
+
+    #[test]
+    fn sanitize_strips_style_tag_but_keeps_inline_style_attr() {
+        let out = sanitize_email_html(
+            r#"<style>@import url(https://attacker.example/evil.css);</style>
+               <p style="color: #c00;">urgent</p>"#,
+        );
+        assert!(!out.contains("<style"), "style element survived: {out}");
+        assert!(!out.contains("@import"), "style contents survived: {out}");
+        assert!(
+            out.contains(r#"style="color: #c00;""#),
+            "inline style attr lost: {out}"
+        );
+    }
+
+    #[test]
+    fn sanitize_preserves_benign_email_html() {
+        // Realistic marketing-email skeleton: table layout, inline
+        // styles, an https anchor, an h1. None of this should be
+        // touched.
+        let input = r#"<h1 style="color:#222;">Hello, Jane</h1>
+<table style="width: 100%;">
+  <tr><td style="padding:1rem;">
+    <a href="https://example.com/click?ref=abc">Visit our site</a>
+  </td></tr>
+</table>"#;
+        let out = sanitize_email_html(input);
+        assert!(out.contains("<h1"), "<h1> lost: {out}");
+        // ammonia auto-adds `rel="noopener noreferrer"` on external
+        // anchors — good security hygiene, so check href + anchor
+        // text separately rather than the whole opening tag.
+        assert!(
+            out.contains(r#"href="https://example.com/click?ref=abc""#),
+            "href lost: {out}"
+        );
+        assert!(out.contains("Visit our site"), "anchor text lost: {out}");
+        assert!(out.contains("<table"), "<table> lost: {out}");
+        // Inline styles preserved.
+        assert!(out.contains(r#"style="color:#222;""#));
     }
 }
