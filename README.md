@@ -47,7 +47,7 @@ Capytain makes the opposite bet on each: pure-Rust end to end, no intermediary s
 
 - **macOS** 12 Monterey or newer (x86_64 or Apple Silicon)
 - **Windows** 10 22H2 or newer (x86_64)
-- **Linux** with a modern Wayland or X11 session (x86_64); GTK 3.24+ for the webview. On **NVIDIA proprietary driver + Wayland** the reader pane falls back to software rendering by default — see [Linux: NVIDIA + Wayland note](#linux-nvidia--wayland-note) below.
+- **Linux** with a modern Wayland or X11 session (x86_64); GTK 3.24+ for the webview. Wayland sessions run the reader pane under XWayland + llvmpipe software GL by default — see [Linux environment overrides](#linux-environment-overrides) below for the whys.
 
 ## Getting started (for developers)
 
@@ -63,23 +63,24 @@ Capytain makes the opposite bet on each: pure-Rust end to end, no intermediary s
   - **Windows:** Visual Studio 2022 with "Desktop development with C++"
   - **Linux:** `build-essential`, `libwebkit2gtk-4.1-dev`, `libssl-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`
 
-### Linux: NVIDIA + Wayland note
+### Linux environment overrides
 
-On Linux + NVIDIA proprietary driver + a Wayland compositor that advertises the `wp_linux_drm_syncobj_surface_v1` explicit-sync protocol (KWin, and likely others), the first surfman commit tears the Wayland connection with a protocol error — NVIDIA's closed-source EGL-Wayland layer auto-joins the protocol but doesn't supply an acquire timeline point. Tracked upstream as [servo/surfman#354](https://github.com/servo/surfman/issues/354); full investigation in [`docs/upstream/surfman-explicit-sync.md`](./docs/upstream/surfman-explicit-sync.md).
-
-To work around this without waiting on the upstream fix, `capytain-desktop` sets three environment variables at startup (only if they are not already set) that force Mesa's llvmpipe software EGL and bypass the NVIDIA EGL-Wayland path entirely:
+`capytain-desktop` sets four environment variables at startup (only if they are not already set) before any GL or GTK code touches the display. Each one addresses a separate Linux-specific issue on the current `gtk-rs 0.18` / `surfman 0.11` / GTK 3 Wayland stack:
 
 ```
 MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
 LIBGL_ALWAYS_SOFTWARE=1
 __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+GDK_BACKEND=x11
 ```
 
-The reader pane then renders on CPU rather than GPU. For 720×560 email HTML this is fine; the reader is not a GPU-bound workload.
+**Why the first three (Mesa llvmpipe software EGL):** on NVIDIA proprietary driver + a Wayland compositor that advertises the `wp_linux_drm_syncobj_surface_v1` explicit-sync protocol (KWin, and likely others), the first surfman commit tears the Wayland connection with a protocol error — NVIDIA's closed-source EGL-Wayland layer auto-joins the protocol but doesn't supply an acquire timeline point. Tracked upstream as [servo/surfman#354](https://github.com/servo/surfman/issues/354); full investigation in [`docs/upstream/surfman-explicit-sync.md`](./docs/upstream/surfman-explicit-sync.md). Forcing Mesa's llvmpipe software EGL bypasses the NVIDIA EGL-Wayland path entirely. The reader pane then renders on CPU rather than GPU — fine for 720×560 email HTML; the reader is not a GPU-bound workload.
 
-If you want to **reproduce the native-NVIDIA bug** (e.g. to test a driver fix or an upstream surfman patch), export any one of those variables to a different value — e.g. `LIBGL_ALWAYS_SOFTWARE=0` — before launching. The code only overrides unset variables, so your export wins.
+**Why `GDK_BACKEND=x11` (XWayland routing):** GTK 3's Wayland backend doesn't support `wl_subsurface` for arbitrary child widgets — `gdk_window_ensure_native()` on a `GtkDrawingArea` creates a new `xdg_toplevel` rather than a `wl_subsurface` of the main window, so Servo's `WindowRenderingContext` ends up drawing into what the compositor shows as a separate window. X11 has real child-window support; routing everything through XWayland gives the Servo pane a proper X11 child window inside the Tauri frame. The proper fix is Tauri migrating its Linux backend to GTK 4 (GDK 4 has per-widget subsurface support); until then, the XWayland translation overhead is negligible for software-rendered email.
 
-Non-Linux platforms are unaffected; the workaround is a no-op on macOS and Windows.
+**Opting out:** each variable is only set if currently unset. Export any of them to a different value — e.g. `GDK_BACKEND=wayland` to reproduce the separate-window bug, or `LIBGL_ALWAYS_SOFTWARE=0` to re-enable the native-NVIDIA path — before launching, and the code leaves your choice alone.
+
+Non-Linux platforms are unaffected; the whole block is a no-op on macOS and Windows.
 
 ### Building from source
 

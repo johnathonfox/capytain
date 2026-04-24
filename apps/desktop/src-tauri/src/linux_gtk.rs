@@ -59,11 +59,26 @@ impl LinuxGtkParent {
         app_window: &gtk::ApplicationWindow,
         reader_width: i32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        // Diagnostic: log what Tauri's `gtk_window()` actually handed
+        // us. If this is anything other than the top-level
+        // ApplicationWindow, our reparenting walks the wrong
+        // hierarchy and Servo ends up getting a handle to a surface
+        // that doesn't live inside the user-visible main window.
+        tracing::info!(
+            widget_type = %glib::ObjectExt::type_(app_window).name(),
+            is_toplevel = app_window.is_toplevel(),
+            "linux_gtk: reparenting into Tauri's main gtk_window"
+        );
+
         // Pull the existing child (Tauri's webkit2gtk container) out
         // of the ApplicationWindow so we can wrap it in a Paned.
         let original = app_window
             .child()
             .ok_or("main window has no child widget")?;
+        tracing::info!(
+            child_type = %glib::ObjectExt::type_(&original).name(),
+            "linux_gtk: removing original child from app_window"
+        );
         app_window.remove(&original);
 
         let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
@@ -107,11 +122,59 @@ impl LinuxGtkParent {
         // windows as client-side regions inside the parent's native
         // surface — cheap, but surfman can't bind a GL context to a
         // client-side region because there's no real surface to
-        // swap buffers on. Without `ensure_native`, Servo paints
-        // into a synthetic window that GDK never presents to the
-        // compositor, and the reader pane stays blank.
+        // swap buffers on.
         if let Some(gdk_window) = drawing_area.window() {
             gdk_window.ensure_native();
+        } else {
+            tracing::warn!(
+                "linux_gtk: DrawingArea has no gdk::Window after realize — Servo will fail"
+            );
+        }
+
+        // Pump the GTK main loop until the DrawingArea has a real
+        // size allocation. `show_all` + `realize` create the
+        // `gdk::Window` but the layout pass that sizes the Paned
+        // children hasn't run yet — at install time
+        // `drawing_area.window().unwrap().width()` is `1`, which
+        // means surfman's `WindowRenderingContext` gets a 1x1
+        // surface handle and ends up creating its own top-level
+        // wl_surface to render into (visible as a separate window).
+        // Pumping events until the allocation settles gives Servo
+        // a handle bound to a correctly-sized subsurface.
+        let layout_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < layout_deadline {
+            let size = drawing_area
+                .window()
+                .map(|w| (w.width(), w.height()))
+                .unwrap_or((0, 0));
+            if size.0 > 1 && size.1 > 1 {
+                break;
+            }
+            if !gtk::main_iteration_do(false) {
+                // Nothing more queued; the widget isn't going to
+                // lay itself out without a displayed compositor
+                // frame — break and let Servo see whatever size
+                // we have so the failure log below fires.
+                break;
+            }
+        }
+
+        if let Some(gdk_window) = drawing_area.window() {
+            let (w, h) = (gdk_window.width(), gdk_window.height());
+            let parent = gdk_window.effective_parent();
+            tracing::info!(
+                drawing_area_size = ?(w, h),
+                window_type = ?gdk_window.window_type(),
+                has_parent = parent.is_some(),
+                "linux_gtk: DrawingArea gdk::Window after layout pump"
+            );
+            if w <= 1 || h <= 1 {
+                tracing::warn!(
+                    size = ?(w, h),
+                    "linux_gtk: DrawingArea still 0/1 pixel at handle-extract time — Servo \
+                     will probably create a separate top-level surface"
+                );
+            }
         }
 
         Ok(Self {
