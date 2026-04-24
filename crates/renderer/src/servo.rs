@@ -82,6 +82,22 @@ pub fn apply_nvidia_wayland_workaround() {
                 "__EGL_VENDOR_LIBRARY_FILENAMES",
                 "/usr/share/glvnd/egl_vendor.d/50_mesa.json",
             ),
+            // GTK 3's Wayland backend can't actually subsurface an
+            // arbitrary child widget — `gdk_window_ensure_native` on
+            // the DrawingArea creates a brand-new `xdg_toplevel`
+            // rather than a `wl_subsurface` of the main window, so
+            // Servo's `WindowRenderingContext` ends up drawing into
+            // what the compositor shows as a separate top-level
+            // window (verified via `WAYLAND_DEBUG=client` —
+            // duplicate `get_xdg_surface` + `get_toplevel` calls).
+            // X11 has real child-window support; force every client
+            // (Tauri, Dioxus webview, GTK, Servo/surfman) through
+            // XWayland so the DrawingArea's backing window is an
+            // actual X11 child of the main window and surfman's
+            // Xlib backend binds to it inside the Tauri frame. Fix
+            // properly once Tauri 2 migrates to GTK 4 (GDK 4 has
+            // per-widget subsurface support).
+            ("GDK_BACKEND", "x11"),
         ];
 
         let mut applied: Vec<&'static str> = Vec::new();
