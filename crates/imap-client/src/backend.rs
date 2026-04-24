@@ -90,10 +90,20 @@ impl ImapBackend {
             .capabilities()
             .await
             .map_err(|e| MailError::Protocol(format!("CAPABILITY: {e}")))?;
+        // `async_imap::types::Capability` is an enum (`Imap4rev1`,
+        // `Auth(String)`, `Atom(String)`). Debug-formatting it — what
+        // this code used to do — yielded strings like `Atom("IDLE")`
+        // that never matched the uppercase atom names the capabilities
+        // check expects. Pattern-match explicitly instead.
         let cap_strings: Vec<String> = caps
             .iter()
-            .map(|c| format!("{c:?}").trim_matches('"').to_string())
+            .map(|c| match c {
+                async_imap::types::Capability::Imap4rev1 => "IMAP4REV1".to_string(),
+                async_imap::types::Capability::Auth(s) => format!("AUTH={s}"),
+                async_imap::types::Capability::Atom(s) => s.clone(),
+            })
             .collect();
+        tracing::debug!(capabilities = ?cap_strings, "IMAP server capabilities");
         require_caps(&cap_strings)?;
 
         info!(host, email, "IMAP connected and authenticated");
@@ -463,7 +473,7 @@ fn fetch_to_headers(
     let subject = envelope
         .and_then(|e| e.subject.as_deref())
         .and_then(|b| std::str::from_utf8(b).ok())
-        .map(|s| s.to_string())
+        .map(capytain_mime::decode_header_value)
         .unwrap_or_default();
     let from = addr_vec(envelope.and_then(|e| e.from.as_ref()));
     let reply_to = addr_vec(envelope.and_then(|e| e.reply_to.as_ref()));
@@ -529,7 +539,7 @@ fn addr_vec(addrs: Option<&Vec<imap_proto::Address<'_>>>) -> Vec<EmailAddress> {
                 .name
                 .as_deref()
                 .and_then(|b| std::str::from_utf8(b).ok())
-                .map(str::to_string);
+                .map(capytain_mime::decode_header_value);
             Some(EmailAddress {
                 address: format!("{mailbox}@{host}"),
                 display_name: name,

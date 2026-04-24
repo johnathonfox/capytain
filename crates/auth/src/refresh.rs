@@ -32,17 +32,23 @@ pub async fn refresh_access_token(
 ) -> Result<TokenSet, AuthError> {
     let profile = provider.profile();
     let client_id = profile.require_client_id()?;
-    let refresh = vault.get(account)?;
+    let refresh = vault.get(account).await?;
 
     debug!(account = %account.0, provider = profile.slug, "refreshing access token");
 
-    let tokens = post_refresh(profile.token_url, client_id, &refresh).await?;
+    let tokens = post_refresh(
+        profile.token_url,
+        client_id,
+        profile.client_secret,
+        &refresh,
+    )
+    .await?;
 
     // If the provider rotated the refresh token, store the new one.
     if let Some(new_refresh) = &tokens.refresh {
         if new_refresh.expose() != refresh.expose() {
             info!(account = %account.0, "rotating refresh token in keychain");
-            vault.put(account, new_refresh)?;
+            vault.put(account, new_refresh).await?;
         }
     }
 
@@ -90,6 +96,7 @@ struct RefreshResponse {
 async fn post_refresh(
     endpoint: &str,
     client_id: &str,
+    client_secret: &str,
     refresh: &RefreshToken,
 ) -> Result<TokenSet, AuthError> {
     let client = reqwest::Client::builder()
@@ -97,11 +104,14 @@ async fn post_refresh(
         .build()
         .map_err(|e| AuthError::Other(format!("reqwest build: {e}")))?;
 
-    let form = [
+    let mut form: Vec<(&str, &str)> = vec![
         ("grant_type", "refresh_token"),
         ("client_id", client_id),
         ("refresh_token", refresh.expose()),
     ];
+    if !client_secret.is_empty() {
+        form.push(("client_secret", client_secret));
+    }
 
     let resp = client
         .post(endpoint)

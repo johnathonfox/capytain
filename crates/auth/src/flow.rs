@@ -89,6 +89,7 @@ pub async fn run_loopback_flow(
     let tokens = exchange_code(
         profile.token_url,
         client_id,
+        profile.client_secret,
         &redirect_uri,
         &response.code,
         &verifier,
@@ -139,7 +140,14 @@ fn random_state() -> String {
 
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
-    access_token: String,
+    // All fields default — the error path (HTTP 400 with
+    // `{"error": "...", "error_description": "..."}`) has neither
+    // `access_token` nor `token_type`, and previously failing to
+    // deserialize because `access_token` was required hid real
+    // error responses behind a generic "JSON parse" message. Check
+    // `error` first in the consumer, then unwrap `access_token`.
+    #[serde(default)]
+    access_token: Option<String>,
     #[serde(default)]
     refresh_token: Option<String>,
     #[serde(default)]
@@ -148,8 +156,6 @@ struct TokenResponse {
     scope: Option<String>,
     #[serde(default)]
     token_type: Option<String>,
-    // Error fields — populated if the server returned a 400 with a
-    // JSON-encoded error body.
     #[serde(default)]
     error: Option<String>,
     #[serde(default)]
@@ -159,6 +165,7 @@ struct TokenResponse {
 async fn exchange_code(
     endpoint: &str,
     client_id: &str,
+    client_secret: &str,
     redirect_uri: &str,
     code: &str,
     verifier: &str,
@@ -168,13 +175,20 @@ async fn exchange_code(
         .build()
         .map_err(|e| AuthError::Other(format!("reqwest build: {e}")))?;
 
-    let form = [
+    let mut form: Vec<(&str, &str)> = vec![
         ("grant_type", "authorization_code"),
         ("code", code),
         ("redirect_uri", redirect_uri),
         ("client_id", client_id),
         ("code_verifier", verifier),
     ];
+    // Confidential clients (Web-application-type Google OAuth, Microsoft
+    // 365 ADAL, etc.) demand the secret on the token exchange even with
+    // PKCE. Native clients (Desktop app, Fastmail) leave this empty and
+    // skip the field entirely.
+    if !client_secret.is_empty() {
+        form.push(("client_secret", client_secret));
+    }
 
     let resp = client
         .post(endpoint)
@@ -185,10 +199,22 @@ async fn exchange_code(
         .map_err(|e| AuthError::TokenExchange(format!("HTTP error: {e}")))?;
 
     let status = resp.status();
-    let body: TokenResponse = resp
-        .json()
+    // Buffer as text first so a non-JSON body (HTML error page, empty
+    // response, truncated proxy response) surfaces its actual bytes in
+    // the error message instead of the generic serde "error decoding
+    // response body" that reqwest produces.
+    let raw = resp
+        .text()
         .await
-        .map_err(|e| AuthError::TokenExchange(format!("JSON parse: {e}")))?;
+        .map_err(|e| AuthError::TokenExchange(format!("HTTP body read: {e}")))?;
+
+    let body: TokenResponse = serde_json::from_str(&raw).map_err(|e| {
+        // Truncate so we don't paste a full HTML page into the error.
+        let snippet: String = raw.chars().take(200).collect();
+        AuthError::TokenExchange(format!(
+            "JSON parse: {e} — HTTP {status}, body starts: {snippet:?}"
+        ))
+    })?;
 
     if !status.is_success() || body.error.is_some() {
         let msg = body
@@ -204,6 +230,12 @@ async fn exchange_code(
         }
     }
 
+    let access_token = body.access_token.ok_or_else(|| {
+        AuthError::TokenExchange(
+            "success response missing `access_token` field — server violated RFC 6749 §5.1".into(),
+        )
+    })?;
+
     let expires_at = body.expires_in.map(expires_at_from_now);
     let granted_scopes = body
         .scope
@@ -213,7 +245,7 @@ async fn exchange_code(
 
     Ok(FlowOutcome {
         tokens: TokenSet {
-            access: AccessToken(body.access_token),
+            access: AccessToken(access_token),
             refresh: body.refresh_token.map(RefreshToken),
             expires_at,
         },

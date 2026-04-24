@@ -30,6 +30,13 @@ pub struct ProviderProfile {
     pub slug: &'static str,
     /// OAuth2 client ID. Empty string means "not configured at build time".
     pub client_id: &'static str,
+    /// OAuth2 client secret, if the provider's client is configured as a
+    /// confidential client (Web application type on Google, some Fastmail
+    /// registrations, Microsoft 365 ADAL, etc.). Empty string means "no
+    /// secret, PKCE-only flow". Desktop-app-type Google clients don't
+    /// issue one; Web-application-type clients require it on the token
+    /// exchange even when PKCE is also in use.
+    pub client_secret: &'static str,
     /// RFC 6749 authorization endpoint.
     pub authorization_url: &'static str,
     /// RFC 6749 token endpoint (used for both code exchange and refresh).

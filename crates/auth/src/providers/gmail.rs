@@ -28,6 +28,12 @@ static PROFILE: ProviderProfile = ProviderProfile {
     name: "Gmail",
     slug: "gmail",
     client_id: env!("CAPYTAIN_GMAIL_CLIENT_ID"),
+    // Empty for Desktop-app-type Google OAuth 2.0 Client IDs (PKCE-
+    // only flow). Populate via `CAPYTAIN_GMAIL_CLIENT_SECRET` at
+    // build time if the client is Web-application-type — those
+    // demand the secret on the token exchange even with PKCE, and
+    // Google will return `client_secret is missing` without it.
+    client_secret: env!("CAPYTAIN_GMAIL_CLIENT_SECRET"),
     authorization_url: "https://accounts.google.com/o/oauth2/v2/auth",
     token_url: "https://oauth2.googleapis.com/token",
     scopes: &["https://mail.google.com/"],
