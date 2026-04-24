@@ -128,6 +128,7 @@ docs/           # long-form design + operational docs
 - **[`COMMANDS.md`](./COMMANDS.md)** — IPC surface between the Dioxus UI and the Rust core.
 - **[`CONTRIBUTING.md`](./CONTRIBUTING.md)** — how to contribute, DCO sign-off, PR process.
 - **[`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md)** — Contributor Covenant 2.1.
+- **[`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md)** — consciously-accepted Phase 0 issues with path-out criteria for each.
 
 ## Contributing
 
