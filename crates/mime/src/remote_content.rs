@@ -10,13 +10,13 @@
 //! Facebook, Segment, Mixpanel, Intercom), and generic tracking-
 //! pixel patterns.
 //!
-//! The default list is intentionally **not** EasyList + EasyPrivacy
-//! + uBlock Origin — those are ~5MB of filter rules we haven't
-//! picked a bundling strategy for yet (compile-time `include_bytes!`
-//! after serializing the compiled engine, or first-launch fetch).
-//! Swapping the rule source is a data-only change; `build_engine` +
-//! `is_blocked` stay the same. Tracked on `PHASE_1.md` week 8's
-//! follow-up list.
+//! The default list is intentionally not the full EasyList,
+//! EasyPrivacy, and uBlock Origin family — those are ~5MB of filter
+//! rules we haven't picked a bundling strategy for yet (compile-time
+//! `include_bytes!` after serializing the compiled engine, or a
+//! first-launch fetch-and-cache). Swapping the rule source is a
+//! data-only change; `build_engine` and `is_blocked` stay the same.
+//! Tracked on `PHASE_1.md` week 8's follow-up list.
 //!
 //! `sanitize_email_html` wires this into the ammonia pass via
 //! `attribute_filter`: every `src` / `background` / `poster` /
