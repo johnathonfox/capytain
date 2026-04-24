@@ -108,7 +108,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      # Pinned to the exact SHA of v2.0.17 (cargo-deny 0.19.2).
+      # The floating `@v2` tag hit an advisory-db cache race on
+      # PR #22 (`failed to parse ISO-8601 timestamp 'fatal: cannot
+      # change to /usr/local/cargo/advisory-dbs/...'`) — bumping to
+      # a pinned SHA removes the "whatever v2 points to this week"
+      # variable. Re-pin when a new release adds something we need.
+      - uses: EmbarkStudios/cargo-deny-action@a4d2d701318fdc1c6ae17ba8cea8f329c5110eb2 # v2.0.17
 
   reuse:
     name: reuse lint
