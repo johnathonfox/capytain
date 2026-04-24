@@ -232,8 +232,7 @@ async fn exchange_code(
 
     let access_token = body.access_token.ok_or_else(|| {
         AuthError::TokenExchange(
-            "success response missing `access_token` field — server violated RFC 6749 §5.1"
-                .into(),
+            "success response missing `access_token` field — server violated RFC 6749 §5.1".into(),
         )
     })?;
 

@@ -87,11 +87,13 @@ impl TokenVault {
         debug!(account = %account.0, "deleting refresh token from keychain");
         let service = self.service.clone();
         let id = account.0.clone();
-        blocking(move || match Entry::new(&service, &id)?.delete_credential() {
-            Ok(()) => Ok(()),
-            Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(e.into()),
-        })
+        blocking(
+            move || match Entry::new(&service, &id)?.delete_credential() {
+                Ok(()) => Ok(()),
+                Err(keyring::Error::NoEntry) => Ok(()),
+                Err(e) => Err(e.into()),
+            },
+        )
         .await
     }
 
