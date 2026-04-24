@@ -81,6 +81,7 @@ pub fn App() -> Element {
                     class: "subtitle",
                     "Phase 0 Week 5 · text-only reader"
                 }
+                ServoTestButton {}
             }
             div {
                 class: "panes",
@@ -88,6 +89,43 @@ pub fn App() -> Element {
                 MessageListPane { selection }
                 ReaderPane { selection }
             }
+        }
+    }
+}
+
+// ---------- Phase 0 Week 6 validation helper ----------
+
+/// Temporary Phase 0 button that triggers `reader_render` with a
+/// placeholder `MessageId`. The `reader_render` command ignores the
+/// ID and always renders the hardcoded `HELLO_FROM_SERVO_HTML` test
+/// document into the Servo reader pane — which lives as a child
+/// widget of this window on Linux (see
+/// `apps/desktop/src-tauri/src/linux_gtk.rs`).
+///
+/// Removed in Phase 1 once the real flow (select message → fetch
+/// sanitized HTML body → render via `reader_render`) wires up.
+#[component]
+fn ServoTestButton() -> Element {
+    let trigger = move |_| {
+        spawn(async move {
+            // Errors here are only observable from the Tauri-side
+            // backend log (`tracing::warn!("reader_render: ...")`);
+            // the UI crate has no logging surface, so swallow the
+            // result — this is a maintainer-run validation button,
+            // not a production flow.
+            let _ = invoke::<()>(
+                "reader_render",
+                serde_json::json!({ "input": { "id": MessageId("phase0-servo-test".into()) } }),
+            )
+            .await;
+        });
+    };
+
+    rsx! {
+        button {
+            class: "servo-test",
+            onclick: trigger,
+            "Render test page in Servo"
         }
     }
 }

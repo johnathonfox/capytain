@@ -34,6 +34,21 @@ h1 {
   color: #8a929b;
 }
 
+.servo-test {
+  margin: 0 0 1rem;
+  padding: 0.4rem 0.75rem;
+  background: #2d3442;
+  color: #e6e8eb;
+  border: 1px solid #3b4455;
+  border-radius: 4px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.servo-test:hover {
+  background: #3b4455;
+}
+
 .accounts ul {
   list-style: none;
   padding: 0;
