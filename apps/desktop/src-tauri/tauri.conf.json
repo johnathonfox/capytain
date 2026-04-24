@@ -4,8 +4,7 @@
   "version": "0.0.0",
   "identifier": "app.capytain.desktop",
   "build": {
-    "frontendDist": "../ui/dist",
-    "devUrl": "http://localhost:1420"
+    "frontendDist": "../ui/dist"
   },
   "app": {
     "windows": [
