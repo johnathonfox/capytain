@@ -154,6 +154,24 @@ At this point, Phase 1 (full read path — threading, notifications, remote-cont
 | Turso engagement log | `docs/dependencies/turso.md` |
 | Licensing artifacts | `LICENSE`, `NOTICE`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `deny.toml` |
 
+## Deferred from Phase 0
+
+Work that was scoped into Phase 0 but intentionally deferred after
+smoke-testing the happy path on the available hardware / credentials.
+Tracked here as "features for later" rather than Phase 0 exit
+blockers.
+
+| Deferred item | Why deferred | Rough shape of the remaining work |
+|---|---|---|
+| Fastmail OAuth + JMAP smoke test | Gmail path landed and validated end-to-end on a real account; Fastmail code (provider profile, JMAP adapter, scopes) all shipped in the same PRs but has not been exercised against a real Fastmail account. | Register a Fastmail OAuth client (Settings → Privacy & Security → Connected apps), set `CAPYTAIN_FASTMAIL_CLIENT_ID` (+ `CAPYTAIN_FASTMAIL_CLIENT_SECRET` if the registration type needs it), run `mailcli auth add fastmail <email>` → `mailcli sync <email>`. Debug whatever surfaces and update this row or remove it when green. |
+| macOS runtime validation | `crates/renderer/src/servo/macos.rs` is marked UNVERIFIED — written to the `docs/servo-composition.md` §4.3 target shape without Mac hardware. CI builds it; nothing exercises `new_macos` on an actual AppKit window. | A one-session pass on Mac hardware: run `cargo run -p capytain-desktop`, confirm the reader pane reparents into an `NSView` child of the main Tauri window, confirm Servo paint lands there. Update the module's `# UNVERIFIED` marker to `# VERIFIED` or file whatever shows up. |
+| Windows runtime validation | `crates/renderer/src/servo/windows.rs` same story: shipped UNVERIFIED, CI compiles it on `windows-latest`, no hardware-backed check. The stock `windows-latest` runner doesn't have an EGL driver, so the corpus test is already `cfg`-gated off Windows. | Equivalent to the macOS item above but on Windows hardware — verify `new_windows` gives Servo a usable `HWND` handle inside the Tauri frame and pixels land there. |
+
+These three are the only items on the original Phase 0 plan that
+are not verified end-to-end on main after the Gmail-smoke PR lands.
+Everything else on the deliverables table above ships real, tested
+code.
+
 ## Phase 0 Non-Goals
 
 Explicitly **not** in Phase 0 (these belong to later phases):
