@@ -12,6 +12,12 @@ authors.workspace = true
 publish.workspace = true
 build = "build.rs"
 
+[build-dependencies]
+# Load client IDs / secrets from `.env` at the workspace root so the
+# maintainer doesn't re-export `CAPYTAIN_{PROVIDER}_CLIENT_{ID,SECRET}`
+# every `cargo build`. See `build.rs` for the precedence rules.
+dotenvy = "0.15"
+
 [dependencies]
 capytain-core = { workspace = true }
 capytain-ipc = { workspace = true }

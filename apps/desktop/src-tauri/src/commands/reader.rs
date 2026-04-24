@@ -2,50 +2,32 @@
 
 //! `reader_*` Tauri commands — the reader-pane Servo renderer seam.
 //!
-//! Phase 0 Week 6 Day 2 scope: a single `reader_render` command that
-//! takes a `MessageId` and renders hardcoded test HTML through
-//! [`capytain_renderer::ServoRenderer`]. Real sanitized body fetching
-//! (ammonia strip → adblock pass → `ServoRenderer::render`) lands in
-//! Phase 1 alongside the remote-content policy.
+//! Phase 0 Week 6 scope: `reader_render` takes raw HTML from the UI
+//! and hands it to [`capytain_renderer::ServoRenderer`]. The UI is
+//! responsible for composing the HTML (today: format headers + plain
+//! text body into a minimal styled document in `apps/desktop/ui`).
+//! Real sanitization (ammonia strip → adblock pass) arrives in Phase
+//! 1 alongside the remote-content policy; this seam lets the reader
+//! pane light up end-to-end on selection before that work lands.
 
 use capytain_core::RenderPolicy;
-use capytain_ipc::{IpcResult, MessageId};
+use capytain_ipc::IpcResult;
 use serde::Deserialize;
 use tauri::{AppHandle, Runtime, State};
 
 use crate::state::AppState;
 
-/// Hardcoded test body used in place of a real sanitized email body.
-/// The anchor is here so the human validator can click it and watch
-/// the `EmailRenderer::on_link_click` callback fire end-to-end via
-/// `tracing::info!` (see the callback registration in `main.rs`).
-const HELLO_FROM_SERVO_HTML: &str = r#"<!DOCTYPE html>
-<html>
-<body>
-  <h1>Hello from Servo</h1>
-  <p>Phase 0 Week 6 Day 2 — hardcoded test HTML rendered via the
-     Servo-backed <code>EmailRenderer</code>.</p>
-  <p><a href="https://example.com/capytain-link-click-test">
-     Click this link to exercise the navigation callback
-  </a>.</p>
-</body>
-</html>"#;
-
 #[derive(Debug, Deserialize)]
 pub struct ReaderRenderInput {
-    /// Identifies the message to render. Ignored in Phase 0 Week 6 —
-    /// the body is always `HELLO_FROM_SERVO_HTML`. Wired-through-but-
-    /// unused so the command signature matches the shape Phase 1 will
-    /// actually use (load body blob → sanitize → render).
-    pub id: MessageId,
+    /// Fully-formed HTML document to render in the Servo reader pane.
+    /// Phase 0: composed by the UI from `RenderedMessage` headers +
+    /// plaintext body. Phase 1: replaced with the sanitized HTML
+    /// returned by `messages_get` once ammonia / adblock pipelines
+    /// are live.
+    pub html: String,
 }
 
-/// `reader_render` — hand sanitized HTML to the Servo renderer.
-///
-/// Phase 0 Week 6 Day 2 always renders a fixed test document regardless
-/// of the requested `id`. The command still takes `id` so the IPC shape
-/// matches `COMMANDS.md §Reader::reader_render` and Phase 1 only has to
-/// swap the hardcoded string for the real message-body lookup.
+/// `reader_render` — hand HTML to the Servo renderer.
 ///
 /// # Thread affinity
 ///
@@ -62,7 +44,7 @@ pub async fn reader_render<R: Runtime>(
     state: State<'_, AppState>,
     input: ReaderRenderInput,
 ) -> IpcResult<()> {
-    tracing::info!(id = %input.id.0, "reader_render: rendering hardcoded Day 2 test HTML");
+    tracing::info!(bytes = input.html.len(), "reader_render");
 
     // `servo_renderer` is an `Option` on `AppState` because `new_linux`
     // can fail (e.g. running under a `RawWindowHandle` variant we don't
@@ -70,7 +52,7 @@ pub async fn reader_render<R: Runtime>(
     // aborting startup.
     let mut guard = state.servo_renderer.lock().await;
     if let Some(renderer) = guard.as_mut() {
-        let _handle = renderer.render(HELLO_FROM_SERVO_HTML, RenderPolicy::strict());
+        let _handle = renderer.render(&input.html, RenderPolicy::strict());
     } else {
         tracing::warn!(
             "reader_render: ServoRenderer not available on this platform/build — skipping"

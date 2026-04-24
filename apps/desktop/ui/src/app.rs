@@ -93,17 +93,93 @@ pub fn App() -> Element {
     }
 }
 
+// ---------- Phase 0 reader-pane HTML composer ----------
+
+/// Build the HTML document the Servo reader pane renders when a
+/// message is selected. Phase 0 composes the document in the UI
+/// from `RenderedMessage` fields so the Servo seam (`reader_render`)
+/// can stay a pure "render this HTML" command; Phase 1 swaps this
+/// for `rendered.sanitized_html` once the ammonia / adblock pipelines
+/// populate it server-side.
+///
+/// Plaintext body content is passed through [`minimal_escape`] before
+/// injection to prevent inline `<script>` or other HTML smuggling
+/// via otherwise-innocent text/plain bodies. Headers (subject, from,
+/// date) are already escaped the same way.
+fn compose_reader_html(rendered: &RenderedMessage) -> String {
+    let subject = minimal_escape(&rendered.headers.subject);
+    let from = rendered
+        .headers
+        .from
+        .iter()
+        .map(|a| {
+            let name = a.display_name.as_deref().unwrap_or("");
+            let addr = &a.address;
+            if name.is_empty() {
+                minimal_escape(addr)
+            } else {
+                format!("{} &lt;{}&gt;", minimal_escape(name), minimal_escape(addr))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let date = rendered.headers.date.to_rfc2822();
+    let body = rendered
+        .body_text
+        .as_deref()
+        .map(minimal_escape)
+        .unwrap_or_else(|| {
+            "<em>No plaintext body stored locally. Run <code>mailcli sync</code> to fetch.</em>"
+                .to_string()
+        });
+
+    format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {{ font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; color: #e6e8eb; background: #0f1115; margin: 0; padding: 1.25rem; }}
+    h1 {{ font-size: 1.15rem; margin: 0 0 0.5rem; }}
+    .meta {{ color: #8a929b; font-size: 0.85em; margin-bottom: 1rem; }}
+    pre {{ white-space: pre-wrap; word-wrap: break-word; margin: 0; font: inherit; }}
+  </style>
+</head>
+<body>
+  <h1>{subject}</h1>
+  <div class="meta">From: {from} · {date}</div>
+  <pre>{body}</pre>
+</body>
+</html>"#
+    )
+}
+
+/// Minimal HTML escaping for text content. Not a full sanitizer —
+/// for Phase 0 it's only used on fields we *know* are plain text
+/// (subject, display-name, address, plaintext body). Phase 1's
+/// ammonia pass replaces this for anything that started as HTML.
+fn minimal_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 // ---------- Phase 0 Week 6 validation helper ----------
 
-/// Temporary Phase 0 button that triggers `reader_render` with a
-/// placeholder `MessageId`. The `reader_render` command ignores the
-/// ID and always renders the hardcoded `HELLO_FROM_SERVO_HTML` test
-/// document into the Servo reader pane — which lives as a child
-/// widget of this window on Linux (see
-/// `apps/desktop/src-tauri/src/linux_gtk.rs`).
-///
-/// Removed in Phase 1 once the real flow (select message → fetch
-/// sanitized HTML body → render via `reader_render`) wires up.
+/// Temporary Phase 0 button in the topbar that fires `reader_render`
+/// with a fixed diagnostic document. Useful when no message is
+/// selected (empty inbox, no accounts configured) to confirm the
+/// Servo reader pane is alive. Removed in Phase 1 once the real
+/// `Reader` component's auto-trigger covers the common path.
 #[component]
 fn ServoTestButton() -> Element {
     // In-flight flag: disable the button while an invoke is pending
@@ -134,9 +210,15 @@ fn ServoTestButton() -> Element {
             // the UI crate has no logging surface, so swallow the
             // result — this is a maintainer-run validation button,
             // not a production flow.
+            const TEST_HTML: &str = r#"<!DOCTYPE html>
+<html><body style="font:14px/1.5 -apple-system,sans-serif;color:#e6e8eb;background:#0f1115;padding:1rem;">
+<h1>Hello from Servo</h1>
+<p>Phase 0 validation render. Select a message to render its body instead.</p>
+<p><a href="https://example.com/capytain-link-click-test">Link-click callback test</a></p>
+</body></html>"#;
             let _ = invoke::<()>(
                 "reader_render",
-                serde_json::json!({ "input": { "id": MessageId("phase0-servo-test".into()) } }),
+                serde_json::json!({ "input": { "html": TEST_HTML } }),
             )
             .await;
             in_flight.set(false);
@@ -382,7 +464,23 @@ fn ReaderPane(selection: Signal<Selection>) -> Element {
 fn Reader(id: MessageId) -> Element {
     let id_for_fetch = id.clone();
     let msg = use_resource(use_reactive!(|id_for_fetch| async move {
-        invoke::<RenderedMessage>("messages_get", serde_json::json!({ "id": id_for_fetch })).await
+        let rendered =
+            invoke::<RenderedMessage>("messages_get", serde_json::json!({ "id": id_for_fetch }))
+                .await?;
+        // Hand the composed document to Servo so the right-hand
+        // native reader pane renders in sync with this inline view.
+        // Phase 0: naive headers + plaintext body wrapper — no
+        // sanitization yet (plaintext is escaped by `minimal_escape`
+        // before injection). Phase 1 replaces this with the
+        // `sanitized_html` field from `RenderedMessage` once the
+        // ammonia + adblock pipelines are live.
+        let html = compose_reader_html(&rendered);
+        let _ = invoke::<()>(
+            "reader_render",
+            serde_json::json!({ "input": { "html": html } }),
+        )
+        .await;
+        Ok::<_, String>(rendered)
     }));
 
     rsx! {
