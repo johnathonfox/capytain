@@ -151,12 +151,28 @@ impl MailBackend for ImapBackend {
             .map_err(|e| MailError::Protocol(format!("LIST: {e}")))?;
 
         let mut folders = Vec::new();
+        let mut skipped_noselect = 0usize;
         while let Some(item) = stream.next().await {
             let name = item.map_err(|e| MailError::Protocol(format!("LIST entry: {e}")))?;
+            // RFC 3501 §7.2.2: a `\Noselect` mailbox can't be opened
+            // — it's a hierarchy node only (Gmail's bare `[Gmail]` is
+            // the textbook case). Including it would make `sync_account`
+            // fail SELECT on every cycle.
+            if name
+                .attributes()
+                .iter()
+                .any(|a| matches!(a, async_imap::types::NameAttribute::NoSelect))
+            {
+                skipped_noselect += 1;
+                continue;
+            }
             folders.push(name_to_folder(&name, &self.account));
         }
         drop(stream);
-        debug!(count = folders.len(), "IMAP LIST returned folders");
+        debug!(
+            count = folders.len(),
+            skipped_noselect, "IMAP LIST returned folders"
+        );
         Ok(folders)
     }
 
