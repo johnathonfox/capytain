@@ -24,6 +24,12 @@
 
 #![cfg_attr(not(feature = "servo"), allow(dead_code))]
 
+// Pure-Rust outbound-URL cleaner. Independent of the Servo
+// feature so the cleaner is testable and reusable from anywhere
+// in the workspace (mailcli, future Tauri compose-hover preview,
+// etc.) without dragging the Servo native toolchain.
+pub mod link_cleaner;
+
 #[cfg(feature = "servo")]
 mod servo;
 

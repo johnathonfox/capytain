@@ -87,9 +87,21 @@ impl WebViewDelegate for CapytainDelegate {
         let url = navigation_request.url.clone();
         let scheme = url.scheme();
         if scheme == "https" || scheme == "mailto" {
+            // Phase 1 Week 8: every outbound URL goes through the
+            // link cleaner before reaching the user-supplied
+            // callback. Strips tracking params and unwraps known
+            // redirect services so the system browser opens the
+            // real destination, not the tracker hop. mailto stays
+            // unchanged — there's nothing to strip on a mailto:
+            // URL, and the cleaner is a no-op on it.
+            let cleaned = if scheme == "https" {
+                crate::link_cleaner::clean_outbound_url(url)
+            } else {
+                url
+            };
             if let Ok(mut slot) = self.link_cb.lock() {
                 if let Some(cb) = slot.as_mut() {
-                    cb(url);
+                    cb(cleaned);
                 }
             }
         } else {
