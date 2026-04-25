@@ -32,14 +32,31 @@ use wasm_bindgen::prelude::*;
 // is set in `tauri.conf.json`, which we don't enable — so reach for the
 // internal hook directly. This is exactly what `@tauri-apps/api`'s
 // `invoke()` wraps under the hood.
+//
+// `tauriListen` mirrors `@tauri-apps/api/event#listen`: registers the
+// Rust callback via `transformCallback` (which assigns it a numeric id
+// the Rust side can later use to unlisten) and tells the event plugin
+// to start delivering. We use the same `kind: 'Any'` target the JS API
+// defaults to so events emitted from any window reach this listener.
 #[wasm_bindgen(inline_js = r#"
     export async function coreInvoke(cmd, args) {
         return await window.__TAURI_INTERNALS__.invoke(cmd, args);
+    }
+    export async function tauriListen(event, handler) {
+        const cbId = window.__TAURI_INTERNALS__.transformCallback(handler);
+        return await window.__TAURI_INTERNALS__.invoke('plugin:event|listen', {
+            event,
+            target: { kind: 'Any' },
+            handler: cbId,
+        });
     }
 "#)]
 extern "C" {
     #[wasm_bindgen(catch, js_name = coreInvoke)]
     async fn core_invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(catch, js_name = tauriListen)]
+    async fn tauri_listen(event: &str, handler: &js_sys::Function) -> Result<JsValue, JsValue>;
 }
 
 /// Thin wrapper around the Tauri `invoke` bridge. Serializes `args` to
@@ -65,11 +82,45 @@ pub struct Selection {
     pub message: Option<MessageId>,
 }
 
+/// Per-folder revision counter. The desktop's sync engine emits a
+/// `sync_event` over Tauri whenever a folder finishes a sync cycle;
+/// the listener bumps this signal so message-list resources whose
+/// `use_reactive!` deps include it auto-refetch.
+///
+/// One signal for the whole app means an event for folder A causes a
+/// no-op refetch of folder B's list — at one cheap DB query that's a
+/// fine tradeoff over per-folder bookkeeping. If it ever shows up in
+/// profiles, swap to a `Signal<HashMap<(AccountId, FolderId), u64>>`
+/// keyed by the changed folder.
+pub type SyncTick = Signal<u64>;
+
 // ---------- Root ----------
 
 #[component]
 pub fn App() -> Element {
     let selection = use_signal(Selection::default);
+    let sync_tick: SyncTick = use_signal(|| 0u64);
+
+    // Register the Tauri sync_event listener once at mount. The
+    // closure leaks on purpose: it lives the lifetime of the app and
+    // there's no useful unsubscribe point. wasm_bindgen `Closure` would
+    // otherwise free its heap-allocated trampoline on Drop, leaving JS
+    // with a dangling fn pointer.
+    use_hook(move || {
+        let mut tick = sync_tick;
+        let cb = Closure::<dyn FnMut(JsValue)>::new(move |_event: JsValue| {
+            tick.with_mut(|n| *n = n.wrapping_add(1));
+        });
+        wasm_bindgen_futures::spawn_local(async move {
+            let func = cb.as_ref().unchecked_ref::<js_sys::Function>();
+            if let Err(e) = tauri_listen("sync_event", func).await {
+                web_sys_log(&format!("sync_event listen failed: {e:?}"));
+            }
+            // Hold the closure alive for the listener's lifetime. The
+            // Box::leak is deliberate (see use_hook comment above).
+            Box::leak(Box::new(cb));
+        });
+    });
 
     rsx! {
         main {
@@ -86,11 +137,21 @@ pub fn App() -> Element {
             div {
                 class: "panes",
                 Sidebar { selection }
-                MessageListPane { selection }
+                MessageListPane { selection, sync_tick }
                 ReaderPane { selection }
             }
         }
     }
+}
+
+/// Tiny `console.log` shim — saves pulling `web-sys` for one call.
+fn web_sys_log(msg: &str) {
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_namespace = console)]
+        fn log(s: &str);
+    }
+    log(msg);
 }
 
 // ---------- Reader-pane HTML composer ----------
@@ -377,7 +438,7 @@ fn FolderRow(folder: Folder, selection: Signal<Selection>) -> Element {
 // ---------- Middle pane: message list ----------
 
 #[component]
-fn MessageListPane(selection: Signal<Selection>) -> Element {
+fn MessageListPane(selection: Signal<Selection>, sync_tick: SyncTick) -> Element {
     let folder_id = selection.read().folder.clone();
 
     rsx! {
@@ -385,16 +446,22 @@ fn MessageListPane(selection: Signal<Selection>) -> Element {
             class: "message-list",
             match folder_id {
                 None => rsx! { p { class: "hint", "Select a folder to see its messages." } },
-                Some(fid) => rsx! { MessageList { folder: fid, selection } },
+                Some(fid) => rsx! { MessageList { folder: fid, selection, sync_tick } },
             }
         }
     }
 }
 
 #[component]
-fn MessageList(folder: FolderId, selection: Signal<Selection>) -> Element {
+fn MessageList(folder: FolderId, selection: Signal<Selection>, sync_tick: SyncTick) -> Element {
     let folder_for_fetch = folder.clone();
-    let page = use_resource(use_reactive!(|folder_for_fetch| async move {
+    // Including `tick_value` in the reactive deps means every
+    // `sync_event` from the desktop engine triggers a fresh
+    // `messages_list` invoke — refetching the local DB cache so any
+    // newly-synced rows surface immediately.
+    let tick_value = sync_tick();
+    let page = use_resource(use_reactive!(|folder_for_fetch, tick_value| async move {
+        let _ = tick_value; // dep-only; not used in body
         invoke::<MessagePage>(
             "messages_list",
             serde_json::json!({
