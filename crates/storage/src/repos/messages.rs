@@ -117,6 +117,86 @@ pub async fn list_by_folder(
     rows.iter().map(row_to_headers).collect()
 }
 
+/// Cross-folder version of [`list_by_folder`]: all messages in any
+/// of the given folders, sorted by date desc, paginated. Used by
+/// the unified-inbox UI to merge every account's INBOX-role folder
+/// in one query.
+///
+/// Empty `folders` returns `Ok(vec![])` without round-tripping. The
+/// `IN (?, ?, …)` clause is built with one placeholder per folder
+/// id; we expect <100 entries in practice (one INBOX per account).
+pub async fn list_by_folders(
+    conn: &dyn DbConn,
+    folders: &[FolderId],
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<MessageHeaders>, StorageError> {
+    if folders.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders: String = (1..=folders.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let limit_param = folders.len() + 1;
+    let offset_param = folders.len() + 2;
+    let sql = format!(
+        "SELECT {COLS} FROM messages \
+         WHERE folder_id IN ({placeholders}) \
+         ORDER BY date DESC LIMIT ?{limit_param} OFFSET ?{offset_param}"
+    );
+    let mut params: Vec<Value> = folders.iter().map(|f| Value::Text(&f.0)).collect();
+    params.push(Value::Integer(limit.into()));
+    params.push(Value::Integer(offset.into()));
+    let rows = conn.query(&sql, Params(params)).await?;
+    rows.iter().map(row_to_headers).collect()
+}
+
+/// Cross-folder count for the unified inbox. Mirrors
+/// [`count_by_folder`].
+pub async fn count_by_folders(
+    conn: &dyn DbConn,
+    folders: &[FolderId],
+) -> Result<u32, StorageError> {
+    if folders.is_empty() {
+        return Ok(0);
+    }
+    let placeholders: String = (1..=folders.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!("SELECT COUNT(*) AS c FROM messages WHERE folder_id IN ({placeholders})");
+    let params: Vec<Value> = folders.iter().map(|f| Value::Text(&f.0)).collect();
+    let row = conn.query_one(&sql, Params(params)).await?;
+    let c = row.get_i64("c")?;
+    Ok(c.max(0) as u32)
+}
+
+/// Cross-folder unread count for the unified inbox. Mirrors
+/// [`count_unread_by_folder`].
+pub async fn count_unread_by_folders(
+    conn: &dyn DbConn,
+    folders: &[FolderId],
+) -> Result<u32, StorageError> {
+    if folders.is_empty() {
+        return Ok(0);
+    }
+    let placeholders: String = (1..=folders.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT COUNT(*) AS c \
+           FROM messages \
+          WHERE folder_id IN ({placeholders}) \
+            AND COALESCE(json_extract(flags_json, '$.seen'), 0) = 0"
+    );
+    let params: Vec<Value> = folders.iter().map(|f| Value::Text(&f.0)).collect();
+    let row = conn.query_one(&sql, Params(params)).await?;
+    let c = row.get_i64("c")?;
+    Ok(c.max(0) as u32)
+}
+
 /// Total number of messages persisted for a folder.
 ///
 /// Used by `MessagePage::total_count` so the UI can render pagination

@@ -96,6 +96,7 @@ async fn watch_one_session(
         &params.email,
         &params.access_token,
     )
-    .await?;
+    .await?
+    .session;
     watch_folder(session, folder.clone(), account_id.clone(), tx.clone()).await
 }

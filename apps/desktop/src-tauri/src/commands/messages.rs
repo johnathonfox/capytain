@@ -9,13 +9,14 @@
 //! `messages_download_attachment`) land in Phase 1 alongside the
 //! outbox / optimistic-mutation engine.
 
-use capytain_core::MessageHeaders;
+use capytain_core::{FolderRole, MessageHeaders};
 use capytain_ipc::{FolderId, IpcResult, MessageId, MessagePage, RenderedMessage, SortOrder};
 use capytain_mime::{
     parse_rfc822, sanitize_email_html, sanitize_email_html_trusted, MessageIdentity,
 };
 use capytain_storage::{
-    repos::messages as messages_repo, repos::remote_content_opt_ins, BlobStore,
+    repos::folders as folders_repo, repos::messages as messages_repo,
+    repos::remote_content_opt_ins, BlobStore,
 };
 use serde::Deserialize;
 use tauri::State;
@@ -73,6 +74,63 @@ pub async fn messages_list(
         total = total_count,
         unread = unread_count,
         "messages_list"
+    );
+
+    Ok(MessagePage {
+        messages,
+        total_count,
+        unread_count,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MessagesListUnifiedInput {
+    pub limit: u32,
+    pub offset: u32,
+    #[serde(default)]
+    pub sort: SortOrder,
+}
+
+/// `messages_list_unified` — one page of the unified inbox: every
+/// account's INBOX-role folder merged and sorted by date desc.
+///
+/// Resolves the set of INBOX folders by `folders::list_by_role` so
+/// we don't depend on a hardcoded folder-name convention; works
+/// for both IMAP (`\Inbox` SPECIAL-USE) and JMAP (`Mailbox.role =
+/// inbox`) accounts because both adapters normalize to
+/// `FolderRole::Inbox` at sync time.
+#[tauri::command]
+pub async fn messages_list_unified(
+    state: State<'_, AppState>,
+    input: MessagesListUnifiedInput,
+) -> IpcResult<MessagePage> {
+    let MessagesListUnifiedInput {
+        limit,
+        offset,
+        sort,
+    } = input;
+    let limit = limit.min(MAX_PAGE_LIMIT);
+    if sort != SortOrder::DateDesc {
+        tracing::warn!(
+            requested = ?sort,
+            "messages_list_unified: Phase 1 Week 12 only implements date_desc — falling back"
+        );
+    }
+
+    let db = state.db.lock().await;
+    let inboxes = folders_repo::list_by_role(&*db, FolderRole::Inbox).await?;
+    let folder_ids: Vec<FolderId> = inboxes.iter().map(|f| f.id.clone()).collect();
+    let messages = messages_repo::list_by_folders(&*db, &folder_ids, limit, offset).await?;
+    let total_count = messages_repo::count_by_folders(&*db, &folder_ids).await?;
+    let unread_count = messages_repo::count_unread_by_folders(&*db, &folder_ids).await?;
+    drop(db);
+
+    tracing::debug!(
+        inbox_folders = inboxes.len(),
+        page = messages.len(),
+        total = total_count,
+        unread = unread_count,
+        "messages_list_unified"
     );
 
     Ok(MessagePage {

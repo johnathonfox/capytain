@@ -40,6 +40,11 @@ pub struct ImapBackend {
     session: Mutex<Session<StreamT>>,
     account: AccountId,
     host: Arc<str>,
+    /// True when the server advertised `X-GM-EXT-1`, Gmail's extension
+    /// family. Toggles the FETCH query on `list_messages` to include
+    /// `X-GM-LABELS` so per-message Gmail labels round-trip into
+    /// `MessageHeaders.labels`.
+    gmail_ext: bool,
 }
 
 impl ImapBackend {
@@ -50,11 +55,13 @@ impl ImapBackend {
         session: Session<StreamT>,
         account: AccountId,
         host: impl Into<Arc<str>>,
+        gmail_ext: bool,
     ) -> Self {
         Self {
             session: Mutex::new(session),
             account,
             host: host.into(),
+            gmail_ext,
         }
     }
 
@@ -68,15 +75,25 @@ impl ImapBackend {
         access_token: &str,
         account: AccountId,
     ) -> Result<Self, MailError> {
-        let session = dial_session(host, port, email, access_token).await?;
-        info!(host, email, "IMAP connected and authenticated");
-        Ok(Self::from_session(session, account, host))
+        let DialedSession { session, gmail_ext } =
+            dial_session(host, port, email, access_token).await?;
+        info!(host, email, gmail_ext, "IMAP connected and authenticated");
+        Ok(Self::from_session(session, account, host, gmail_ext))
     }
 
     /// The host this backend connected to — exposed for logs/diagnostics.
     pub fn host(&self) -> &str {
         &self.host
     }
+}
+
+/// Result of [`dial_session`] — the authenticated session plus the
+/// capability flags the caller may want to vary behavior on. The
+/// IDLE watcher discards the flags; `ImapBackend::connect_tls`
+/// stashes `gmail_ext` so `list_messages` can request `X-GM-LABELS`.
+pub struct DialedSession {
+    pub session: Session<StreamT>,
+    pub gmail_ext: bool,
 }
 
 /// Open a fresh TLS+IMAP session against `host:port`, run XOAUTH2,
@@ -90,7 +107,7 @@ pub async fn dial_session(
     port: u16,
     email: &str,
     access_token: &str,
-) -> Result<Session<StreamT>, MailError> {
+) -> Result<DialedSession, MailError> {
     let tcp = TcpStream::connect((host, port))
         .await
         .map_err(|e| MailError::Network(format!("tcp connect {host}:{port}: {e}")))?;
@@ -132,7 +149,11 @@ pub async fn dial_session(
     tracing::debug!(capabilities = ?cap_strings, "IMAP server capabilities");
     require_caps(&cap_strings)?;
 
-    Ok(session)
+    let gmail_ext = cap_strings
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case("X-GM-EXT-1"));
+
+    Ok(DialedSession { session, gmail_ext })
 }
 
 async fn tls_connect(host: &str, tcp: TcpStream) -> Result<StreamT, MailError> {
@@ -261,7 +282,15 @@ impl MailBackend for ImapBackend {
             },
         };
 
-        let query = "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE)";
+        // Append `X-GM-LABELS` against Gmail (X-GM-EXT-1 advertised
+        // at connect time). Sending it to a server that doesn't
+        // support the extension would BAD the whole FETCH; the flag
+        // is set in `dial_session` so we know it's safe here.
+        let query = if self.gmail_ext {
+            "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE X-GM-LABELS)"
+        } else {
+            "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE)"
+        };
         let mut fetches = session
             .uid_fetch(&uid_set, query)
             .await
@@ -580,6 +609,23 @@ fn fetch_to_headers(
         folder: folder.0.clone(),
     };
 
+    // X-GM-LABELS, when present, contains every Gmail label the
+    // message carries — including system labels (`\Inbox`, `\Sent`,
+    // `\Important`) the user can't see in the web UI. Strip the
+    // backslash-prefixed system ones so what lands in
+    // `MessageHeaders.labels` is just the user-visible label set,
+    // matching what JMAP returns from `Mailbox/get`.
+    let labels = fetch
+        .gmail_labels()
+        .map(|labels| {
+            labels
+                .iter()
+                .map(|l| l.to_string())
+                .filter(|l| !l.starts_with('\\'))
+                .collect()
+        })
+        .unwrap_or_default();
+
     Ok(Some(MessageHeaders {
         id: r.encode(),
         account_id: account.clone(),
@@ -594,7 +640,7 @@ fn fetch_to_headers(
         bcc,
         date,
         flags,
-        labels: Vec::new(),
+        labels,
         snippet: String::new(),
         size,
         has_attachments: false,

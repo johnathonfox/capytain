@@ -75,11 +75,17 @@ where
 // ---------- Selection state ----------
 
 /// Global selection state shared across all three panes.
+///
+/// `unified` toggles between the per-folder view and the unified
+/// inbox (every account's INBOX-role folder merged). When set, the
+/// message-list pane invokes `messages_list_unified` and ignores
+/// `account` / `folder`. Selecting a regular folder clears it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Selection {
     pub account: Option<AccountId>,
     pub folder: Option<FolderId>,
     pub message: Option<MessageId>,
+    pub unified: bool,
 }
 
 /// Per-folder revision counter. The desktop's sync engine emits a
@@ -352,12 +358,31 @@ fn Sidebar(selection: Signal<Selection>) -> Element {
                 Some(Ok(list)) => rsx! {
                     ul {
                         class: "accounts",
+                        UnifiedInboxRow { selection }
                         for a in list.iter().cloned() {
                             AccountRow { account: a, selection }
                         }
                     }
                 },
             }
+        }
+    }
+}
+
+#[component]
+fn UnifiedInboxRow(selection: Signal<Selection>) -> Element {
+    let is_selected = selection.read().unified;
+    rsx! {
+        li {
+            class: if is_selected { "unified-inbox selected" } else { "unified-inbox" },
+            onclick: move |_| {
+                let mut sel = selection.write();
+                sel.unified = true;
+                sel.account = None;
+                sel.folder = None;
+                sel.message = None;
+            },
+            strong { "Unified Inbox" }
         }
     }
 }
@@ -383,9 +408,11 @@ fn AccountRow(account: Account, selection: Signal<Selection>) -> Element {
                 onclick: {
                     let account_id = account.id.clone();
                     move |_| {
-                        selection.write().account = Some(account_id.clone());
-                        selection.write().folder = None;
-                        selection.write().message = None;
+                        let mut sel = selection.write();
+                        sel.account = Some(account_id.clone());
+                        sel.folder = None;
+                        sel.message = None;
+                        sel.unified = false;
                     }
                 },
                 strong { "{account.display_name}" }
@@ -426,8 +453,10 @@ fn FolderRow(folder: Folder, selection: Signal<Selection>) -> Element {
             onclick: {
                 let folder_id = folder.id.clone();
                 move |_| {
-                    selection.write().folder = Some(folder_id.clone());
-                    selection.write().message = None;
+                    let mut sel = selection.write();
+                    sel.folder = Some(folder_id.clone());
+                    sel.message = None;
+                    sel.unified = false;
                 }
             },
             span { "{folder.name}" }
@@ -439,15 +468,57 @@ fn FolderRow(folder: Folder, selection: Signal<Selection>) -> Element {
 
 #[component]
 fn MessageListPane(selection: Signal<Selection>, sync_tick: SyncTick) -> Element {
+    let unified = selection.read().unified;
     let folder_id = selection.read().folder.clone();
 
     rsx! {
         section {
             class: "message-list",
-            match folder_id {
-                None => rsx! { p { class: "hint", "Select a folder to see its messages." } },
-                Some(fid) => rsx! { MessageList { folder: fid, selection, sync_tick } },
+            if unified {
+                UnifiedMessageList { selection, sync_tick }
+            } else {
+                match folder_id {
+                    None => rsx! { p { class: "hint", "Select a folder to see its messages." } },
+                    Some(fid) => rsx! { MessageList { folder: fid, selection, sync_tick } },
+                }
             }
+        }
+    }
+}
+
+#[component]
+fn UnifiedMessageList(selection: Signal<Selection>, sync_tick: SyncTick) -> Element {
+    let tick_value = sync_tick();
+    let page = use_resource(use_reactive!(|tick_value| async move {
+        let _ = tick_value;
+        invoke::<MessagePage>(
+            "messages_list_unified",
+            serde_json::json!({
+                "limit": 50,
+                "offset": 0,
+                "sort": SortOrder::DateDesc,
+            }),
+        )
+        .await
+    }));
+
+    rsx! {
+        match &*page.read_unchecked() {
+            None => rsx! { p { "Loading unified inbox…" } },
+            Some(Err(e)) => rsx! { p { class: "error", "{e}" } },
+            Some(Ok(MessagePage { messages, total_count, unread_count })) => rsx! {
+                header {
+                    class: "messages-head",
+                    strong { "Unified Inbox · {messages.len()} / {total_count}" }
+                    span { class: "unread", "{unread_count} unread" }
+                }
+                ul {
+                    class: "messages",
+                    for m in messages.iter().cloned() {
+                        MessageRow { msg: m, selection }
+                    }
+                }
+            },
         }
     }
 }
