@@ -78,10 +78,29 @@ pub fn parse_rfc822(raw: &[u8], identity: MessageIdentity<'_>) -> Option<Message
 /// separate pipeline stage in the renderer's `on_link_click`
 /// callback.
 ///
+/// For senders the user has explicitly trusted (recorded in
+/// `remote_content_opt_ins`), `messages_get` calls
+/// [`sanitize_email_html_trusted`] instead, which keeps every other
+/// sanitization rule but skips the URL filter.
+///
 /// Returns empty-ish output is acceptable: the reader UI's
 /// `compose_reader_html` falls back to the plaintext path when the
 /// sanitized result is empty or whitespace-only.
 pub fn sanitize_email_html(raw_html: &str) -> String {
+    sanitize(raw_html, /* block_remote = */ true)
+}
+
+/// Sanitize HTML for a sender the user has trusted via
+/// `remote_content_opt_ins` for this account. Every rule from
+/// [`sanitize_email_html`] still applies (script stripping,
+/// `javascript:` URL removal, event-handler attribute removal,
+/// element allowlist), but `src` / `background` / `poster` /
+/// `srcset` URLs are passed through unchecked.
+pub fn sanitize_email_html_trusted(raw_html: &str) -> String {
+    sanitize(raw_html, /* block_remote = */ false)
+}
+
+fn sanitize(raw_html: &str, block_remote: bool) -> String {
     let engine = remote_content::default_engine();
     ammonia::Builder::default()
         .add_generic_attributes(["style"])
@@ -93,12 +112,10 @@ pub fn sanitize_email_html(raw_html: &str) -> String {
             // Only URL-bearing attributes on media elements go
             // through the blocker. Everything else passes.
             match attribute {
-                "src" | "background" | "poster" | "srcset" => {
-                    if remote_content::is_blocked(engine, value, "image") {
-                        None
-                    } else {
-                        Some(Cow::Borrowed(value))
-                    }
+                "src" | "background" | "poster" | "srcset"
+                    if block_remote && remote_content::is_blocked(engine, value, "image") =>
+                {
+                    None
                 }
                 _ => Some(Cow::Borrowed(value)),
             }
@@ -467,6 +484,33 @@ Just checking in.\r\n";
             out.contains(r#"href="https://acme.list-manage.com/subscribe/confirm""#),
             "href erroneously dropped: {out}"
         );
+    }
+
+    #[test]
+    fn sanitize_trusted_keeps_tracker_image_src() {
+        // Same Mailchimp pixel that the default sanitizer drops. With
+        // the trusted variant, the user has explicitly opted in to
+        // remote content from this sender, so the URL filter is
+        // skipped and the `src` survives.
+        let probe =
+            r#"<p>body</p><img src="https://acme.list-manage.com/track/open.php?u=abc&id=xyz">"#;
+        let out = sanitize_email_html_trusted(probe);
+        assert!(
+            out.contains("list-manage.com/track/open.php"),
+            "trusted-sender pixel src dropped: {out}"
+        );
+    }
+
+    #[test]
+    fn sanitize_trusted_still_strips_scripts() {
+        // Trust applies to remote content only — script/iframe/etc.
+        // stripping must remain unconditional.
+        let out = sanitize_email_html_trusted(
+            "<p>hi</p><script>alert('xss')</script><iframe src=\"https://attacker.example/\"></iframe>",
+        );
+        assert!(!out.contains("<script"), "script survived: {out}");
+        assert!(!out.contains("<iframe"), "iframe survived: {out}");
+        assert!(out.contains("<p>hi</p>"));
     }
 
     #[test]

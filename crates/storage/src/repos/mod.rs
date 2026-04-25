@@ -14,4 +14,5 @@ pub mod accounts;
 pub mod attachments;
 pub mod folders;
 pub mod messages;
+pub mod remote_content_opt_ins;
 pub mod sync_states;

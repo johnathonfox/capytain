@@ -428,8 +428,9 @@ fn migrations_idempotent() {
         let conn = TursoConn::in_memory().await.expect("in-memory");
         run_migrations(&conn).await.expect("first");
         run_migrations(&conn).await.expect("second");
-        // Second run should be a no-op — verify by re-selecting the
-        // schema_version row count.
+        // Second run should be a no-op — verify by counting the
+        // schema_version rows: one row per shipped migration, no
+        // duplicates from the second pass.
         let rows = conn
             .query(
                 "SELECT COUNT(*) AS c FROM _schema_version",
@@ -437,7 +438,69 @@ fn migrations_idempotent() {
             )
             .await
             .unwrap();
-        assert_eq!(rows[0].get_i64("c").unwrap(), 1);
+        let expected = capytain_storage::MIGRATIONS.len() as i64;
+        assert_eq!(rows[0].get_i64("c").unwrap(), expected);
+    });
+}
+
+#[test]
+fn remote_content_opt_in_add_check_remove() {
+    use capytain_storage::repos::remote_content_opt_ins as opt_ins;
+    let rt = rt();
+    rt.block_on(async move {
+        let conn = fresh_conn().await;
+        let acct = Account {
+            id: AccountId("opt-in-acct".into()),
+            kind: BackendKind::Jmap,
+            display_name: "x".into(),
+            email_address: "me@example.com".into(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        };
+        repos::accounts::insert(&conn, &acct).await.expect("acct");
+
+        assert!(
+            !opt_ins::is_trusted(&conn, &acct.id, "newsletter@example.com")
+                .await
+                .unwrap()
+        );
+
+        // Add with mixed case — repo lowercases on store and on lookup.
+        opt_ins::add(&conn, &acct.id, "Newsletter@Example.COM")
+            .await
+            .expect("add");
+        assert!(
+            opt_ins::is_trusted(&conn, &acct.id, "newsletter@example.com")
+                .await
+                .unwrap()
+        );
+        assert!(
+            opt_ins::is_trusted(&conn, &acct.id, "NEWSLETTER@example.com")
+                .await
+                .unwrap()
+        );
+
+        let listed = opt_ins::list_for_account(&conn, &acct.id)
+            .await
+            .expect("list");
+        assert_eq!(listed, vec!["newsletter@example.com".to_string()]);
+
+        // Add is idempotent — calling twice doesn't insert two rows.
+        opt_ins::add(&conn, &acct.id, "newsletter@example.com")
+            .await
+            .expect("re-add");
+        let listed = opt_ins::list_for_account(&conn, &acct.id)
+            .await
+            .expect("list2");
+        assert_eq!(listed.len(), 1);
+
+        opt_ins::remove(&conn, &acct.id, "newsletter@example.com")
+            .await
+            .expect("remove");
+        assert!(
+            !opt_ins::is_trusted(&conn, &acct.id, "newsletter@example.com")
+                .await
+                .unwrap()
+        );
     });
 }
 
