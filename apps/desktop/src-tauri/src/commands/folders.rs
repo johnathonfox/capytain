@@ -8,7 +8,7 @@
 //! land.
 
 use capytain_ipc::{AccountId, Folder, IpcResult};
-use capytain_storage::repos::folders as folders_repo;
+use capytain_storage::repos::{folders as folders_repo, messages as messages_repo};
 use serde::Deserialize;
 use tauri::State;
 
@@ -31,7 +31,22 @@ pub async fn folders_list(
     input: FoldersListInput,
 ) -> IpcResult<Vec<Folder>> {
     let db = state.db.lock().await;
-    let folders = folders_repo::list_by_account(&*db, &input.account).await?;
+    let mut folders = folders_repo::list_by_account(&*db, &input.account).await?;
+    // The persisted `unread_count` / `total_count` columns aren't
+    // updated on every message insert (the sync engine writes
+    // headers without round-tripping the parent folder row), so
+    // recompute live from the messages table for the sidebar
+    // badges. <100 folders × one indexed COUNT(*) each is cheap;
+    // measurable cost only emerges in the >1k folder regime, which
+    // we're nowhere near.
+    for f in folders.iter_mut() {
+        f.unread_count = messages_repo::count_unread_by_folder(&*db, &f.id)
+            .await
+            .unwrap_or(0);
+        f.total_count = messages_repo::count_by_folder(&*db, &f.id)
+            .await
+            .unwrap_or(0);
+    }
     tracing::debug!(account = %input.account.0, count = folders.len(), "folders_list");
     Ok(folders)
 }

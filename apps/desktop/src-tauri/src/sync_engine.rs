@@ -276,24 +276,14 @@ async fn bootstrap_account(app: &AppHandle, account: &Account) -> Result<Vec<Fol
 
     let mut folders = Vec::with_capacity(outcomes.len());
     for outcome in outcomes {
-        let event = match &outcome.result {
-            Ok(report) => SyncEvent::FolderSynced {
-                account: account.id.clone(),
-                folder: outcome.folder_id.clone(),
-                added: report.added as u32,
-                updated: report.updated as u32,
-                flag_updates: report.flag_updates as u32,
-                removed: report.removed as u32,
-            },
-            Err(e) => SyncEvent::FolderError {
-                account: account.id.clone(),
-                folder: outcome.folder_id.clone(),
-                error: format!("{e}"),
-            },
-        };
-        if let Err(e) = app.emit(SYNC_EVENT, &event) {
-            warn!("emit sync_event: {e}");
-        }
+        emit_folder_outcome(
+            app,
+            &account.id,
+            &outcome.folder_id,
+            &outcome.result,
+            /* live = */ false,
+        )
+        .await;
 
         // Build a minimal Folder for the watch list. We only need
         // the id; the watcher uses the folder path string from
@@ -336,33 +326,7 @@ async fn sync_one_folder(
         capytain_sync::sync_folder(&*db, backend.as_ref(), Some(blobs), folder, Some(200)).await;
     drop(db);
 
-    let event = match result {
-        Ok(report) => {
-            debug!(
-                account = %account_id.0,
-                folder = %folder.id.0,
-                added = report.added,
-                flag_updates = report.flag_updates,
-                "live sync_folder"
-            );
-            SyncEvent::FolderSynced {
-                account: account_id.clone(),
-                folder: folder.id.clone(),
-                added: report.added as u32,
-                updated: report.updated as u32,
-                flag_updates: report.flag_updates as u32,
-                removed: report.removed as u32,
-            }
-        }
-        Err(e) => SyncEvent::FolderError {
-            account: account_id.clone(),
-            folder: folder.id.clone(),
-            error: format!("{e}"),
-        },
-    };
-    if let Err(e) = app.emit(SYNC_EVENT, &event) {
-        warn!("emit sync_event: {e}");
-    }
+    emit_folder_outcome(app, account_id, &folder.id, &result, /* live = */ true).await;
 }
 
 /// Re-sync every folder of one account in response to a debounced
@@ -392,33 +356,93 @@ async fn sync_one_account(app: &AppHandle, blobs: &BlobStore, account_id: &Accou
     drop(db);
 
     for outcome in outcomes {
-        let event = match outcome.result {
-            Ok(report) => {
-                debug!(
-                    account = %account_id.0,
-                    folder = %outcome.folder_id.0,
-                    added = report.added,
-                    flag_updates = report.flag_updates,
-                    "live sync_account folder"
-                );
-                SyncEvent::FolderSynced {
-                    account: account_id.clone(),
-                    folder: outcome.folder_id,
-                    added: report.added as u32,
-                    updated: report.updated as u32,
-                    flag_updates: report.flag_updates as u32,
-                    removed: report.removed as u32,
-                }
+        emit_folder_outcome(
+            app,
+            account_id,
+            &outcome.folder_id,
+            &outcome.result,
+            /* live = */ true,
+        )
+        .await;
+    }
+}
+
+/// Emit a `SyncEvent` for one folder's outcome, looking up the
+/// post-sync `unread_count` and (if `live`) firing a desktop
+/// notification when new messages arrived. Both bootstrap and
+/// reactive paths funnel through here so the IPC shape stays
+/// uniform.
+async fn emit_folder_outcome(
+    app: &AppHandle,
+    account: &AccountId,
+    folder: &FolderId,
+    result: &Result<capytain_sync::SyncReport, capytain_sync::SyncError>,
+    live: bool,
+) {
+    let event = match result {
+        Ok(report) => {
+            let unread = {
+                let state: tauri::State<'_, AppState> = app.state();
+                let db = state.db.lock().await;
+                capytain_storage::repos::messages::count_unread_by_folder(&*db, folder)
+                    .await
+                    .unwrap_or(0)
+            };
+            if live && report.added > 0 {
+                fire_new_mail_notification(app, account, folder, report.added);
             }
-            Err(e) => SyncEvent::FolderError {
-                account: account_id.clone(),
-                folder: outcome.folder_id,
-                error: format!("{e}"),
-            },
-        };
-        if let Err(e) = app.emit(SYNC_EVENT, &event) {
-            warn!("emit sync_event: {e}");
+            SyncEvent::FolderSynced {
+                account: account.clone(),
+                folder: folder.clone(),
+                added: report.added as u32,
+                updated: report.updated as u32,
+                flag_updates: report.flag_updates as u32,
+                removed: report.removed as u32,
+                unread_count: unread,
+                live,
+            }
         }
+        Err(e) => SyncEvent::FolderError {
+            account: account.clone(),
+            folder: folder.clone(),
+            error: format!("{e}"),
+        },
+    };
+    if let Err(e) = app.emit(SYNC_EVENT, &event) {
+        warn!("emit sync_event: {e}");
+    }
+}
+
+/// Fire an OS-native "new mail" notification via
+/// `tauri-plugin-notification`. Best-effort: failures are logged
+/// and the engine moves on (a missing notification surface — Linux
+/// without a notification daemon, Windows action center disabled —
+/// shouldn't stall sync).
+fn fire_new_mail_notification(
+    app: &AppHandle,
+    account: &AccountId,
+    folder: &FolderId,
+    count: usize,
+) {
+    use tauri_plugin_notification::NotificationExt;
+    let title = if count == 1 {
+        "New message".to_string()
+    } else {
+        format!("{count} new messages")
+    };
+    let body = format!("{} · {}", account.0, folder.0);
+    if let Err(e) = app
+        .notification()
+        .builder()
+        .title(&title)
+        .body(&body)
+        .show()
+    {
+        debug!(
+            account = %account.0,
+            folder = %folder.0,
+            "notification failed: {e}"
+        );
     }
 }
 

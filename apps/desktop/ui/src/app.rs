@@ -142,7 +142,7 @@ pub fn App() -> Element {
             }
             div {
                 class: "panes",
-                Sidebar { selection }
+                Sidebar { selection, sync_tick }
                 MessageListPane { selection, sync_tick }
                 ReaderPane { selection }
             }
@@ -337,7 +337,7 @@ fn ServoTestButton() -> Element {
 // ---------- Sidebar: accounts + folders ----------
 
 #[component]
-fn Sidebar(selection: Signal<Selection>) -> Element {
+fn Sidebar(selection: Signal<Selection>, sync_tick: SyncTick) -> Element {
     let accounts = use_resource(|| async { invoke::<Vec<Account>>("accounts_list", ()).await });
 
     rsx! {
@@ -360,7 +360,7 @@ fn Sidebar(selection: Signal<Selection>) -> Element {
                         class: "accounts",
                         UnifiedInboxRow { selection }
                         for a in list.iter().cloned() {
-                            AccountRow { account: a, selection }
+                            AccountRow { account: a, selection, sync_tick }
                         }
                     }
                 },
@@ -388,9 +388,11 @@ fn UnifiedInboxRow(selection: Signal<Selection>) -> Element {
 }
 
 #[component]
-fn AccountRow(account: Account, selection: Signal<Selection>) -> Element {
+fn AccountRow(account: Account, selection: Signal<Selection>, sync_tick: SyncTick) -> Element {
     let id = account.id.clone();
-    let folders = use_resource(use_reactive!(|id| async move {
+    let tick_value = sync_tick();
+    let folders = use_resource(use_reactive!(|id, tick_value| async move {
+        let _ = tick_value; // dep-only; refetches when sync_event fires
         invoke::<Vec<Folder>>("folders_list", serde_json::json!({ "account": id })).await
     }));
 
@@ -459,7 +461,10 @@ fn FolderRow(folder: Folder, selection: Signal<Selection>) -> Element {
                     sel.unified = false;
                 }
             },
-            span { "{folder.name}" }
+            span { class: "folder-name", "{folder.name}" }
+            if folder.unread_count > 0 {
+                span { class: "unread-badge", "{folder.unread_count}" }
+            }
         }
     }
 }
