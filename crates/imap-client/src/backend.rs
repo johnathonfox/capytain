@@ -525,17 +525,149 @@ impl MailBackend for ImapBackend {
         messages: &[MessageId],
         target: &FolderId,
     ) -> Result<(), MailError> {
-        let _ = (messages, target);
-        Err(MailError::Other(
-            "IMAP write path arrives in Phase 1 Week 2".into(),
-        ))
+        if messages.is_empty() {
+            return Ok(());
+        }
+        // Group by source (folder, uidvalidity); each batch runs one
+        // SELECT + one UID MOVE. Per RFC 6851 the server atomically
+        // copies + expunges in one round-trip; async-imap exposes it
+        // as `uid_mv`. Servers that don't advertise MOVE fall back
+        // to `uid_copy` + `STORE +FLAGS (\Deleted)` + `UID EXPUNGE`,
+        // which we implement explicitly because async-imap doesn't
+        // do the fallback for us.
+        let mut by_folder: std::collections::HashMap<(String, u32), Vec<u32>> =
+            std::collections::HashMap::new();
+        for id in messages {
+            let r = MessageRef::decode(id)?;
+            by_folder
+                .entry((r.folder, r.uidvalidity))
+                .or_default()
+                .push(r.uid);
+        }
+
+        let mut session = self.session.lock().await;
+        for ((folder, uidvalidity), uids) in by_folder {
+            let mbox = session
+                .select(&folder)
+                .await
+                .map_err(|e| MailError::Protocol(format!("SELECT {folder}: {e}")))?;
+            let current_uv = mbox.uid_validity.ok_or_else(|| {
+                MailError::Protocol(format!("SELECT {folder}: missing UIDVALIDITY"))
+            })?;
+            if current_uv != uidvalidity {
+                return Err(MailError::Protocol(format!(
+                    "UIDVALIDITY changed for {folder} ({uidvalidity} → {current_uv}); refetch"
+                )));
+            }
+            let uid_set = uids
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            // Try MOVE first. Errors that look like "BAD command"
+            // fall back to COPY+STORE+EXPUNGE; everything else
+            // propagates.
+            match session.uid_mv(&uid_set, &target.0).await {
+                Ok(()) => continue,
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !msg.contains("BAD") && !msg.to_ascii_lowercase().contains("not enabled") {
+                        return Err(MailError::Protocol(format!(
+                            "UID MOVE {uid_set} {}: {e}",
+                            target.0
+                        )));
+                    }
+                    debug!(error = %msg, "UID MOVE not supported; falling back to COPY+STORE+EXPUNGE");
+                }
+            }
+            session.uid_copy(&uid_set, &target.0).await.map_err(|e| {
+                MailError::Protocol(format!("UID COPY {uid_set} {}: {e}", target.0))
+            })?;
+            let mut store_stream = session
+                .uid_store(&uid_set, "+FLAGS (\\Deleted)")
+                .await
+                .map_err(|e| MailError::Protocol(format!("STORE \\Deleted {uid_set}: {e}")))?;
+            while let Some(r) = store_stream.next().await {
+                r.map_err(|e| MailError::Protocol(format!("STORE response: {e}")))?;
+            }
+            drop(store_stream);
+            // UID EXPUNGE (RFC 4315) targets just the UIDs we just
+            // marked. Plain `EXPUNGE` would also pick up any other
+            // already-`\Deleted` messages in the folder, which is
+            // unsafe in a shared-mailbox scenario.
+            let expunge_stream = session
+                .uid_expunge(&uid_set)
+                .await
+                .map_err(|e| MailError::Protocol(format!("UID EXPUNGE {uid_set}: {e}")))?;
+            // The stream returned by uid_expunge is `!Unpin`, so
+            // pin it on the heap before driving with `.next()`.
+            let mut expunge_stream = Box::pin(expunge_stream);
+            while let Some(r) = expunge_stream.next().await {
+                r.map_err(|e| MailError::Protocol(format!("UID EXPUNGE response: {e}")))?;
+            }
+            drop(expunge_stream);
+        }
+        Ok(())
     }
 
     async fn delete_messages(&self, messages: &[MessageId]) -> Result<(), MailError> {
-        let _ = messages;
-        Err(MailError::Other(
-            "IMAP write path arrives in Phase 1 Week 2".into(),
-        ))
+        if messages.is_empty() {
+            return Ok(());
+        }
+        // RFC-style "delete" flips `\Deleted` then expunges. Some
+        // servers (Gmail) treat \Deleted as "move to Trash"; that's
+        // the user-visible expectation here too, so we don't try to
+        // emulate a hard purge.
+        let mut by_folder: std::collections::HashMap<(String, u32), Vec<u32>> =
+            std::collections::HashMap::new();
+        for id in messages {
+            let r = MessageRef::decode(id)?;
+            by_folder
+                .entry((r.folder, r.uidvalidity))
+                .or_default()
+                .push(r.uid);
+        }
+
+        let mut session = self.session.lock().await;
+        for ((folder, uidvalidity), uids) in by_folder {
+            let mbox = session
+                .select(&folder)
+                .await
+                .map_err(|e| MailError::Protocol(format!("SELECT {folder}: {e}")))?;
+            let current_uv = mbox.uid_validity.ok_or_else(|| {
+                MailError::Protocol(format!("SELECT {folder}: missing UIDVALIDITY"))
+            })?;
+            if current_uv != uidvalidity {
+                return Err(MailError::Protocol(format!(
+                    "UIDVALIDITY changed for {folder} ({uidvalidity} → {current_uv}); refetch"
+                )));
+            }
+            let uid_set = uids
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut store_stream = session
+                .uid_store(&uid_set, "+FLAGS (\\Deleted)")
+                .await
+                .map_err(|e| MailError::Protocol(format!("STORE \\Deleted {uid_set}: {e}")))?;
+            while let Some(r) = store_stream.next().await {
+                r.map_err(|e| MailError::Protocol(format!("STORE response: {e}")))?;
+            }
+            drop(store_stream);
+            let expunge_stream = session
+                .uid_expunge(&uid_set)
+                .await
+                .map_err(|e| MailError::Protocol(format!("UID EXPUNGE {uid_set}: {e}")))?;
+            // The stream returned by uid_expunge is `!Unpin`, so
+            // pin it on the heap before driving with `.next()`.
+            let mut expunge_stream = Box::pin(expunge_stream);
+            while let Some(r) = expunge_stream.next().await {
+                r.map_err(|e| MailError::Protocol(format!("UID EXPUNGE response: {e}")))?;
+            }
+            drop(expunge_stream);
+        }
+        Ok(())
     }
 
     async fn save_draft(&self, raw_rfc822: &[u8]) -> Result<MessageId, MailError> {

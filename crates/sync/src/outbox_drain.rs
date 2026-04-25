@@ -20,11 +20,15 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument, warn};
 
-use capytain_core::{MailError, MessageFlags, MessageId, StorageError};
+use capytain_core::{FolderId, MailError, MessageFlags, MessageId, StorageError};
 use capytain_storage::{repos::outbox as outbox_repo, DbConn};
 
 /// Op-kind tag used for `update_flags` payloads.
 pub const OP_UPDATE_FLAGS: &str = "update_flags";
+/// Op-kind tag for `move_messages` payloads.
+pub const OP_MOVE: &str = "move_messages";
+/// Op-kind tag for `delete_messages` payloads.
+pub const OP_DELETE: &str = "delete_messages";
 
 /// One drained row's outcome — the engine uses this to decide
 /// whether to emit a UI event for a failure-to-DLQ transition.
@@ -54,6 +58,19 @@ pub struct UpdateFlagsPayload {
     pub ids: Vec<MessageId>,
     pub add: MessageFlags,
     pub remove: MessageFlags,
+}
+
+/// JSON payload for `move_messages` rows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MovePayload {
+    pub ids: Vec<MessageId>,
+    pub target: FolderId,
+}
+
+/// JSON payload for `delete_messages` rows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeletePayload {
+    pub ids: Vec<MessageId>,
 }
 
 /// Trait the engine implements to hand the worker a backend on
@@ -158,6 +175,16 @@ async fn dispatch(
             backend
                 .update_flags(&payload.ids, payload.add, payload.remove)
                 .await
+        }
+        OP_MOVE => {
+            let payload: MovePayload = serde_json::from_str(&entry.payload_json)
+                .map_err(|e| MailError::Parse(format!("outbox.move_messages payload: {e}")))?;
+            backend.move_messages(&payload.ids, &payload.target).await
+        }
+        OP_DELETE => {
+            let payload: DeletePayload = serde_json::from_str(&entry.payload_json)
+                .map_err(|e| MailError::Parse(format!("outbox.delete_messages payload: {e}")))?;
+            backend.delete_messages(&payload.ids).await
         }
         other => Err(MailError::Other(format!("outbox: unknown op_kind {other}"))),
     }

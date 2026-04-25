@@ -309,17 +309,37 @@ impl MailBackend for JmapBackend {
         messages: &[MessageId],
         target: &FolderId,
     ) -> Result<(), MailError> {
-        let _ = (messages, target);
-        Err(MailError::Other(
-            "JMAP write path arrives in Phase 1 Week 2".into(),
-        ))
+        if messages.is_empty() {
+            return Ok(());
+        }
+        let client = self.client.lock().await;
+        // JMAP's move semantics live inside Email/set: replacing
+        // `mailboxIds` with `[target]` removes the message from
+        // every other mailbox in one round-trip. That's the spec's
+        // "move" — preserving secondary labels would be a
+        // copy-shaped operation users don't expect from "move to
+        // folder."
+        for id in messages {
+            client
+                .email_set_mailboxes(&id.0, [target.0.as_str()])
+                .await
+                .map_err(|e| MailError::Protocol(format!("Email/set mailboxIds {}: {e}", id.0)))?;
+        }
+        Ok(())
     }
 
     async fn delete_messages(&self, messages: &[MessageId]) -> Result<(), MailError> {
-        let _ = messages;
-        Err(MailError::Other(
-            "JMAP write path arrives in Phase 1 Week 2".into(),
-        ))
+        if messages.is_empty() {
+            return Ok(());
+        }
+        let client = self.client.lock().await;
+        for id in messages {
+            client
+                .email_destroy(&id.0)
+                .await
+                .map_err(|e| MailError::Protocol(format!("Email/set destroy {}: {e}", id.0)))?;
+        }
+        Ok(())
     }
 
     async fn save_draft(&self, raw_rfc822: &[u8]) -> Result<MessageId, MailError> {
