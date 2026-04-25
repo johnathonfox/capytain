@@ -21,6 +21,7 @@
 
 mod backend_factory;
 mod commands;
+mod imap_idle;
 #[cfg(all(feature = "servo", target_os = "linux"))]
 mod linux_gtk;
 #[cfg(feature = "servo")]

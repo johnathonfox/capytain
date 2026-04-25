@@ -25,6 +25,17 @@ use capytain_storage::repos;
 
 use crate::state::AppState;
 
+/// Connection parameters for opening a fresh IMAP session — used by
+/// the IDLE watcher to dial side connections without going through
+/// the cached `MailBackend`.
+#[derive(Debug, Clone)]
+pub struct ImapDialParams {
+    pub host: String,
+    pub port: u16,
+    pub email: String,
+    pub access_token: String,
+}
+
 /// Look up `account_id` in the backend cache; on miss, fetch the
 /// account row, refresh its access token, dial the provider, and
 /// install the resulting handle in the cache.
@@ -115,4 +126,63 @@ async fn open(account: &Account) -> Result<Arc<dyn MailBackend>, MailError> {
 
 fn provider_slug_from_id(id: &AccountId) -> Option<&str> {
     id.0.split_once(':').map(|(slug, _)| slug)
+}
+
+/// Refresh the OAuth access token for an IMAP-backed account and
+/// return the parameters needed to dial a fresh side session via
+/// `capytain_imap_client::dial_session`.
+///
+/// Used by the IDLE watcher to open an additional connection per
+/// folder (separate from the cached `MailBackend` that serves sync
+/// requests). Each call hits the auth refresh endpoint, so the
+/// caller should debounce — typically called once per reconnect
+/// cycle, not in tight loops.
+///
+/// Returns an error if the account is JMAP-backed; JMAP push lives
+/// behind EventSource (Phase 1 Week 11), not IMAP IDLE.
+pub async fn fresh_imap_params(
+    state: &AppState,
+    account_id: &AccountId,
+) -> Result<ImapDialParams, MailError> {
+    let db = state.db.lock().await;
+    let account = repos::accounts::get(&*db, account_id)
+        .await
+        .map_err(|e| MailError::Other(format!("loading account {} for IDLE: {e}", account_id.0)))?;
+    drop(db);
+
+    if !matches!(account.kind, BackendKind::ImapSmtp) {
+        return Err(MailError::Other(format!(
+            "account {} is not IMAP-backed; IDLE doesn't apply",
+            account.id.0
+        )));
+    }
+
+    let slug = provider_slug_from_id(&account.id).ok_or_else(|| {
+        MailError::Other(format!(
+            "account id {} does not follow `<provider>:<email>`",
+            account.id.0
+        ))
+    })?;
+    let provider = provider_lookup(slug)
+        .ok_or_else(|| MailError::Other(format!("unknown provider: {slug}")))?;
+    let vault = TokenVault::new();
+    let token_set = refresh_access_token(provider, &vault, &account.id)
+        .await
+        .map_err(|e| MailError::Auth(format!("refresh access token: {e}")))?;
+
+    let host = match slug {
+        "gmail" => "imap.gmail.com",
+        other => {
+            return Err(MailError::Other(format!(
+                "no hardcoded IMAP host for provider {other}"
+            )))
+        }
+    };
+
+    Ok(ImapDialParams {
+        host: host.to_string(),
+        port: 993,
+        email: account.email_address,
+        access_token: token_set.access.expose().to_string(),
+    })
 }
