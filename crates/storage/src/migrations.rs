@@ -33,11 +33,18 @@ pub struct Migration {
 
 /// All migrations known to this binary, in order. Keep this list sorted by
 /// `version` with no gaps.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial",
-    sql: include_str!("../migrations/0001_initial.sql"),
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial",
+        sql: include_str!("../migrations/0001_initial.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "remote_content_opt_ins",
+        sql: include_str!("../migrations/0002_remote_content_opt_ins.sql"),
+    },
+];
 
 /// Bookkeeping table. Created lazily by [`run_migrations`] on first run.
 const SCHEMA_VERSION_DDL: &str = "\

@@ -10,8 +10,12 @@
 //! outbox / optimistic-mutation engine.
 
 use capytain_ipc::{FolderId, IpcResult, MessageId, MessagePage, RenderedMessage, SortOrder};
-use capytain_mime::{parse_rfc822, sanitize_email_html, MessageIdentity};
-use capytain_storage::{repos::messages as messages_repo, BlobStore};
+use capytain_mime::{
+    parse_rfc822, sanitize_email_html, sanitize_email_html_trusted, MessageIdentity,
+};
+use capytain_storage::{
+    repos::messages as messages_repo, repos::remote_content_opt_ins, BlobStore,
+};
 use serde::Deserialize;
 use tauri::State;
 
@@ -89,8 +93,14 @@ pub struct MessagesGetInput {
 ///   blob; otherwise `None`. HTML sanitization (ammonia + filter
 ///   lists) and Servo rendering arrive in Week 6, so `sanitized_html`
 ///   is always `None` here.
-/// - `sender_is_trusted` and `remote_content_blocked` are stubs until
-///   the contacts + remote-content subsystems land in Phase 1.
+/// - `sender_is_trusted` is true when the message's first `From`
+///   address is recorded in `remote_content_opt_ins` for this
+///   account. Trusted senders skip the remote-content URL filter
+///   inside `sanitize_email_html_trusted` so their image pixels,
+///   stylesheets, and fonts render. `remote_content_blocked` is
+///   the inverse — true when the sanitizer was the blocking
+///   variant. The UI uses both to decide whether to show a "load
+///   remote content" banner.
 #[tauri::command]
 pub async fn messages_get(
     state: State<'_, AppState>,
@@ -99,6 +109,12 @@ pub async fn messages_get(
     let db = state.db.lock().await;
     let headers = messages_repo::get(&*db, &input.id).await?;
     let body_path = messages_repo::body_path(&*db, &input.id).await?;
+    let sender_is_trusted = match headers.from.first() {
+        Some(addr) if !addr.address.is_empty() => {
+            remote_content_opt_ins::is_trusted(&*db, &headers.account_id, &addr.address).await?
+        }
+        _ => false,
+    };
     drop(db);
 
     let (body_text, sanitized_html, attachments) = if body_path.is_some() {
@@ -124,17 +140,18 @@ pub async fn messages_get(
                 },
             ) {
                 Some(body) => {
-                    // Phase 1 Week 7: pass the HTML alternative
-                    // through the ammonia-based sanitizer before
-                    // handing it to the UI. `body_html` is the raw
-                    // `text/html` part straight out of the message;
-                    // `sanitize_email_html` strips scripts, inline
-                    // event handlers, `javascript:` URLs, and every
-                    // non-presentational element. Remote-content
-                    // blocking (Week 8) is a separate pipeline stage
-                    // that runs inside Servo's resource resolver;
-                    // the sanitizer only touches markup.
-                    let sanitized = body.body_html.as_deref().map(sanitize_email_html);
+                    // Phase 1 Week 7 + Week 8: ammonia sanitization
+                    // runs on every render. The trusted-sender
+                    // variant skips only the remote-content URL
+                    // filter — script/iframe/event-handler/etc.
+                    // stripping is unconditional regardless of
+                    // trust.
+                    let sanitize = if sender_is_trusted {
+                        sanitize_email_html_trusted
+                    } else {
+                        sanitize_email_html
+                    };
+                    let sanitized = body.body_html.as_deref().map(sanitize);
                     (body.body_text, sanitized, body.attachments)
                 }
                 None => (None, None, Vec::new()),
@@ -159,7 +176,7 @@ pub async fn messages_get(
         sanitized_html,
         body_text,
         attachments,
-        sender_is_trusted: false,
-        remote_content_blocked: false,
+        sender_is_trusted,
+        remote_content_blocked: !sender_is_trusted,
     })
 }
