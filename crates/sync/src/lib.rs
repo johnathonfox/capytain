@@ -27,9 +27,16 @@ use capytain_storage::{
 pub struct SyncReport {
     /// Headers newly inserted this cycle.
     pub added: usize,
-    /// Headers updated in place (already-known UIDs whose flags or
-    /// labels moved).
+    /// Already-known headers re-fetched and updated in place
+    /// (full re-fetch path on a non-CONDSTORE response, or a header
+    /// whose envelope changed).
     pub updated: usize,
+    /// Already-known messages whose flags moved per the CONDSTORE
+    /// `CHANGEDSINCE` pass. Distinct from `updated` because a flag
+    /// update only touches the `flags_json` column — no full
+    /// header re-fetch is required, so the engine applies them via
+    /// `messages::update_flags`.
+    pub flag_updates: usize,
     /// Server-side deletions the backend reported via `removed`.
     pub removed: usize,
     /// Bodies successfully fetched + persisted to the blob store this
@@ -73,7 +80,11 @@ pub enum SyncError {
 ///    here as `SyncError::Mail` and the caller decides whether to
 ///    clear the cursor and retry.
 /// 4. Upsert each returned header and persist the new cursor.
-/// 5. If `blobs` is `Some`, fetch raw bytes for each newly-inserted
+/// 5. Apply the CONDSTORE `flag_updates` deltas via
+///    `messages::update_flags`. Updates targeting an unknown ID
+///    (cache out of sync) are logged and skipped rather than
+///    failing the cycle.
+/// 6. If `blobs` is `Some`, fetch raw bytes for each newly-inserted
 ///    header and stash them in the blob store. Per-message failures
 ///    here are logged + counted (`bodies_failed`) but don't fail the
 ///    cycle — the next `sync_folder` call retries any header without
@@ -114,6 +125,23 @@ pub async fn sync_folder(
     }
     report.removed = result.removed.len();
 
+    for (id, flags) in &result.flag_updates {
+        match messages::update_flags(conn, id, flags).await {
+            Ok(()) => report.flag_updates += 1,
+            Err(StorageError::NotFound) => {
+                // The CONDSTORE pass covers UIDs 1..uidnext-1, but the
+                // local cache may not have every one of them — earlier
+                // bounded syncs only pulled the most recent N. Log
+                // and skip; it's not a sync failure.
+                debug!(
+                    message = %id.0,
+                    "flag update for unknown message — skipping"
+                );
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
     sync_states::put(conn, &result.new_state).await?;
 
     if let Some(blobs) = blobs {
@@ -134,6 +162,7 @@ pub async fn sync_folder(
     debug!(
         added = report.added,
         updated = report.updated,
+        flag_updates = report.flag_updates,
         removed = report.removed,
         bodies_fetched = report.bodies_fetched,
         bodies_failed = report.bodies_failed,

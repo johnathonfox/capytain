@@ -185,6 +185,7 @@ fn sync_folder_inserts_new_headers_and_persists_cursor() {
             folders: vec![folder.clone()],
             responses: Mutex::new(vec![MessageList {
                 messages: vec![h1.clone(), h2.clone()],
+                flag_updates: vec![],
                 new_state: SyncState {
                     folder_id: folder.id.clone(),
                     backend_state: "{\"uidvalidity\":1,\"highestmodseq\":0,\"uidnext\":3}".into(),
@@ -234,6 +235,7 @@ fn sync_folder_updates_existing_headers() {
             responses: Mutex::new(vec![
                 MessageList {
                     messages: vec![h1.clone()],
+                    flag_updates: vec![],
                     new_state: SyncState {
                         folder_id: folder.id.clone(),
                         backend_state: "{\"uidvalidity\":1,\"highestmodseq\":0,\"uidnext\":2}"
@@ -246,6 +248,7 @@ fn sync_folder_updates_existing_headers() {
                     h1.flags.seen = true;
                     MessageList {
                         messages: vec![h1.clone()],
+                        flag_updates: vec![],
                         new_state: SyncState {
                             folder_id: folder.id.clone(),
                             backend_state: "{\"uidvalidity\":1,\"highestmodseq\":1,\"uidnext\":2}"
@@ -300,6 +303,7 @@ fn sync_folder_fetches_bodies_for_new_messages() {
             folders: vec![folder.clone()],
             responses: Mutex::new(vec![MessageList {
                 messages: vec![h1.clone(), h2.clone()],
+                flag_updates: vec![],
                 new_state: SyncState {
                     folder_id: folder.id.clone(),
                     backend_state: "{\"uidvalidity\":1,\"highestmodseq\":0,\"uidnext\":3}".into(),
@@ -354,6 +358,7 @@ fn sync_folder_logs_and_skips_failed_body_fetches() {
             folders: vec![folder.clone()],
             responses: Mutex::new(vec![MessageList {
                 messages: vec![h_ok.clone(), h_bad.clone()],
+                flag_updates: vec![],
                 new_state: SyncState {
                     folder_id: folder.id.clone(),
                     backend_state: "{\"uidvalidity\":1,\"highestmodseq\":0,\"uidnext\":3}".into(),
@@ -386,6 +391,114 @@ fn sync_folder_logs_and_skips_failed_body_fetches() {
     });
 }
 
+#[test]
+fn sync_folder_applies_flag_updates_via_update_flags() {
+    rt().block_on(async {
+        let conn = TursoConn::in_memory().await.unwrap();
+        run_migrations(&conn).await.unwrap();
+        let (acct_id, folder) = seed_account(&conn).await;
+
+        // Cycle 1: insert m1 with default flags.
+        let h1 = header("m1", &acct_id, &folder.id, "first");
+        // Cycle 2: m1 disappears from `messages` (server says no new
+        // appends), but its flags moved per CHANGEDSINCE — `flag_updates`
+        // carries the delta.
+        let new_flags = MessageFlags {
+            seen: true,
+            flagged: true,
+            ..Default::default()
+        };
+
+        let backend = StubBackend {
+            folders: vec![folder.clone()],
+            responses: Mutex::new(vec![
+                MessageList {
+                    messages: vec![h1.clone()],
+                    flag_updates: vec![],
+                    new_state: SyncState {
+                        folder_id: folder.id.clone(),
+                        backend_state: "{\"uidvalidity\":1,\"highestmodseq\":1,\"uidnext\":2}"
+                            .into(),
+                    },
+                    removed: vec![],
+                },
+                MessageList {
+                    messages: vec![],
+                    flag_updates: vec![(h1.id.clone(), new_flags.clone())],
+                    new_state: SyncState {
+                        folder_id: folder.id.clone(),
+                        backend_state: "{\"uidvalidity\":1,\"highestmodseq\":2,\"uidnext\":2}"
+                            .into(),
+                    },
+                    removed: vec![],
+                },
+            ]),
+            raw_bodies: Default::default(),
+            failing_ids: Default::default(),
+        };
+
+        let r1 = sync_folder(&conn, &backend, None, &folder, None)
+            .await
+            .unwrap();
+        assert_eq!(r1.added, 1);
+        assert_eq!(r1.flag_updates, 0);
+
+        // Pre-cycle-2: stored row has default flags.
+        let pre = messages_repo::get(&conn, &h1.id).await.unwrap();
+        assert!(!pre.flags.seen);
+
+        let r2 = sync_folder(&conn, &backend, None, &folder, None)
+            .await
+            .unwrap();
+        assert_eq!(r2.added, 0);
+        assert_eq!(r2.updated, 0);
+        assert_eq!(r2.flag_updates, 1);
+
+        // Post-cycle-2: stored row picked up the flag delta.
+        let post = messages_repo::get(&conn, &h1.id).await.unwrap();
+        assert!(post.flags.seen);
+        assert!(post.flags.flagged);
+    });
+}
+
+#[test]
+fn sync_folder_skips_flag_updates_for_unknown_messages() {
+    rt().block_on(async {
+        let conn = TursoConn::in_memory().await.unwrap();
+        run_migrations(&conn).await.unwrap();
+        let (_acct_id, folder) = seed_account(&conn).await;
+
+        // Cache has nothing in it. CHANGEDSINCE pass surfaces an
+        // update for a UID we never inserted (earlier bounded sync
+        // didn't pull this far back). `sync_folder` should log + skip,
+        // not propagate StorageError::NotFound.
+        let stranger_flags = MessageFlags {
+            seen: true,
+            ..Default::default()
+        };
+        let backend = StubBackend {
+            folders: vec![folder.clone()],
+            responses: Mutex::new(vec![MessageList {
+                messages: vec![],
+                flag_updates: vec![(MessageId("never-inserted".into()), stranger_flags)],
+                new_state: SyncState {
+                    folder_id: folder.id.clone(),
+                    backend_state: "{\"uidvalidity\":1,\"highestmodseq\":2,\"uidnext\":1}".into(),
+                },
+                removed: vec![],
+            }]),
+            raw_bodies: Default::default(),
+            failing_ids: Default::default(),
+        };
+
+        let r = sync_folder(&conn, &backend, None, &folder, None)
+            .await
+            .unwrap();
+        assert_eq!(r.added, 0);
+        assert_eq!(r.flag_updates, 0); // skipped, not counted
+    });
+}
+
 /// Local tempdir helper — `capytain-storage` rolls its own to avoid a
 /// `tempfile` dev-dep, so this crate does the same.
 fn scratch_dir() -> std::path::PathBuf {
@@ -408,6 +521,7 @@ fn sync_folder_reports_removed_count() {
             folders: vec![folder.clone()],
             responses: Mutex::new(vec![MessageList {
                 messages: vec![],
+                flag_updates: vec![],
                 new_state: SyncState {
                     folder_id: folder.id.clone(),
                     backend_state: "{\"uidvalidity\":1,\"highestmodseq\":0,\"uidnext\":1}".into(),

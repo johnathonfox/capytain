@@ -176,17 +176,19 @@ impl MailBackend for ImapBackend {
             .uid_validity
             .ok_or_else(|| MailError::Protocol("SELECT missing UIDVALIDITY".into()))?;
         let uidnext = mbox.uid_next.unwrap_or(1);
+        // CONDSTORE (RFC 7162) servers return HIGHESTMODSEQ in the
+        // SELECT response code. Connection setup already required
+        // CONDSTORE in `connect_tls`, so this should always be `Some`
+        // against Gmail; default to 0 defensively so a server that
+        // omits it just falls back to no-flag-delta mode.
+        let highest_modseq = mbox.highest_modseq.unwrap_or(0);
 
         // Build the new backend state from what SELECT told us. Any
         // call to list_messages ends with this persisted regardless of
         // how the fetch side goes.
         let new_state = BackendState {
             uidvalidity,
-            // `highestmodseq` comes in via Mailbox.extensions on CONDSTORE
-            // servers; async-imap 0.11 surfaces it differently across
-            // response shapes, so we track 0 as a best-effort seed and let
-            // Phase 1's smarter delta logic refine.
-            highestmodseq: 0,
+            highestmodseq: highest_modseq,
             uidnext,
         };
 
@@ -244,14 +246,49 @@ impl MailBackend for ImapBackend {
             }
         }
         drop(fetches);
+
+        // CONDSTORE flag-delta pass — only when we have a usable
+        // prior modseq AND there's at least one already-known UID
+        // (uidnext > 1). Server returns the flag state for every
+        // message whose modseq has advanced past `cached.highestmodseq`,
+        // including ones the previous loop already returned because
+        // their modseq advanced when they were appended; that's fine
+        // — applying an update after an insert is a no-op since the
+        // values match.
+        let flag_updates = match since {
+            Some(state) => {
+                let cached = BackendState::from_sync(state)?;
+                if cached.highestmodseq > 0 && uidnext > 1 {
+                    let upper = uidnext.saturating_sub(1);
+                    fetch_flag_changes(
+                        &mut session,
+                        folder,
+                        uidvalidity,
+                        upper,
+                        cached.highestmodseq,
+                    )
+                    .await
+                    .unwrap_or_else(|e| {
+                        warn!(error = %e, "CHANGEDSINCE flag-delta pass failed; skipping");
+                        Vec::new()
+                    })
+                } else {
+                    Vec::new()
+                }
+            }
+            None => Vec::new(),
+        };
+
         debug!(
             folder = %folder.0,
             count = messages.len(),
+            flag_updates = flag_updates.len(),
             "IMAP list_messages"
         );
 
         Ok(MessageList {
             messages,
+            flag_updates,
             new_state: SyncState {
                 folder_id: folder.clone(),
                 backend_state: new_state.encode(),
@@ -570,6 +607,44 @@ fn extract_flags(fetch: &Fetch) -> MessageFlags {
         }
     }
     flags
+}
+
+/// CONDSTORE flag-delta pass. Issues
+/// `UID FETCH 1:<upper> (UID FLAGS) (CHANGEDSINCE <modseq>)` and
+/// returns one `(MessageId, MessageFlags)` tuple per message whose
+/// flags moved since `modseq`. Errors propagate up — the caller
+/// (`list_messages`) downgrades any failure to "no flag delta this
+/// cycle" rather than failing the whole sync.
+async fn fetch_flag_changes(
+    session: &mut Session<StreamT>,
+    folder: &FolderId,
+    uidvalidity: u32,
+    upper: u32,
+    modseq: u64,
+) -> Result<Vec<(MessageId, MessageFlags)>, MailError> {
+    let uid_set = format!("1:{upper}");
+    let query = format!("(UID FLAGS) (CHANGEDSINCE {modseq})");
+    let mut fetches = session
+        .uid_fetch(&uid_set, &query)
+        .await
+        .map_err(|e| MailError::Protocol(format!("UID FETCH {uid_set} {query}: {e}")))?;
+
+    let mut updates = Vec::new();
+    while let Some(item) = fetches.next().await {
+        let fetch = item.map_err(|e| MailError::Protocol(format!("FETCH entry: {e}")))?;
+        let Some(uid) = fetch.uid else {
+            debug!(message = ?fetch.message, "CHANGEDSINCE FETCH missing UID — skipping");
+            continue;
+        };
+        let id = MessageRef {
+            uidvalidity,
+            uid,
+            folder: folder.0.clone(),
+        }
+        .encode();
+        updates.push((id, extract_flags(&fetch)));
+    }
+    Ok(updates)
 }
 
 fn parse_rfc2822_to_utc(s: &str) -> Option<DateTime<Utc>> {
