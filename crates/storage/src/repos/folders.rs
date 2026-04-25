@@ -38,6 +38,13 @@ const SELECT_BY_ACCOUNT: &str = "
      ORDER BY path ASC
 ";
 
+const SELECT_BY_ROLE: &str = "
+    SELECT id, account_id, name, path, role, unread_count, total_count, parent_id
+      FROM folders
+     WHERE role = ?1
+     ORDER BY account_id ASC, path ASC
+";
+
 const DELETE_BY_ID: &str = "DELETE FROM folders WHERE id = ?1";
 
 pub async fn insert(conn: &dyn DbConn, folder: &Folder) -> Result<(), StorageError> {
@@ -73,6 +80,23 @@ pub async fn list_by_account(
 ) -> Result<Vec<Folder>, StorageError> {
     let rows = conn
         .query(SELECT_BY_ACCOUNT, Params(vec![Value::Text(&account.0)]))
+        .await?;
+    rows.iter().map(row_to_folder).collect()
+}
+
+/// Every folder with the given `role` across every account. Used by
+/// the unified-inbox UI to find every account's INBOX-role folder
+/// in one query — the engine then merges their messages by date.
+pub async fn list_by_role(
+    conn: &dyn DbConn,
+    role: FolderRole,
+) -> Result<Vec<Folder>, StorageError> {
+    let role_text = role_str(&role);
+    let rows = conn
+        .query(
+            SELECT_BY_ROLE,
+            Params(vec![Value::OwnedText(role_text.to_string())]),
+        )
         .await?;
     rows.iter().map(row_to_folder).collect()
 }

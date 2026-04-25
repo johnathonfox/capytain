@@ -106,6 +106,7 @@ fn main() {
             commands::accounts::accounts_list,
             commands::folders::folders_list,
             commands::messages::messages_list,
+            commands::messages::messages_list_unified,
             commands::messages::messages_get,
             commands::reader::reader_render,
         ])
