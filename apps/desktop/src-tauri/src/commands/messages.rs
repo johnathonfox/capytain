@@ -396,3 +396,165 @@ pub async fn messages_mark_read(
     }
     Ok(())
 }
+
+#[derive(Debug, Deserialize)]
+pub struct MessagesFlagInput {
+    pub ids: Vec<MessageId>,
+    /// `true` sets `\Flagged` (the user's "starred" / "important"
+    /// indicator); `false` clears it.
+    pub flagged: bool,
+}
+
+/// `messages_flag` — flip the flagged ("starred") bit. Mirrors
+/// [`messages_mark_read`]: optimistic local update + outbox row,
+/// returns immediately.
+#[tauri::command]
+pub async fn messages_flag(state: State<'_, AppState>, input: MessagesFlagInput) -> IpcResult<()> {
+    let MessagesFlagInput { ids, flagged } = input;
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let db = state.db.lock().await;
+    let mut by_account: std::collections::HashMap<capytain_core::AccountId, Vec<MessageId>> =
+        std::collections::HashMap::new();
+    for id in &ids {
+        let mut headers = match messages_repo::get(&*db, id).await {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(id = %id.0, "messages_flag: skipping unknown id: {e}");
+                continue;
+            }
+        };
+        if headers.flags.flagged == flagged {
+            continue;
+        }
+        headers.flags.flagged = flagged;
+        if let Err(e) = messages_repo::update_flags(&*db, id, &headers.flags).await {
+            tracing::warn!(id = %id.0, "messages_flag: local update failed: {e}");
+            continue;
+        }
+        by_account
+            .entry(headers.account_id)
+            .or_default()
+            .push(id.clone());
+    }
+
+    for (account, ids) in by_account {
+        let add = MessageFlags {
+            flagged,
+            ..Default::default()
+        };
+        let remove = MessageFlags {
+            flagged: !flagged,
+            ..Default::default()
+        };
+        let payload = serde_json::json!({
+            "ids": ids,
+            "add": add,
+            "remove": remove,
+        });
+        outbox_repo::enqueue(&*db, &account, "update_flags", &payload.to_string()).await?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MessagesMoveInput {
+    pub ids: Vec<MessageId>,
+    pub target: FolderId,
+}
+
+/// `messages_move` — relocate messages into `target`. Local
+/// optimistic update flips `messages.folder_id`; the outbox row
+/// drives the server-side move (IMAP MOVE / Email/set mailboxIds)
+/// once the drain wakes up.
+#[tauri::command]
+pub async fn messages_move(state: State<'_, AppState>, input: MessagesMoveInput) -> IpcResult<()> {
+    let MessagesMoveInput { ids, target } = input;
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let db = state.db.lock().await;
+    let mut by_account: std::collections::HashMap<capytain_core::AccountId, Vec<MessageId>> =
+        std::collections::HashMap::new();
+    for id in &ids {
+        let headers = match messages_repo::get(&*db, id).await {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(id = %id.0, "messages_move: skipping unknown id: {e}");
+                continue;
+            }
+        };
+        if headers.folder_id == target {
+            continue;
+        }
+        if let Err(e) = messages_repo::set_folder(&*db, id, &target).await {
+            tracing::warn!(id = %id.0, "messages_move: local update failed: {e}");
+            continue;
+        }
+        by_account
+            .entry(headers.account_id)
+            .or_default()
+            .push(id.clone());
+    }
+
+    for (account, ids) in by_account {
+        let payload = serde_json::json!({
+            "ids": ids,
+            "target": target,
+        });
+        outbox_repo::enqueue(&*db, &account, "move_messages", &payload.to_string()).await?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MessagesDeleteInput {
+    pub ids: Vec<MessageId>,
+}
+
+/// `messages_delete` — remove messages locally and queue the
+/// server-side delete (IMAP `+FLAGS (\Deleted) + UID EXPUNGE` /
+/// JMAP `Email/destroy`). Note: Gmail interprets `\Deleted +
+/// EXPUNGE` as "move to Trash" while Fastmail's `Email/destroy`
+/// is permanent. The trait surface is the same; the visible
+/// difference shows up in whether the message is recoverable.
+#[tauri::command]
+pub async fn messages_delete(
+    state: State<'_, AppState>,
+    input: MessagesDeleteInput,
+) -> IpcResult<()> {
+    let MessagesDeleteInput { ids } = input;
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let db = state.db.lock().await;
+    let mut by_account: std::collections::HashMap<capytain_core::AccountId, Vec<MessageId>> =
+        std::collections::HashMap::new();
+    for id in &ids {
+        let headers = match messages_repo::get(&*db, id).await {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(id = %id.0, "messages_delete: skipping unknown id: {e}");
+                continue;
+            }
+        };
+        if let Err(e) = messages_repo::delete(&*db, id).await {
+            tracing::warn!(id = %id.0, "messages_delete: local delete failed: {e}");
+            continue;
+        }
+        by_account
+            .entry(headers.account_id)
+            .or_default()
+            .push(id.clone());
+    }
+
+    for (account, ids) in by_account {
+        let payload = serde_json::json!({ "ids": ids });
+        outbox_repo::enqueue(&*db, &account, "delete_messages", &payload.to_string()).await?;
+    }
+    Ok(())
+}

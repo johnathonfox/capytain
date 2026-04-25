@@ -18,16 +18,26 @@ use capytain_core::{
     MessageBody, MessageFlags, MessageId, MessageList, SyncState,
 };
 use capytain_storage::{repos::outbox as outbox_repo, run_migrations, TursoConn};
-use capytain_sync::outbox_drain::{self, BackendResolver, DrainOutcome, UpdateFlagsPayload};
+use capytain_sync::outbox_drain::{
+    self, BackendResolver, DeletePayload, DrainOutcome, MovePayload, UpdateFlagsPayload,
+};
 
 // ---------- Stub backend ----------
 
 /// Backend that records every `update_flags` call and optionally
 /// fails for the first N invocations to exercise the retry path.
+type MoveLog = std::sync::Mutex<Vec<(Vec<MessageId>, FolderId)>>;
+type DeleteLog = std::sync::Mutex<Vec<Vec<MessageId>>>;
+
 struct FailingFlagsBackend {
     fail_count: AtomicUsize,
     success_count: AtomicUsize,
     fail_first_n: usize,
+    /// When set, every `move_messages` call appends its args here
+    /// for the test to inspect.
+    move_observer: Option<MoveLog>,
+    /// Same for `delete_messages`.
+    delete_observer: Option<DeleteLog>,
 }
 
 impl FailingFlagsBackend {
@@ -36,7 +46,19 @@ impl FailingFlagsBackend {
             fail_count: AtomicUsize::new(0),
             success_count: AtomicUsize::new(0),
             fail_first_n,
+            move_observer: None,
+            delete_observer: None,
         }
+    }
+
+    fn with_move_observer(mut self) -> Self {
+        self.move_observer = Some(std::sync::Mutex::new(Vec::new()));
+        self
+    }
+
+    fn with_delete_observer(mut self) -> Self {
+        self.delete_observer = Some(std::sync::Mutex::new(Vec::new()));
+        self
     }
 }
 
@@ -77,11 +99,20 @@ impl MailBackend for FailingFlagsBackend {
         self.success_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn move_messages(&self, _: &[MessageId], _: &FolderId) -> Result<(), MailError> {
-        unimplemented!()
+    async fn move_messages(&self, ids: &[MessageId], target: &FolderId) -> Result<(), MailError> {
+        if let Some(observer) = self.move_observer.as_ref() {
+            observer
+                .lock()
+                .unwrap()
+                .push((ids.to_vec(), target.clone()));
+        }
+        Ok(())
     }
-    async fn delete_messages(&self, _: &[MessageId]) -> Result<(), MailError> {
-        unimplemented!()
+    async fn delete_messages(&self, ids: &[MessageId]) -> Result<(), MailError> {
+        if let Some(observer) = self.delete_observer.as_ref() {
+            observer.lock().unwrap().push(ids.to_vec());
+        }
+        Ok(())
     }
     async fn save_draft(&self, _: &[u8]) -> Result<MessageId, MailError> {
         unimplemented!()
@@ -238,5 +269,73 @@ fn drain_dead_letters_on_final_failure() {
         assert_eq!(dlq.len(), 1);
         assert_eq!(dlq[0].id, id);
         assert!(dlq[0].next_attempt_at.is_none());
+    });
+}
+
+#[test]
+fn drain_dispatches_move_messages() {
+    rt().block_on(async {
+        let conn = TursoConn::in_memory().await.unwrap();
+        run_migrations(&conn).await.unwrap();
+        let account = seed_account(&conn).await;
+
+        let payload = MovePayload {
+            ids: vec![MessageId("m-1".into()), MessageId("m-2".into())],
+            target: FolderId("Trash".into()),
+        };
+        outbox_repo::enqueue(
+            &conn,
+            &account,
+            "move_messages",
+            &serde_json::to_string(&payload).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let backend = Arc::new(FailingFlagsBackend::new(0).with_move_observer());
+        let resolver = StubResolver {
+            backend: backend.clone(),
+        };
+        let outcomes = outbox_drain::drain(&conn, &resolver, 32).await.unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(&outcomes[0], DrainOutcome::Sent { .. }));
+
+        let observed = backend.move_observer.as_ref().unwrap().lock().unwrap();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].0, payload.ids);
+        assert_eq!(observed[0].1, payload.target);
+    });
+}
+
+#[test]
+fn drain_dispatches_delete_messages() {
+    rt().block_on(async {
+        let conn = TursoConn::in_memory().await.unwrap();
+        run_migrations(&conn).await.unwrap();
+        let account = seed_account(&conn).await;
+
+        let payload = DeletePayload {
+            ids: vec![MessageId("m-1".into())],
+        };
+        outbox_repo::enqueue(
+            &conn,
+            &account,
+            "delete_messages",
+            &serde_json::to_string(&payload).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let backend = Arc::new(FailingFlagsBackend::new(0).with_delete_observer());
+        let resolver = StubResolver {
+            backend: backend.clone(),
+        };
+        let outcomes = outbox_drain::drain(&conn, &resolver, 32).await.unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(&outcomes[0], DrainOutcome::Sent { .. }));
+
+        let observed = backend.delete_observer.as_ref().unwrap().lock().unwrap();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0], payload.ids);
     });
 }

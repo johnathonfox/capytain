@@ -297,6 +297,27 @@ pub async fn body_path(conn: &dyn DbConn, id: &MessageId) -> Result<Option<Strin
     Ok(row.get_optional_str("body_path")?.map(str::to_string))
 }
 
+/// Move a message between folders by patching its `folder_id` in
+/// place. Used by `messages_move`'s optimistic local update — the
+/// background drain reconciles to the server.
+pub async fn set_folder(
+    conn: &dyn DbConn,
+    id: &MessageId,
+    folder: &FolderId,
+) -> Result<(), StorageError> {
+    let affected = conn
+        .execute(
+            "UPDATE messages SET folder_id = ?2 WHERE id = ?1",
+            Params(vec![Value::Text(&id.0), Value::Text(&folder.0)]),
+        )
+        .await?;
+    if affected == 0 {
+        Err(StorageError::NotFound)
+    } else {
+        Ok(())
+    }
+}
+
 pub async fn set_body_path(
     conn: &dyn DbConn,
     id: &MessageId,

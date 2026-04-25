@@ -108,6 +108,9 @@ fn main() {
             commands::messages::messages_list,
             commands::messages::messages_list_unified,
             commands::messages::messages_mark_read,
+            commands::messages::messages_flag,
+            commands::messages::messages_move,
+            commands::messages::messages_delete,
             commands::messages::messages_get,
             commands::reader::reader_render,
         ])

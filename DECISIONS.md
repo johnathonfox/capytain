@@ -9,6 +9,26 @@ Append-only log of meaningful design / implementation choices. Format per entry:
 
 ---
 
+## 2026-04-25 · IMAP move: prefer `UID MOVE`, fall back to `UID COPY` + `STORE \Deleted` + `UID EXPUNGE`
+
+**Decision.** `ImapBackend::move_messages` first tries `UID MOVE` (RFC 6851). If the server responds with `BAD` or "not enabled", we fall back to the legacy three-step `UID COPY <set> <target>` → `UID STORE <set> +FLAGS (\Deleted)` → `UID EXPUNGE <set>`. The `UID EXPUNGE` form (RFC 4315) is intentional — plain `EXPUNGE` would also pick up any other `\Deleted`-flagged messages in the source folder, unsafe in shared-mailbox scenarios.
+
+**Why.** Gmail and Fastmail both advertise `MOVE` so the fast path lands a single round-trip. Servers without it (some self-hosted Dovecot configs) need the fallback to function at all; replicating it explicitly here means the engine doesn't have to know which path the server took.
+
+**Alternatives.**
+- `UID MOVE` only, fail otherwise — simpler but loses self-host compatibility for no real benefit on the providers we care about.
+- Always use the three-step fallback — costs an extra round-trip on every move against modern servers.
+
+## 2026-04-25 · Delete = `\Deleted + EXPUNGE`, accepting Gmail "moves to Trash"
+
+**Decision.** `delete_messages` issues `UID STORE +FLAGS (\Deleted)` followed by `UID EXPUNGE`. We don't try to detect Gmail and route through `UID MOVE` to `[Gmail]/Trash` instead.
+
+**Why.** Gmail interprets `\Deleted + EXPUNGE` as "move to Trash" — which is what users expect from "delete." Forcing Trash-routing in code would re-implement the server's behavior in our adapter and require special-casing per provider. The user-visible difference between Gmail (recoverable) and Fastmail (permanent) is documented; the protocol is the same.
+
+**Alternatives.**
+- Provider-specific delete (Gmail → MOVE to Trash; Fastmail → Email/destroy) — adds an explicit "where does deleted mail go?" decision per backend; the spec doesn't call for it.
+- Keep the row locally with a "tombstoned" flag pending server confirmation — defers risk to outbox failure handling but adds a second DB column and rendering rule for no observable benefit.
+
 ## 2026-04-25 · Outbox drain: 5-second tick, exponential backoff with jitter, hard `MAX_ATTEMPTS = 5`
 
 **Decision.** The desktop sync engine spawns one fixed-cadence drain task on a 5-second `tokio::time::interval`. Per-row failures bump `attempts` and reschedule via the schedule `30s · 4^(attempts-1)` with ±20% uniform jitter, capped by transitioning the row to a dead-letter state once `attempts == MAX_ATTEMPTS = 5`. DLQ rows (`next_attempt_at = NULL`) are surfaced to the UI as a synthetic `SyncEvent::FolderError` so the existing `sync_event` listener picks them up without a new IPC type.
