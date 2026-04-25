@@ -365,6 +365,15 @@ fn email_to_headers(
     let snippet = email.preview().unwrap_or_default().to_string();
     let size = u32::try_from(email.size()).unwrap_or(u32::MAX);
 
+    let in_reply_to = email
+        .in_reply_to()
+        .and_then(|list| list.first())
+        .map(|s| format!("<{s}>"));
+    let references: Vec<String> = email
+        .references()
+        .map(|list| list.iter().map(|s| format!("<{s}>")).collect())
+        .unwrap_or_default();
+
     MessageHeaders {
         id,
         account_id: account.clone(),
@@ -386,6 +395,8 @@ fn email_to_headers(
         snippet,
         size,
         has_attachments: email.has_attachment(),
+        in_reply_to,
+        references,
     }
 }
 

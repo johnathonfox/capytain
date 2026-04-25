@@ -19,6 +19,7 @@ capytain-core = { workspace = true }
 capytain-storage = { workspace = true }
 
 async-trait = { workspace = true }
+chrono = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

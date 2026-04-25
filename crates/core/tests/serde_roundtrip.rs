@@ -112,6 +112,8 @@ fn message_headers_and_body_roundtrip() {
         snippet: "Just checking in…".into(),
         size: 2048,
         has_attachments: true,
+        in_reply_to: Some("<prev@example.com>".into()),
+        references: vec!["<root@example.com>".into(), "<prev@example.com>".into()],
     };
     assert_roundtrips(&headers);
 

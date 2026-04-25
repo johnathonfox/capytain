@@ -143,6 +143,8 @@ fn header(id: &str, account: &AccountId, folder: &FolderId, subject: &str) -> Me
         snippet: String::new(),
         size: 1024,
         has_attachments: false,
+        in_reply_to: None,
+        references: vec![],
     }
 }
 
@@ -635,6 +637,172 @@ fn sync_account_continues_after_per_folder_failures() {
                 .subject,
             "first"
         );
+    });
+}
+
+// ---------- Threading (Phase 1 Week 13) ----------
+
+#[test]
+fn threading_attaches_via_in_reply_to() {
+    rt().block_on(async {
+        let conn = TursoConn::in_memory().await.unwrap();
+        run_migrations(&conn).await.unwrap();
+        let (acct_id, folder) = seed_account(&conn).await;
+
+        // Cycle 1: insert the root message with an rfc822 message id.
+        let mut root = header("root-1", &acct_id, &folder.id, "Quarterly review");
+        root.rfc822_message_id = Some("<root-mid@example.com>".into());
+
+        // Cycle 2: a reply that points at the root via In-Reply-To.
+        let mut reply = header("reply-1", &acct_id, &folder.id, "Re: Quarterly review");
+        reply.rfc822_message_id = Some("<reply-mid@example.com>".into());
+        reply.in_reply_to = Some("<root-mid@example.com>".into());
+        reply.references = vec!["<root-mid@example.com>".into()];
+
+        let backend = StubBackend {
+            folders: vec![folder.clone()],
+            responses: Mutex::new(vec![
+                MessageList {
+                    messages: vec![root.clone()],
+                    flag_updates: vec![],
+                    new_state: SyncState {
+                        folder_id: folder.id.clone(),
+                        backend_state: "{\"uidvalidity\":1,\"highestmodseq\":1,\"uidnext\":2}"
+                            .into(),
+                    },
+                    removed: vec![],
+                },
+                MessageList {
+                    messages: vec![reply.clone()],
+                    flag_updates: vec![],
+                    new_state: SyncState {
+                        folder_id: folder.id.clone(),
+                        backend_state: "{\"uidvalidity\":1,\"highestmodseq\":2,\"uidnext\":3}"
+                            .into(),
+                    },
+                    removed: vec![],
+                },
+            ]),
+            raw_bodies: Default::default(),
+            failing_ids: Default::default(),
+        };
+
+        sync_folder(&conn, &backend, None, &folder, None)
+            .await
+            .unwrap();
+        sync_folder(&conn, &backend, None, &folder, None)
+            .await
+            .unwrap();
+
+        let stored_root = messages_repo::get(&conn, &root.id).await.unwrap();
+        let stored_reply = messages_repo::get(&conn, &reply.id).await.unwrap();
+        assert!(stored_root.thread_id.is_some(), "root needs a thread");
+        assert_eq!(
+            stored_root.thread_id, stored_reply.thread_id,
+            "reply must share the root's thread"
+        );
+    });
+}
+
+#[test]
+fn threading_attaches_via_subject_when_references_chain_breaks() {
+    rt().block_on(async {
+        // Models the spec exit criterion: "Subject-renamed replies
+        // in a conversation ('Re: → (no subject)') still attach via
+        // References chain." Here we model the more permissive
+        // subject fallback: a reply with the same normalized
+        // subject but no In-Reply-To still threads.
+        let conn = TursoConn::in_memory().await.unwrap();
+        run_migrations(&conn).await.unwrap();
+        let (acct_id, folder) = seed_account(&conn).await;
+
+        let mut root = header("root-2", &acct_id, &folder.id, "Lunch tomorrow?");
+        root.rfc822_message_id = Some("<root2-mid@example.com>".into());
+
+        // Mailing-list digest pattern: subject preserved, but
+        // In-Reply-To wasn't rewritten. Subject-recency match
+        // should still attach.
+        let reply = header("reply-2", &acct_id, &folder.id, "Re: Lunch tomorrow?");
+
+        let backend = StubBackend {
+            folders: vec![folder.clone()],
+            responses: Mutex::new(vec![
+                MessageList {
+                    messages: vec![root.clone()],
+                    flag_updates: vec![],
+                    new_state: SyncState {
+                        folder_id: folder.id.clone(),
+                        backend_state: "{\"uidvalidity\":1,\"highestmodseq\":1,\"uidnext\":2}"
+                            .into(),
+                    },
+                    removed: vec![],
+                },
+                MessageList {
+                    messages: vec![reply.clone()],
+                    flag_updates: vec![],
+                    new_state: SyncState {
+                        folder_id: folder.id.clone(),
+                        backend_state: "{\"uidvalidity\":1,\"highestmodseq\":2,\"uidnext\":3}"
+                            .into(),
+                    },
+                    removed: vec![],
+                },
+            ]),
+            raw_bodies: Default::default(),
+            failing_ids: Default::default(),
+        };
+
+        sync_folder(&conn, &backend, None, &folder, None)
+            .await
+            .unwrap();
+        sync_folder(&conn, &backend, None, &folder, None)
+            .await
+            .unwrap();
+
+        let stored_root = messages_repo::get(&conn, &root.id).await.unwrap();
+        let stored_reply = messages_repo::get(&conn, &reply.id).await.unwrap();
+        assert_eq!(
+            stored_root.thread_id, stored_reply.thread_id,
+            "subject-fallback should attach the reply to the root's thread"
+        );
+    });
+}
+
+#[test]
+fn threading_creates_new_thread_when_no_match() {
+    rt().block_on(async {
+        let conn = TursoConn::in_memory().await.unwrap();
+        run_migrations(&conn).await.unwrap();
+        let (acct_id, folder) = seed_account(&conn).await;
+
+        let mut a = header("m-a", &acct_id, &folder.id, "Subject A");
+        a.rfc822_message_id = Some("<a-mid@example.com>".into());
+        let mut b = header("m-b", &acct_id, &folder.id, "Subject B");
+        b.rfc822_message_id = Some("<b-mid@example.com>".into());
+
+        let backend = StubBackend {
+            folders: vec![folder.clone()],
+            responses: Mutex::new(vec![MessageList {
+                messages: vec![a.clone(), b.clone()],
+                flag_updates: vec![],
+                new_state: SyncState {
+                    folder_id: folder.id.clone(),
+                    backend_state: "{\"uidvalidity\":1,\"highestmodseq\":1,\"uidnext\":3}".into(),
+                },
+                removed: vec![],
+            }]),
+            raw_bodies: Default::default(),
+            failing_ids: Default::default(),
+        };
+
+        sync_folder(&conn, &backend, None, &folder, None)
+            .await
+            .unwrap();
+
+        let ta = messages_repo::get(&conn, &a.id).await.unwrap().thread_id;
+        let tb = messages_repo::get(&conn, &b.id).await.unwrap().thread_id;
+        assert!(ta.is_some() && tb.is_some());
+        assert_ne!(ta, tb, "different subjects must mint different threads");
     });
 }
 
