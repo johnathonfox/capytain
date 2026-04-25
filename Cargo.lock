@@ -1336,6 +1336,15 @@ dependencies = [
 [[package]]
 name = "capytain-sync"
 version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "capytain-core",
+ "capytain-storage",
+ "chrono",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "capytain-telemetry"
@@ -6227,6 +6236,7 @@ dependencies = [
  "capytain-imap-client",
  "capytain-jmap-client",
  "capytain-storage",
+ "capytain-sync",
  "capytain-telemetry",
  "chrono",
  "clap",

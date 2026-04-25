@@ -109,6 +109,7 @@ capytain-core = { path = "crates/core", version = "=0.0.0" }
 capytain-imap-client = { path = "crates/imap-client", version = "=0.0.0" }
 capytain-jmap-client = { path = "crates/jmap-client", version = "=0.0.0" }
 capytain-storage = { path = "crates/storage", version = "=0.0.0" }
+capytain-sync = { path = "crates/sync", version = "=0.0.0" }
 capytain-telemetry = { path = "crates/telemetry", version = "=0.0.0" }
 
 [workspace.lints.rust]

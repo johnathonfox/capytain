@@ -2,7 +2,7 @@
 
 [package]
 name = "capytain-sync"
-description = "Capytain sync engine: outbox, reconciliation, and threading."
+description = "Capytain sync engine: per-folder header + body sync, outbox, threading."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,3 +13,16 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+capytain-core = { workspace = true }
+capytain-storage = { workspace = true }
+
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
