@@ -1220,6 +1220,7 @@ dependencies = [
  "capytain-mime",
  "capytain-renderer",
  "capytain-storage",
+ "capytain-sync",
  "capytain-telemetry",
  "directories",
  "dpi",

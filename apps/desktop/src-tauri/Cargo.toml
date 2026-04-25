@@ -35,6 +35,7 @@ capytain-ipc = { workspace = true }
 capytain-jmap-client = { workspace = true }
 capytain-mime = { workspace = true }
 capytain-storage = { workspace = true }
+capytain-sync = { workspace = true }
 capytain-telemetry = { workspace = true }
 # The workspace-level decl sets `default-features = false`; desktop
 # re-enables renderer's `servo` via its OWN `[features]` table so a
