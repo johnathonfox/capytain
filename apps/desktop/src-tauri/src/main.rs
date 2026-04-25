@@ -19,6 +19,7 @@
 //!   the Servo-backed `EmailRenderer` to it. That has to happen on the
 //!   main thread, where the Tauri `setup` hook runs.
 
+mod backend_factory;
 mod commands;
 #[cfg(all(feature = "servo", target_os = "linux"))]
 mod linux_gtk;
