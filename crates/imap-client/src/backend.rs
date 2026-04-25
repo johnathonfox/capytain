@@ -265,7 +265,7 @@ impl MailBackend for ImapBackend {
         })
     }
 
-    async fn fetch_message(&self, id: &MessageId) -> Result<MessageBody, MailError> {
+    async fn fetch_raw_message(&self, id: &MessageId) -> Result<Vec<u8>, MailError> {
         let r = MessageRef::decode(id)?;
         let mut session = self.session.lock().await;
 
@@ -299,13 +299,21 @@ impl MailBackend for ImapBackend {
             .map_err(|e| MailError::Protocol(format!("FETCH entry: {e}")))?;
         drop(fetches);
 
-        let raw = fetch
+        Ok(fetch
             .body()
             .ok_or_else(|| MailError::Protocol("FETCH returned no RFC822 body".into()))?
-            .to_vec();
+            .to_vec())
+    }
 
+    async fn fetch_message(&self, id: &MessageId) -> Result<MessageBody, MailError> {
+        // Implemented in terms of `fetch_raw_message` so the byte-level
+        // path stays the single source of truth. Flags + labels aren't
+        // populated here — callers that need them read from the
+        // `messages` table, which the sync engine keeps current.
+        let r = MessageRef::decode(id)?;
+        let raw = self.fetch_raw_message(id).await?;
         let folder_id = FolderId(r.folder.clone());
-        let flags = extract_flags(&fetch);
+        let flags = MessageFlags::default();
         let identity = capytain_mime::MessageIdentity {
             id,
             account_id: &self.account,

@@ -78,6 +78,25 @@ pub trait MailBackend: Send + Sync {
     /// Fetch the full body of a single message.
     async fn fetch_message(&self, id: &MessageId) -> Result<MessageBody, MailError>;
 
+    /// Fetch the **raw** RFC 822 bytes for a single message.
+    ///
+    /// `capytain-sync`'s body-fetching pass calls this and writes the
+    /// returned bytes straight to the `BlobStore`; `messages_get`
+    /// re-parses the bytes off disk via `capytain_mime::parse_rfc822`.
+    /// Returning `Vec<u8>` rather than `MessageBody` avoids a parse +
+    /// re-serialize roundtrip and keeps `BlobStore` the single source
+    /// of truth for the bytes that get rendered.
+    ///
+    /// Default implementation errors out — backends that haven't
+    /// wired up byte-level access yet still satisfy the trait, and
+    /// the sync engine logs + skips messages whose backend can't
+    /// supply raw bytes.
+    async fn fetch_raw_message(&self, _id: &MessageId) -> Result<Vec<u8>, MailError> {
+        Err(MailError::Other(
+            "fetch_raw_message is not implemented for this backend".into(),
+        ))
+    }
+
     /// Fetch the bytes of a single attachment.
     async fn fetch_attachment(
         &self,

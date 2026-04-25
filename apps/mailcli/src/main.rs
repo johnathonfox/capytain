@@ -448,14 +448,20 @@ async fn sync_account(email: &str, paths: &DataPaths) -> Result<(), MailcliError
             MailcliError::Usage("could not find an INBOX folder on this account".into())
         })?;
 
+    let blobs = capytain_storage::BlobStore::new(paths.data_dir.join("blobs"));
+
     let start = Instant::now();
-    let report = capytain_sync::sync_folder(&conn, backend.as_ref(), &inbox, Some(200)).await?;
+    let report =
+        capytain_sync::sync_folder(&conn, backend.as_ref(), Some(&blobs), &inbox, Some(200))
+            .await?;
     let duration = start.elapsed();
     println!(
-        "Synced {} new, {} updated, {} removed, in {} ms",
+        "Synced {} new, {} updated, {} removed, {} bodies fetched ({} failed), in {} ms",
         report.added,
         report.updated,
         report.removed,
+        report.bodies_fetched,
+        report.bodies_failed,
         duration.as_millis()
     );
     Ok(())
