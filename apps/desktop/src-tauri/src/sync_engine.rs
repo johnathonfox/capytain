@@ -129,6 +129,26 @@ async fn run(app: &AppHandle) -> Result<(), String> {
         "sync engine: live watchers spawned"
     );
 
+    // Spawn the outbox drain on a periodic timer. Decoupled from
+    // the watcher reactive loop so a wedged STORE doesn't stall
+    // sync events. 5 seconds is short enough that a "mark read"
+    // click visibly propagates ("within seconds" per the spec
+    // exit criterion) and long enough that an idle queue costs
+    // nothing.
+    {
+        let app_for_drain = app.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                if let Err(e) = drain_outbox_once(&app_for_drain).await {
+                    warn!("outbox drain: {e}");
+                }
+            }
+        });
+    }
+
     let folder_by_id: HashMap<(AccountId, FolderId), Folder> = imap_targets
         .into_iter()
         .map(|(acct, folder)| ((acct, folder.id.clone()), folder))
@@ -399,5 +419,72 @@ async fn sync_one_account(app: &AppHandle, blobs: &BlobStore, account_id: &Accou
         if let Err(e) = app.emit(SYNC_EVENT, &event) {
             warn!("emit sync_event: {e}");
         }
+    }
+}
+
+/// Run one outbox-drain pass. Drains up to 32 entries per call;
+/// any DLQ transitions get echoed to the UI as `SyncEvent::FolderError`
+/// so the user sees a "failed to sync" banner.
+async fn drain_outbox_once(app: &AppHandle) -> Result<(), capytain_core::StorageError> {
+    let state: tauri::State<'_, AppState> = app.state();
+    let resolver = AppHandleResolver { app: app.clone() };
+    let db = state.db.lock().await;
+    let outcomes = capytain_sync::outbox_drain::drain(&*db, &resolver, 32).await?;
+    drop(db);
+
+    for outcome in outcomes {
+        match outcome {
+            capytain_sync::outbox_drain::DrainOutcome::Sent { id, op_kind } => {
+                debug!(id, op_kind, "outbox: sent");
+            }
+            capytain_sync::outbox_drain::DrainOutcome::Retrying {
+                id,
+                op_kind,
+                attempts_after,
+                error,
+            } => {
+                debug!(
+                    id,
+                    op_kind, attempts_after, error, "outbox: scheduled retry"
+                );
+            }
+            capytain_sync::outbox_drain::DrainOutcome::DeadLettered { id, op_kind, error } => {
+                warn!(id, op_kind, error, "outbox: dead-lettered");
+                // Surface as a synthetic FolderError so the UI's
+                // existing sync_event listener picks it up. We
+                // don't have a folder context here — use a sentinel
+                // so the UI banner can still render with the
+                // operator-visible error.
+                let event = capytain_ipc::SyncEvent::FolderError {
+                    account: capytain_core::AccountId(String::new()),
+                    folder: capytain_core::FolderId(format!("outbox:{op_kind}")),
+                    error: format!("queued mutation failed: {error}"),
+                };
+                if let Err(e) = app.emit(SYNC_EVENT, &event) {
+                    warn!("emit sync_event for DLQ: {e}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `BackendResolver` impl that walks back through the `AppHandle`
+/// to reach the cached backend factory. Lets the outbox drain stay
+/// in `capytain-sync` (which is backend-agnostic) without that
+/// crate having to depend on `capytain-imap-client` /
+/// `capytain-jmap-client`.
+struct AppHandleResolver {
+    app: AppHandle,
+}
+
+#[async_trait::async_trait]
+impl capytain_sync::outbox_drain::BackendResolver for AppHandleResolver {
+    async fn open(
+        &self,
+        account: &AccountId,
+    ) -> Result<std::sync::Arc<dyn capytain_core::MailBackend>, capytain_core::MailError> {
+        let state: tauri::State<'_, AppState> = self.app.state();
+        backend_factory::get_or_open(&state, account).await
     }
 }

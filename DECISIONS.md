@@ -9,6 +9,29 @@ Append-only log of meaningful design / implementation choices. Format per entry:
 
 ---
 
+## 2026-04-25 · Outbox drain: 5-second tick, exponential backoff with jitter, hard `MAX_ATTEMPTS = 5`
+
+**Decision.** The desktop sync engine spawns one fixed-cadence drain task on a 5-second `tokio::time::interval`. Per-row failures bump `attempts` and reschedule via the schedule `30s · 4^(attempts-1)` with ±20% uniform jitter, capped by transitioning the row to a dead-letter state once `attempts == MAX_ATTEMPTS = 5`. DLQ rows (`next_attempt_at = NULL`) are surfaced to the UI as a synthetic `SyncEvent::FolderError` so the existing `sync_event` listener picks them up without a new IPC type.
+
+**Why.** The spec exit criterion ("Marking a message read in Capytain updates Gmail within seconds") wants short median latency without flooding the server when something genuinely fails. 5s is short enough that humans don't notice; the 30s/2m/8m/30m schedule is the standard pattern for non-critical retry. Jitter keeps a thundering-herd of optimistic clicks (e.g. "mark all as read" on 200 messages) from re-firing in lockstep. Hard cap at 5 keeps a permanently broken row from quietly retrying forever.
+
+**Alternatives.**
+- Eager drain on each `messages_mark_read` invocation — would land the typical case faster, but couples UI commands to a background concern. Tick-based stays simpler.
+- Linear retry — simpler but burns server credit on persistently failing rows.
+- Persistent backoff state outside the row — `last_error` already lives on the row and there's no other consumer.
+
+## 2026-04-25 · Outbox payload as JSON, op_kind as string
+
+**Decision.** `outbox.payload_json` is opaque JSON keyed by `op_kind` (string). The drain worker matches on `op_kind` and deserializes into the appropriate `Payload` struct (`UpdateFlagsPayload` for now; `MovePayload`, `DeletePayload` follow in the next PR).
+
+**Why.** Lets us add new op_kinds without a migration. The serialization cost is negligible (single-row mutations are nowhere near the hot path); the tradeoff is type-erasure across the storage boundary, which the per-kind deserialize step recovers cheaply. Mirrors how `messages.flags_json` and `from_json` already use opaque-JSON columns for fields with stable per-row shape but evolving schemas.
+
+**Alternatives.**
+- One column per op_kind with NULL elsewhere — wastes columns and forces a migration per new mutation type.
+- Separate table per op_kind — adds N tables for N mutations; the drain dispatch is the one place that benefits from union-shape access.
+
+---
+
 ## 2026-04-25 · Threading: ASCII subject normalization, 30-day recency window
 
 **Decision.** `capytain_sync::threading::normalize_subject` ASCII-lowercases the subject and collapses whitespace; it does **not** apply Unicode case folding. The subject-fallback step in the assembly pipeline only matches threads whose `last_date` is within the last **30 days**.
