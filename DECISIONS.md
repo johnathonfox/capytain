@@ -9,6 +9,27 @@ Append-only log of meaningful design / implementation choices. Format per entry:
 
 ---
 
+## 2026-04-25 · Notifications: live-only via `tauri-plugin-notification`, no debouncing
+
+**Decision.** New-mail notifications fire only for sync cycles tagged `live = true` (i.e., reactive cycles triggered by an IMAP IDLE / JMAP EventSource push). Bootstrap-pass cycles set `live = false` and skip notification. The OS-side notification is a single fire-and-forget call to `tauri_plugin_notification::NotificationExt::notification().builder().show()` per affected folder; we don't aggregate "5 new in INBOX + 2 in Sent" into one toast.
+
+**Why.** Bootstrap pulls every message that arrived since the app last ran — could easily be hundreds. Firing one OS notification per row would be hostile. The `live` flag also lets a JMAP-side mass-redelivery (which the engine treats as a single AccountChanged + sync_account cycle) emit one notification per affected folder rather than one per message, which matches the per-folder shape the rest of the engine already uses. No aggregation across folders because the OS notification surface (Linux notification daemon, macOS Notification Center, Windows Action Center) deduplicates similar payloads better than we'd reimplement, and per-folder counts give the user actionable per-folder context.
+
+**Alternatives.**
+- Notify every cycle including bootstrap — punishes the "open the app after a weekend" case
+- Aggregate across folders into one "10 new messages" toast — loses the folder context users use to decide whether to open right now
+- Per-message toast — drowns the OS notification surface on bursty arrival
+
+## 2026-04-25 · `Folder.unread_count` lazily recomputed in `folders_list`, not maintained in-row
+
+**Decision.** The `folders.unread_count` / `total_count` columns are not updated on every message insert. Instead, `folders_list` recomputes them via `messages::count_unread_by_folder` / `count_by_folder` per folder before returning. Sidebar refetches on every `sync_event` so the badges stay live.
+
+**Why.** Maintaining the columns in-row would mean every `sync_folder` insert does an extra UPDATE on the parent folder, plus race-condition handling when multiple syncs touch the same folder concurrently. Recomputing on read is two indexed `COUNT(*)`s per folder per sidebar render — at <100 folders this is microseconds. Profiles can promote to in-row maintenance if it ever shows up.
+
+**Alternatives.**
+- Maintain in-row during `sync_folder` — adds a write per message insert, plus row-level locks if the engine ever parallelizes across folders.
+- Computed view — Turso doesn't ship materialized views in the version we pin, and a regular view doesn't change the cost shape.
+
 ## 2026-04-25 · IMAP move: prefer `UID MOVE`, fall back to `UID COPY` + `STORE \Deleted` + `UID EXPUNGE`
 
 **Decision.** `ImapBackend::move_messages` first tries `UID MOVE` (RFC 6851). If the server responds with `BAD` or "not enabled", we fall back to the legacy three-step `UID COPY <set> <target>` → `UID STORE <set> +FLAGS (\Deleted)` → `UID EXPUNGE <set>`. The `UID EXPUNGE` form (RFC 4315) is intentional — plain `EXPUNGE` would also pick up any other `\Deleted`-flagged messages in the source folder, unsafe in shared-mailbox scenarios.

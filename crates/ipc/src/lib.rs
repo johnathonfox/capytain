@@ -99,6 +99,13 @@ pub struct MessagePage {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum SyncEvent {
     /// A folder finished a sync cycle. Counts mirror `SyncReport`.
+    /// `unread_count` is the post-sync `count_unread_by_folder`
+    /// snapshot — the UI uses it to render sidebar badges without
+    /// a follow-up `messages_list` round-trip.
+    /// `live` is `false` during the engine's bootstrap pass and
+    /// `true` for cycles triggered by a watcher event; the UI uses
+    /// it to suppress new-mail notifications during initial load
+    /// (otherwise opening the app fires hundreds of toasts).
     FolderSynced {
         account: AccountId,
         folder: FolderId,
@@ -106,6 +113,8 @@ pub enum SyncEvent {
         updated: u32,
         flag_updates: u32,
         removed: u32,
+        unread_count: u32,
+        live: bool,
     },
     /// A folder's sync cycle failed. The error string is rendered as
     /// a UI banner; the engine retries on the next cycle.

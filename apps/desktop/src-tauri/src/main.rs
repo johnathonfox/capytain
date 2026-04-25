@@ -74,6 +74,7 @@ fn main() {
     capytain_renderer::apply_nvidia_wayland_workaround();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // Resolve data dir + open DB on the Tauri async runtime so
             // we don't block the UI thread. `block_on` here is fine: we

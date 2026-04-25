@@ -38,6 +38,10 @@ capytain-storage = { workspace = true }
 capytain-sync = { workspace = true }
 capytain-telemetry = { workspace = true }
 serde_json = { workspace = true }
+# OS-native desktop notifications. Plugin path means we don't need
+# any extra capability tokens — the plugin's default permission set
+# includes `notification:default` which `core:default` re-exports.
+tauri-plugin-notification = "2"
 # The workspace-level decl sets `default-features = false`; desktop
 # re-enables renderer's `servo` via its OWN `[features]` table so a
 # `cargo build -p capytain-desktop --no-default-features` cleanly
