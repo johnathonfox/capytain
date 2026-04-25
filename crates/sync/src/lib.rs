@@ -171,6 +171,46 @@ pub async fn sync_folder(
     Ok(report)
 }
 
+/// One folder's slice of a [`sync_account`] cycle.
+#[derive(Debug)]
+pub struct FolderSyncOutcome {
+    pub folder_id: capytain_core::FolderId,
+    pub result: Result<SyncReport, SyncError>,
+}
+
+/// Run [`sync_folder`] across every folder the backend advertises.
+///
+/// One-shot multi-folder cycle: discovers folders via
+/// `list_folders`, then drives `sync_folder` on each in sequence
+/// (the backends serialize on a single connection anyway). Per-
+/// folder failures are captured in [`FolderSyncOutcome::result`]
+/// rather than aborting the whole cycle — a UIDVALIDITY mismatch on
+/// one folder shouldn't take down sync for the rest.
+///
+/// Returns one outcome per folder in the order the backend returned
+/// them. The desktop app's bootstrap calls this on launch; the live
+/// sync engine (Week 10) drives it again on each `BackendEvent`
+/// (or on a polling timer for backends without push).
+#[instrument(skip_all)]
+pub async fn sync_account(
+    conn: &dyn DbConn,
+    backend: &dyn MailBackend,
+    blobs: Option<&BlobStore>,
+    limit_per_folder: Option<u32>,
+) -> Result<Vec<FolderSyncOutcome>, SyncError> {
+    let folders = backend.list_folders().await?;
+    let mut outcomes = Vec::with_capacity(folders.len());
+    for folder in folders {
+        let folder_id = folder.id.clone();
+        let result = sync_folder(conn, backend, blobs, &folder, limit_per_folder).await;
+        if let Err(e) = &result {
+            warn!(folder = %folder_id.0, "sync_folder failed: {e}");
+        }
+        outcomes.push(FolderSyncOutcome { folder_id, result });
+    }
+    Ok(outcomes)
+}
+
 /// Fetch the raw bytes of a single message and persist them via the
 /// blob store + `body_path` column. Pulled out of [`sync_folder`] so
 /// the per-message error path is isolated and the engine can keep

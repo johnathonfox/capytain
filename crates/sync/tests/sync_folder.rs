@@ -499,6 +499,145 @@ fn sync_folder_skips_flag_updates_for_unknown_messages() {
     });
 }
 
+#[test]
+fn sync_account_walks_every_folder_and_collects_outcomes() {
+    rt().block_on(async {
+        let conn = TursoConn::in_memory().await.unwrap();
+        run_migrations(&conn).await.unwrap();
+        let (acct_id, inbox) = seed_account(&conn).await;
+
+        let sent = Folder {
+            id: FolderId("Sent".into()),
+            account_id: acct_id.clone(),
+            name: "Sent".into(),
+            path: "[Gmail]/Sent Mail".into(),
+            role: Some(FolderRole::Sent),
+            unread_count: 0,
+            total_count: 0,
+            parent: None,
+        };
+
+        let h_inbox = header("inbox-1", &acct_id, &inbox.id, "first");
+        let h_sent = header("sent-1", &acct_id, &sent.id, "outgoing");
+
+        let backend = StubBackend {
+            folders: vec![inbox.clone(), sent.clone()],
+            // One MessageList per folder, in the order list_folders
+            // returned them.
+            responses: Mutex::new(vec![
+                MessageList {
+                    messages: vec![h_inbox.clone()],
+                    flag_updates: vec![],
+                    new_state: SyncState {
+                        folder_id: inbox.id.clone(),
+                        backend_state: "{\"uidvalidity\":1,\"highestmodseq\":0,\"uidnext\":2}"
+                            .into(),
+                    },
+                    removed: vec![],
+                },
+                MessageList {
+                    messages: vec![h_sent.clone()],
+                    flag_updates: vec![],
+                    new_state: SyncState {
+                        folder_id: sent.id.clone(),
+                        backend_state: "{\"uidvalidity\":7,\"highestmodseq\":0,\"uidnext\":2}"
+                            .into(),
+                    },
+                    removed: vec![],
+                },
+            ]),
+            raw_bodies: Default::default(),
+            failing_ids: Default::default(),
+        };
+
+        let outcomes = capytain_sync::sync_account(&conn, &backend, None, None)
+            .await
+            .unwrap();
+        assert_eq!(outcomes.len(), 2);
+        for o in &outcomes {
+            let report = o.result.as_ref().expect("folder synced");
+            assert_eq!(report.added, 1, "folder {}", o.folder_id.0);
+        }
+
+        // Both folder rows now exist.
+        assert!(folders_repo::find(&conn, &inbox.id)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(folders_repo::find(&conn, &sent.id).await.unwrap().is_some());
+        // Both messages landed.
+        assert_eq!(
+            messages_repo::get(&conn, &h_inbox.id)
+                .await
+                .unwrap()
+                .subject,
+            "first"
+        );
+        assert_eq!(
+            messages_repo::get(&conn, &h_sent.id).await.unwrap().subject,
+            "outgoing"
+        );
+    });
+}
+
+#[test]
+fn sync_account_continues_after_per_folder_failures() {
+    rt().block_on(async {
+        let conn = TursoConn::in_memory().await.unwrap();
+        run_migrations(&conn).await.unwrap();
+        let (acct_id, inbox) = seed_account(&conn).await;
+
+        let broken = Folder {
+            id: FolderId("Broken".into()),
+            account_id: acct_id.clone(),
+            name: "Broken".into(),
+            path: "Broken".into(),
+            role: None,
+            unread_count: 0,
+            total_count: 0,
+            parent: None,
+        };
+
+        let h_inbox = header("inbox-1", &acct_id, &inbox.id, "first");
+
+        // First call (inbox): succeeds. Second call (broken):
+        // empty responses queue → stub returns MailError. The
+        // failure should NOT abort the cycle.
+        let backend = StubBackend {
+            folders: vec![inbox.clone(), broken.clone()],
+            responses: Mutex::new(vec![MessageList {
+                messages: vec![h_inbox.clone()],
+                flag_updates: vec![],
+                new_state: SyncState {
+                    folder_id: inbox.id.clone(),
+                    backend_state: "{\"uidvalidity\":1,\"highestmodseq\":0,\"uidnext\":2}".into(),
+                },
+                removed: vec![],
+            }]),
+            raw_bodies: Default::default(),
+            failing_ids: Default::default(),
+        };
+
+        let outcomes = capytain_sync::sync_account(&conn, &backend, None, None)
+            .await
+            .unwrap();
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes[0].result.is_ok(), "inbox should have synced");
+        assert!(
+            outcomes[1].result.is_err(),
+            "broken folder should report failure"
+        );
+        // Inbox state still landed despite the second folder failing.
+        assert_eq!(
+            messages_repo::get(&conn, &h_inbox.id)
+                .await
+                .unwrap()
+                .subject,
+            "first"
+        );
+    });
+}
+
 /// Local tempdir helper — `capytain-storage` rolls its own to avoid a
 /// `tempfile` dev-dep, so this crate does the same.
 fn scratch_dir() -> std::path::PathBuf {
