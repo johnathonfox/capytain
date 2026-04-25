@@ -15,6 +15,7 @@ publish.workspace = true
 capytain-core = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+futures-util = { workspace = true }
 jmap-client = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

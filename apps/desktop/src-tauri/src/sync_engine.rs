@@ -32,6 +32,7 @@ use tracing::{debug, info, warn};
 
 use crate::backend_factory;
 use crate::imap_idle;
+use crate::jmap_push;
 use crate::state::AppState;
 
 /// Tauri event name the engine emits on. The UI subscribes via
@@ -64,84 +65,92 @@ async fn run(app: &AppHandle) -> Result<(), String> {
     let accounts = list_accounts(app).await?;
     info!(count = accounts.len(), "sync engine: bootstrap pass");
 
-    // Bootstrap sync + collect (account, folder) pairs to watch.
-    let mut watch_targets: Vec<(AccountId, Folder)> = Vec::new();
+    // Bootstrap sync + collect watchers. IMAP accounts get one
+    // watcher per folder (FolderChanged events); JMAP accounts get
+    // one watcher per account (AccountChanged events).
+    let mut imap_targets: Vec<(AccountId, Folder)> = Vec::new();
+    let mut jmap_accounts: Vec<AccountId> = Vec::new();
     for account in &accounts {
         match bootstrap_account(app, account).await {
-            Ok(folders) if matches!(account.kind, BackendKind::ImapSmtp) => {
-                for folder in folders {
-                    watch_targets.push((account.id.clone(), folder));
+            Ok(folders) => match account.kind {
+                BackendKind::ImapSmtp => {
+                    for folder in folders {
+                        imap_targets.push((account.id.clone(), folder));
+                    }
                 }
-            }
-            Ok(_) => {
-                // JMAP — no IDLE; bootstrap covered the initial sync.
-                debug!(account = %account.id.0, "skipping IDLE for JMAP account");
-            }
+                BackendKind::Jmap => {
+                    jmap_accounts.push(account.id.clone());
+                }
+                _ => {
+                    debug!(account = %account.id.0, kind = ?account.kind, "no live watcher for backend kind");
+                }
+            },
             Err(e) => {
                 warn!(account = %account.id.0, "bootstrap failed: {e}");
             }
         }
     }
 
-    if watch_targets.is_empty() {
-        info!("sync engine: no IMAP folders to watch — exiting");
+    if imap_targets.is_empty() && jmap_accounts.is_empty() {
+        info!("sync engine: nothing to watch — exiting");
         return Ok(());
     }
 
-    // Spawn watchers on a shared mpsc.
+    // Single shared mpsc for both IMAP and JMAP watchers. Each
+    // forwarder tags its watcher's BackendEvent with the source
+    // account_id so the reactive loop can dispatch.
     let (tx, mut rx) = mpsc::channel::<(AccountId, BackendEvent)>(EVENT_CHANNEL_BUFFER);
-    let mut handles = Vec::with_capacity(watch_targets.len());
-    for (account_id, folder) in &watch_targets {
-        let watcher_tx = tx.clone();
-        let account_for_tag = account_id.clone();
-        let (forward_tx, mut forward_rx) = mpsc::channel::<BackendEvent>(8);
-        // The watcher emits BackendEvent (no account tag); rebroadcast
-        // with an account_id attached so the reactive loop can dispatch.
-        let forwarder_tx = watcher_tx.clone();
-        tokio::spawn(async move {
-            while let Some(ev) = forward_rx.recv().await {
-                if forwarder_tx
-                    .send((account_for_tag.clone(), ev))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        });
-        handles.push(imap_idle::spawn_watcher(
+    let mut watcher_count = 0usize;
+
+    for (account_id, folder) in &imap_targets {
+        let forward_tx = spawn_forwarder(account_id.clone(), tx.clone());
+        let _handle = imap_idle::spawn_watcher(
             app.clone(),
             account_id.clone(),
             folder.id.clone(),
             forward_tx,
-        ));
+        );
+        watcher_count += 1;
     }
+    for account_id in &jmap_accounts {
+        let forward_tx = spawn_forwarder(account_id.clone(), tx.clone());
+        let _handle = jmap_push::spawn_watcher(app.clone(), account_id.clone(), forward_tx);
+        watcher_count += 1;
+    }
+
     // Drop the engine's copy of `tx` so `rx.recv()` returns `None`
     // when every watcher exits — otherwise the loop would hang
     // forever.
     drop(tx);
     info!(
-        count = handles.len(),
-        "sync engine: live IDLE watchers spawned"
+        watchers = watcher_count,
+        imap_folders = imap_targets.len(),
+        jmap_accounts = jmap_accounts.len(),
+        "sync engine: live watchers spawned"
     );
 
-    // Index the targets by (account, folder) for fast lookup.
-    let folder_by_id: HashMap<(AccountId, FolderId), Folder> = watch_targets
+    let folder_by_id: HashMap<(AccountId, FolderId), Folder> = imap_targets
         .into_iter()
         .map(|(acct, folder)| ((acct, folder.id.clone()), folder))
         .collect();
 
-    // Reactive loop with per-(account, folder) debouncing.
-    let mut pending: HashMap<(AccountId, FolderId), tokio::time::Instant> = HashMap::new();
+    // Two debounce maps: per-folder for IMAP FolderChanged, per-account
+    // for JMAP AccountChanged. Sharing one map would force a
+    // sentinel "all folders" key which makes the dispatch logic
+    // muddier than it has to be.
+    let mut folder_pending: HashMap<(AccountId, FolderId), tokio::time::Instant> = HashMap::new();
+    let mut account_pending: HashMap<AccountId, tokio::time::Instant> = HashMap::new();
     let blobs = {
         let state: tauri::State<'_, AppState> = app.state();
         BlobStore::new(state.data_dir.join("blobs"))
     };
 
     loop {
-        // Wait for either a new event or for the next debounced
-        // sync to fire.
-        let next_deadline = pending.values().min().copied();
+        let next_deadline = folder_pending
+            .values()
+            .chain(account_pending.values())
+            .min()
+            .copied();
         let timeout_fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
             match next_deadline {
                 Some(t) => Box::pin(tokio::time::sleep_until(t)),
@@ -157,7 +166,10 @@ async fn run(app: &AppHandle) -> Result<(), String> {
                     }
                     Some((account_id, BackendEvent::FolderChanged { folder })) => {
                         let key = (account_id, folder);
-                        pending.insert(key, tokio::time::Instant::now() + DEBOUNCE);
+                        folder_pending.insert(key, tokio::time::Instant::now() + DEBOUNCE);
+                    }
+                    Some((account_id, BackendEvent::AccountChanged)) => {
+                        account_pending.insert(account_id, tokio::time::Instant::now() + DEBOUNCE);
                     }
                     Some((account_id, BackendEvent::ConnectionLost)) => {
                         debug!(account = %account_id.0, "watcher reports ConnectionLost");
@@ -172,20 +184,49 @@ async fn run(app: &AppHandle) -> Result<(), String> {
             }
             _ = timeout_fut => {
                 let now = tokio::time::Instant::now();
-                let due: Vec<_> = pending
+
+                let due_folders: Vec<_> = folder_pending
                     .iter()
                     .filter(|(_, t)| **t <= now)
                     .map(|(k, _)| k.clone())
                     .collect();
-                for key in due {
-                    pending.remove(&key);
+                for key in due_folders {
+                    folder_pending.remove(&key);
                     let (account_id, _folder_id) = &key;
                     let Some(folder) = folder_by_id.get(&key) else { continue; };
                     sync_one_folder(app, &blobs, account_id, folder).await;
                 }
+
+                let due_accounts: Vec<_> = account_pending
+                    .iter()
+                    .filter(|(_, t)| **t <= now)
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for account_id in due_accounts {
+                    account_pending.remove(&account_id);
+                    sync_one_account(app, &blobs, &account_id).await;
+                }
             }
         }
     }
+}
+
+/// Spawn a small forwarder task that re-broadcasts `BackendEvent`
+/// from a single watcher onto the engine's shared `(AccountId,
+/// BackendEvent)` channel. Returns the per-watcher sender end.
+fn spawn_forwarder(
+    account: AccountId,
+    engine_tx: mpsc::Sender<(AccountId, BackendEvent)>,
+) -> mpsc::Sender<BackendEvent> {
+    let (forward_tx, mut forward_rx) = mpsc::channel::<BackendEvent>(8);
+    tokio::spawn(async move {
+        while let Some(ev) = forward_rx.recv().await {
+            if engine_tx.send((account.clone(), ev)).await.is_err() {
+                return;
+            }
+        }
+    });
+    forward_tx
 }
 
 async fn list_accounts(app: &AppHandle) -> Result<Vec<Account>, String> {
@@ -301,5 +342,62 @@ async fn sync_one_folder(
     };
     if let Err(e) = app.emit(SYNC_EVENT, &event) {
         warn!("emit sync_event: {e}");
+    }
+}
+
+/// Re-sync every folder of one account in response to a debounced
+/// `AccountChanged` event (JMAP path). Walks `sync_account` and
+/// emits one `SyncEvent::FolderSynced` per outcome — same shape the
+/// IMAP per-folder path produces, so the UI doesn't have to care
+/// which adapter pushed.
+async fn sync_one_account(app: &AppHandle, blobs: &BlobStore, account_id: &AccountId) {
+    let state: tauri::State<'_, AppState> = app.state();
+    let backend = match backend_factory::get_or_open(&state, account_id).await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(account = %account_id.0, "open backend for account refresh: {e}");
+            return;
+        }
+    };
+
+    let db = state.db.lock().await;
+    let outcomes =
+        match capytain_sync::sync_account(&*db, backend.as_ref(), Some(blobs), Some(200)).await {
+            Ok(o) => o,
+            Err(e) => {
+                warn!(account = %account_id.0, "live sync_account: {e}");
+                return;
+            }
+        };
+    drop(db);
+
+    for outcome in outcomes {
+        let event = match outcome.result {
+            Ok(report) => {
+                debug!(
+                    account = %account_id.0,
+                    folder = %outcome.folder_id.0,
+                    added = report.added,
+                    flag_updates = report.flag_updates,
+                    "live sync_account folder"
+                );
+                SyncEvent::FolderSynced {
+                    account: account_id.clone(),
+                    folder: outcome.folder_id,
+                    added: report.added as u32,
+                    updated: report.updated as u32,
+                    flag_updates: report.flag_updates as u32,
+                    removed: report.removed as u32,
+                }
+            }
+            Err(e) => SyncEvent::FolderError {
+                account: account_id.clone(),
+                folder: outcome.folder_id,
+                error: format!("{e}"),
+            },
+        };
+        if let Err(e) = app.emit(SYNC_EVENT, &event) {
+            warn!("emit sync_event: {e}");
+        }
     }
 }

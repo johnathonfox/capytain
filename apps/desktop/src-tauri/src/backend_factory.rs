@@ -36,6 +36,15 @@ pub struct ImapDialParams {
     pub access_token: String,
 }
 
+/// Connection parameters for opening a fresh JMAP `Client` — used by
+/// the EventSource watcher to dial a side connection without
+/// contending on the cached `MailBackend`'s client mutex.
+#[derive(Debug, Clone)]
+pub struct JmapDialParams {
+    pub session_url: String,
+    pub access_token: String,
+}
+
 /// Look up `account_id` in the backend cache; on miss, fetch the
 /// account row, refresh its access token, dial the provider, and
 /// install the resulting handle in the cache.
@@ -183,6 +192,58 @@ pub async fn fresh_imap_params(
         host: host.to_string(),
         port: 993,
         email: account.email_address,
+        access_token: token_set.access.expose().to_string(),
+    })
+}
+
+/// Refresh the OAuth access token for a JMAP-backed account and
+/// return the parameters needed to dial a fresh side `Client` via
+/// `capytain_jmap_client::dial_client`. Mirror of
+/// [`fresh_imap_params`] for the EventSource watcher.
+pub async fn fresh_jmap_params(
+    state: &AppState,
+    account_id: &AccountId,
+) -> Result<JmapDialParams, MailError> {
+    let db = state.db.lock().await;
+    let account = repos::accounts::get(&*db, account_id).await.map_err(|e| {
+        MailError::Other(format!(
+            "loading account {} for JMAP push: {e}",
+            account_id.0
+        ))
+    })?;
+    drop(db);
+
+    if !matches!(account.kind, BackendKind::Jmap) {
+        return Err(MailError::Other(format!(
+            "account {} is not JMAP-backed; EventSource doesn't apply",
+            account.id.0
+        )));
+    }
+
+    let slug = provider_slug_from_id(&account.id).ok_or_else(|| {
+        MailError::Other(format!(
+            "account id {} does not follow `<provider>:<email>`",
+            account.id.0
+        ))
+    })?;
+    let provider = provider_lookup(slug)
+        .ok_or_else(|| MailError::Other(format!("unknown provider: {slug}")))?;
+    let vault = TokenVault::new();
+    let token_set = refresh_access_token(provider, &vault, &account.id)
+        .await
+        .map_err(|e| MailError::Auth(format!("refresh access token: {e}")))?;
+
+    let session_url = match slug {
+        "fastmail" => "https://api.fastmail.com/.well-known/jmap",
+        other => {
+            return Err(MailError::Other(format!(
+                "no hardcoded JMAP session URL for provider {other}"
+            )))
+        }
+    };
+
+    Ok(JmapDialParams {
+        session_url: session_url.to_string(),
         access_token: token_set.access.expose().to_string(),
     })
 }
