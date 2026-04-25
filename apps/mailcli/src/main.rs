@@ -435,8 +435,9 @@ async fn sync_account(email: &str, paths: &DataPaths) -> Result<(), MailcliError
     let account = resolve_account(&conn, email).await?;
     let backend = open_backend(&account).await?;
 
-    // Phase 0 exit criterion: fetch the INBOX's headers and persist
-    // them. We run delta against the stored sync_state if present.
+    // Find the INBOX. The full sync engine in `capytain-sync` doesn't
+    // know which folder is "the one" for a Phase 0 single-folder sync;
+    // mailcli picks here and hands the chosen folder to `sync_folder`.
     let folders = backend.list_folders().await?;
     let inbox = folders
         .into_iter()
@@ -447,39 +448,14 @@ async fn sync_account(email: &str, paths: &DataPaths) -> Result<(), MailcliError
             MailcliError::Usage("could not find an INBOX folder on this account".into())
         })?;
 
-    // Persist the folder row so sync_states has a place to hang the
-    // backend cursor on.
-    match repos::folders::find(&conn, &inbox.id).await? {
-        Some(_) => repos::folders::update(&conn, &inbox).await?,
-        None => repos::folders::insert(&conn, &inbox).await?,
-    }
-
-    let prior = repos::sync_states::get(&conn, &inbox.id)
-        .await
-        .ok()
-        .flatten();
-
     let start = Instant::now();
-    let result = backend
-        .list_messages(&inbox.id, prior.as_ref(), Some(200))
-        .await?;
-    let added = result.messages.len();
-    let removed = result.removed.len();
-
-    // Persist headers.
-    for h in &result.messages {
-        // Upsert — storage's repos don't have one, so check then
-        // insert/update.
-        match repos::messages::find(&conn, &h.id).await? {
-            Some(_) => repos::messages::update(&conn, h, None).await?,
-            None => repos::messages::insert(&conn, h, None).await?,
-        }
-    }
-    repos::sync_states::put(&conn, &result.new_state).await?;
-
+    let report = capytain_sync::sync_folder(&conn, backend.as_ref(), &inbox, Some(200)).await?;
     let duration = start.elapsed();
     println!(
-        "Synced {added} new messages, {removed} removed, in {} ms",
+        "Synced {} new, {} updated, {} removed, in {} ms",
+        report.added,
+        report.updated,
+        report.removed,
         duration.as_millis()
     );
     Ok(())
@@ -533,4 +509,13 @@ enum MailcliError {
     Storage(#[from] capytain_core::StorageError),
     #[error(transparent)]
     Auth(#[from] AuthError),
+}
+
+impl From<capytain_sync::SyncError> for MailcliError {
+    fn from(e: capytain_sync::SyncError) -> Self {
+        match e {
+            capytain_sync::SyncError::Mail(m) => MailcliError::Mail(m),
+            capytain_sync::SyncError::Storage(s) => MailcliError::Storage(s),
+        }
+    }
 }
