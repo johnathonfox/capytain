@@ -18,9 +18,9 @@ const INSERT: &str = "
         (id, account_id, folder_id, thread_id, rfc822_message_id,
          subject, from_json, reply_to_json, to_json, cc_json, bcc_json,
          date, flags_json, labels_json, snippet, size, has_attachments,
-         body_path)
+         body_path, in_reply_to, references_json)
     VALUES
-        (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+        (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
 ";
 
 const UPDATE: &str = "
@@ -41,13 +41,16 @@ const UPDATE: &str = "
            snippet = ?15,
            size = ?16,
            has_attachments = ?17,
-           body_path = ?18
+           body_path = ?18,
+           in_reply_to = ?19,
+           references_json = ?20
      WHERE id = ?1
 ";
 
 const COLS: &str = "id, account_id, folder_id, thread_id, rfc822_message_id, \
      subject, from_json, reply_to_json, to_json, cc_json, bcc_json, \
-     date, flags_json, labels_json, snippet, size, has_attachments, body_path";
+     date, flags_json, labels_json, snippet, size, has_attachments, body_path, \
+     in_reply_to, references_json";
 
 const DELETE_BY_ID: &str = "DELETE FROM messages WHERE id = ?1";
 
@@ -91,6 +94,34 @@ pub async fn find(
         .await?
         .map(|r| row_to_headers(&r))
         .transpose()
+}
+
+/// Look up a message by its RFC 5322 `Message-ID` header within a
+/// single account. Used by the threading assembly pipeline to find
+/// the local row that an incoming message's `In-Reply-To` /
+/// `References` chain points at — the row's `thread_id` is then the
+/// thread to attach the new message to. Returns the most recent
+/// match by date if (rare) duplicates exist.
+pub async fn find_by_rfc822_id(
+    conn: &dyn DbConn,
+    account: &AccountId,
+    rfc822_message_id: &str,
+) -> Result<Option<MessageHeaders>, StorageError> {
+    let sql = format!(
+        "SELECT {COLS} FROM messages \
+         WHERE account_id = ?1 AND rfc822_message_id = ?2 \
+         ORDER BY date DESC LIMIT 1"
+    );
+    conn.query_opt(
+        &sql,
+        Params(vec![
+            Value::Text(&account.0),
+            Value::OwnedText(rfc822_message_id.to_string()),
+        ]),
+    )
+    .await?
+    .map(|r| row_to_headers(&r))
+    .transpose()
 }
 
 pub async fn list_by_folder(
@@ -322,6 +353,11 @@ fn to_params<'a>(
         Value::Integer(h.size.into()),
         Value::Integer(h.has_attachments.into()),
         body_path.map(Value::Text).unwrap_or(Value::Null),
+        h.in_reply_to
+            .as_deref()
+            .map(Value::Text)
+            .unwrap_or(Value::Null),
+        Value::OwnedText(json::encode(&h.references)?),
     ]))
 }
 
@@ -352,5 +388,7 @@ fn row_to_headers(row: &Row) -> Result<MessageHeaders, StorageError> {
         size: u32::try_from(row.get_i64("size")?)
             .map_err(|e| StorageError::Db(format!("size out of range: {e}")))?,
         has_attachments: row.get_i64("has_attachments")? != 0,
+        in_reply_to: row.get_optional_str("in_reply_to")?.map(str::to_string),
+        references: json::decode(row.get_str("references_json")?)?,
     })
 }

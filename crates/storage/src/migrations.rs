@@ -44,6 +44,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "remote_content_opt_ins",
         sql: include_str!("../migrations/0002_remote_content_opt_ins.sql"),
     },
+    Migration {
+        version: 3,
+        name: "threading_columns",
+        sql: include_str!("../migrations/0003_threading_columns.sql"),
+    },
 ];
 
 /// Bookkeeping table. Created lazily by [`run_migrations`] on first run.

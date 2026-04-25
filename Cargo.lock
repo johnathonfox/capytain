@@ -1326,6 +1326,7 @@ dependencies = [
  "capytain-core",
  "chrono",
  "proptest",
+ "rand 0.9.4",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

@@ -156,6 +156,29 @@ pub fn parse_headers(raw: &[u8], identity: MessageIdentity<'_>) -> Option<Messag
     Some(headers_from(&parsed, &identity))
 }
 
+/// Pull `In-Reply-To` and `References` out of an RFC 5322 header
+/// block (no body). Used by `capytain-imap-client` after a
+/// `BODY.PEEK[HEADER]` FETCH — the structured ENVELOPE only
+/// surfaces `In-Reply-To`, so the threading pipeline needs a
+/// follow-up parse to recover `References` for the chain-walk
+/// fallback.
+///
+/// Both Message-IDs are returned angle-bracket-wrapped to match the
+/// shape the rest of the workspace already uses
+/// (`<id@example.com>`).
+pub fn extract_thread_headers(header_bytes: &[u8]) -> (Option<String>, Vec<String>) {
+    // mail-parser wants a complete message. The header block from
+    // `BODY.PEEK[HEADER]` ends with a CRLF separator already; tack
+    // on an empty body so the parser stops cleanly.
+    let synthetic = [header_bytes, b"\r\n"].concat();
+    let Some(parsed) = MessageParser::default().parse(&synthetic) else {
+        return (None, Vec::new());
+    };
+    let in_reply_to = single_message_id(parsed.in_reply_to());
+    let references = message_id_list(parsed.references());
+    (in_reply_to, references)
+}
+
 /// Identity fields the adapter knows that the MIME parser does not.
 #[derive(Debug, Clone, Copy)]
 pub struct MessageIdentity<'a> {
@@ -183,6 +206,8 @@ fn headers_from(parsed: &Message<'_>, identity: &MessageIdentity<'_>) -> Message
     let rfc822_message_id = parsed.message_id().map(|s| format!("<{s}>"));
     let snippet = snippet_from(parsed);
     let has_attachments = parsed.attachment_count() > 0;
+    let in_reply_to = single_message_id(parsed.in_reply_to());
+    let references = message_id_list(parsed.references());
 
     MessageHeaders {
         id: identity.id.clone(),
@@ -202,6 +227,8 @@ fn headers_from(parsed: &Message<'_>, identity: &MessageIdentity<'_>) -> Message
         snippet,
         size: identity.size,
         has_attachments,
+        in_reply_to,
+        references,
     }
 }
 

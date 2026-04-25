@@ -286,10 +286,19 @@ impl MailBackend for ImapBackend {
         // at connect time). Sending it to a server that doesn't
         // support the extension would BAD the whole FETCH; the flag
         // is set in `dial_session` so we know it's safe here.
+        //
+        // `BODY.PEEK[HEADER]` pulls the full RFC 5322 header block so
+        // `fetch_to_headers` can parse `References` (which IMAP's
+        // structured ENVELOPE doesn't surface — it carries
+        // `In-Reply-To` only). The bytes are typically <4 KB per
+        // message, well under the cost of a second fetch round-trip.
+        // `.PEEK[…]` form means the FETCH does NOT mark the message
+        // `\Seen` — important so sync doesn't flip read state by
+        // looking.
         let query = if self.gmail_ext {
-            "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE X-GM-LABELS)"
+            "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE BODY.PEEK[HEADER] X-GM-LABELS)"
         } else {
-            "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE)"
+            "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE BODY.PEEK[HEADER])"
         };
         let mut fetches = session
             .uid_fetch(&uid_set, query)
@@ -626,6 +635,17 @@ fn fetch_to_headers(
         })
         .unwrap_or_default();
 
+    // Threading needs `In-Reply-To` and `References`. ENVELOPE only
+    // surfaces `In-Reply-To`; we additionally requested
+    // `BODY.PEEK[HEADER]` and parse the raw header block here. The
+    // bytes may not be present on a malformed FETCH response —
+    // treat both fields as empty in that case (the threading
+    // pipeline falls back to subject normalization).
+    let (in_reply_to, references) = fetch
+        .header()
+        .map(capytain_mime::extract_thread_headers)
+        .unwrap_or_default();
+
     Ok(Some(MessageHeaders {
         id: r.encode(),
         account_id: account.clone(),
@@ -644,6 +664,8 @@ fn fetch_to_headers(
         snippet: String::new(),
         size,
         has_attachments: false,
+        in_reply_to,
+        references,
     }))
 }
 

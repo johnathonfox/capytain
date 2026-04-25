@@ -178,6 +178,8 @@ fn headers_strategy(
             snippet,
             size,
             has_attachments,
+            in_reply_to: None,
+            references: vec![],
         },
     )
 }
@@ -365,6 +367,8 @@ proptest! {
                 snippet: "".into(),
                 size: 0,
                 has_attachments: true,
+                in_reply_to: None,
+                references: vec![],
             };
             repos::messages::insert(&conn, &headers, None).await.expect("insert msg");
 

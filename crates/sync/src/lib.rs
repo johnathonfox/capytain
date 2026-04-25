@@ -13,6 +13,8 @@
 //! JMAP-specific quirks: a backend either returns the right shape or
 //! it raises a `MailError` the caller can act on.
 
+pub mod threading;
+
 use thiserror::Error;
 use tracing::{debug, instrument, warn};
 
@@ -118,6 +120,16 @@ pub async fn sync_folder(
             }
             None => {
                 messages::insert(conn, h, None).await?;
+                // Thread assembly runs immediately after the row
+                // lands so subsequent inserts in this same cycle
+                // see the thread_id we just minted via the
+                // `find_by_rfc822_id` chain. Failures are logged
+                // and skipped — a missing thread_id is recoverable
+                // (the message just won't group), unlike a missing
+                // header row which is a hard cache bug.
+                if let Err(e) = threading::attach_to_thread(conn, h).await {
+                    warn!(message = %h.id.0, "thread assembly failed: {e}");
+                }
                 report.added += 1;
                 new_headers.push(h.clone());
             }

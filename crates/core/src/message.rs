@@ -101,6 +101,17 @@ pub struct MessageHeaders {
 
     /// Whether the message carries any attachments.
     pub has_attachments: bool,
+
+    /// `In-Reply-To` Message-ID, parsed and angle-bracket-wrapped.
+    /// Used by the threading pipeline as the first lookup key when
+    /// attaching a new message to an existing thread.
+    pub in_reply_to: Option<String>,
+
+    /// `References` Message-IDs, in the order they appeared in the
+    /// header, each angle-bracket-wrapped. The threading pipeline
+    /// walks this list in **reverse** (newest reference first) when
+    /// the `In-Reply-To` lookup misses.
+    pub references: Vec<String>,
 }
 
 /// A message with its body and attachment descriptors.
