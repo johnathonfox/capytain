@@ -14,12 +14,12 @@
 //! it raises a `MailError` the caller can act on.
 
 use thiserror::Error;
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
-use capytain_core::{Folder, MailBackend, MailError, StorageError};
+use capytain_core::{Folder, MailBackend, MailError, MessageHeaders, StorageError};
 use capytain_storage::{
     repos::{folders, messages, sync_states},
-    DbConn,
+    BlobStore, DbConn,
 };
 
 /// Outcome of a single [`sync_folder`] call.
@@ -32,6 +32,16 @@ pub struct SyncReport {
     pub updated: usize,
     /// Server-side deletions the backend reported via `removed`.
     pub removed: usize,
+    /// Bodies successfully fetched + persisted to the blob store this
+    /// cycle. Always `<= added` since the body-fetch pass only runs
+    /// for newly-inserted headers.
+    pub bodies_fetched: usize,
+    /// Body fetches that failed and were logged + skipped (transient
+    /// network blip, UIDVALIDITY mismatch, parse failure on this
+    /// specific message). Failed bodies are retried on the next
+    /// `sync_folder` cycle that sees the message again, so this is
+    /// non-fatal.
+    pub bodies_failed: usize,
 }
 
 /// Errors from the sync engine. `MailError` covers protocol /
@@ -48,7 +58,10 @@ pub enum SyncError {
 }
 
 /// Run one delta-sync cycle for `folder` against `backend`, persisting
-/// the headers and the new sync cursor through `conn`.
+/// the headers and the new sync cursor through `conn`. When `blobs`
+/// is `Some`, also runs a body-fetch pass for newly-inserted
+/// messages: `MailBackend::fetch_raw_message` → `BlobStore::put` →
+/// `messages::set_body_path`.
 ///
 /// The flow:
 /// 1. Upsert the folder row so `sync_states` has somewhere to hang
@@ -60,15 +73,16 @@ pub enum SyncError {
 ///    here as `SyncError::Mail` and the caller decides whether to
 ///    clear the cursor and retry.
 /// 4. Upsert each returned header and persist the new cursor.
-///
-/// Body fetching is intentionally **not** in this function — it
-/// lands in a follow-up PR alongside a `fetch_raw_message` addition
-/// to `MailBackend` that returns the bytes the existing
-/// `fetch_message` parses and discards.
+/// 5. If `blobs` is `Some`, fetch raw bytes for each newly-inserted
+///    header and stash them in the blob store. Per-message failures
+///    here are logged + counted (`bodies_failed`) but don't fail the
+///    cycle — the next `sync_folder` call retries any header without
+///    a `body_path`.
 #[instrument(skip_all, fields(folder = %folder.id.0))]
 pub async fn sync_folder(
     conn: &dyn DbConn,
     backend: &dyn MailBackend,
+    blobs: Option<&BlobStore>,
     folder: &Folder,
     limit: Option<u32>,
 ) -> Result<SyncReport, SyncError> {
@@ -84,6 +98,7 @@ pub async fn sync_folder(
         .await?;
 
     let mut report = SyncReport::default();
+    let mut new_headers: Vec<MessageHeaders> = Vec::new();
     for h in &result.messages {
         match messages::find(conn, &h.id).await? {
             Some(_) => {
@@ -93,6 +108,7 @@ pub async fn sync_folder(
             None => {
                 messages::insert(conn, h, None).await?;
                 report.added += 1;
+                new_headers.push(h.clone());
             }
         }
     }
@@ -100,11 +116,46 @@ pub async fn sync_folder(
 
     sync_states::put(conn, &result.new_state).await?;
 
+    if let Some(blobs) = blobs {
+        for h in &new_headers {
+            match fetch_and_store_body(conn, backend, blobs, h).await {
+                Ok(()) => report.bodies_fetched += 1,
+                Err(e) => {
+                    warn!(
+                        message = %h.id.0,
+                        "body fetch failed: {e}"
+                    );
+                    report.bodies_failed += 1;
+                }
+            }
+        }
+    }
+
     debug!(
         added = report.added,
         updated = report.updated,
         removed = report.removed,
+        bodies_fetched = report.bodies_fetched,
+        bodies_failed = report.bodies_failed,
         "sync_folder cycle complete"
     );
     Ok(report)
+}
+
+/// Fetch the raw bytes of a single message and persist them via the
+/// blob store + `body_path` column. Pulled out of [`sync_folder`] so
+/// the per-message error path is isolated and the engine can keep
+/// going after a single bad fetch.
+async fn fetch_and_store_body(
+    conn: &dyn DbConn,
+    backend: &dyn MailBackend,
+    blobs: &BlobStore,
+    header: &MessageHeaders,
+) -> Result<(), SyncError> {
+    let raw = backend.fetch_raw_message(&header.id).await?;
+    let path = blobs
+        .put(&header.account_id, &header.folder_id, &header.id, &raw)
+        .await?;
+    messages::set_body_path(conn, &header.id, Some(&path.to_string_lossy())).await?;
+    Ok(())
 }

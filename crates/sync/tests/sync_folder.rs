@@ -20,7 +20,7 @@ use capytain_core::{
 };
 use capytain_storage::{
     repos::{folders as folders_repo, messages as messages_repo, sync_states as sync_states_repo},
-    run_migrations, TursoConn,
+    run_migrations, BlobStore, TursoConn,
 };
 
 use capytain_sync::sync_folder;
@@ -28,11 +28,16 @@ use capytain_sync::sync_folder;
 // ---------- Stub backend ----------
 
 /// Minimal `MailBackend` that returns a scripted sequence of
-/// `MessageList` responses. Each call to `list_messages` consumes one
-/// from the front of the queue.
+/// `MessageList` responses and a per-`MessageId` map of raw bytes.
+/// Each call to `list_messages` consumes one response from the front
+/// of the queue; `fetch_raw_message` reads from `raw_bodies`.
 struct StubBackend {
     folders: Vec<Folder>,
     responses: Mutex<Vec<MessageList>>,
+    raw_bodies: std::collections::HashMap<String, Vec<u8>>,
+    /// IDs that should fail their body fetch — simulates a UIDVALIDITY
+    /// race or a server hiccup mid-cycle.
+    failing_ids: std::collections::HashSet<String>,
 }
 
 #[async_trait]
@@ -56,7 +61,20 @@ impl MailBackend for StubBackend {
     }
 
     async fn fetch_message(&self, _id: &MessageId) -> Result<MessageBody, MailError> {
-        unimplemented!("body fetch lands in PR 2")
+        unimplemented!("sync_folder uses fetch_raw_message; fetch_message isn't exercised")
+    }
+
+    async fn fetch_raw_message(&self, id: &MessageId) -> Result<Vec<u8>, MailError> {
+        if self.failing_ids.contains(&id.0) {
+            return Err(MailError::Protocol(format!(
+                "stub: scripted failure for {}",
+                id.0
+            )));
+        }
+        self.raw_bodies
+            .get(&id.0)
+            .cloned()
+            .ok_or_else(|| MailError::NotFound(id.0.clone()))
     }
 
     async fn fetch_attachment(
@@ -173,9 +191,13 @@ fn sync_folder_inserts_new_headers_and_persists_cursor() {
                 },
                 removed: vec![],
             }]),
+            raw_bodies: Default::default(),
+            failing_ids: Default::default(),
         };
 
-        let report = sync_folder(&conn, &backend, &folder, None).await.unwrap();
+        let report = sync_folder(&conn, &backend, None, &folder, None)
+            .await
+            .unwrap();
         assert_eq!(report.added, 2);
         assert_eq!(report.updated, 0);
         assert_eq!(report.removed, 0);
@@ -233,19 +255,146 @@ fn sync_folder_updates_existing_headers() {
                     }
                 },
             ]),
+            raw_bodies: Default::default(),
+            failing_ids: Default::default(),
         };
 
-        let r1 = sync_folder(&conn, &backend, &folder, None).await.unwrap();
+        let r1 = sync_folder(&conn, &backend, None, &folder, None)
+            .await
+            .unwrap();
         assert_eq!(r1.added, 1);
         assert_eq!(r1.updated, 0);
 
-        let r2 = sync_folder(&conn, &backend, &folder, None).await.unwrap();
+        let r2 = sync_folder(&conn, &backend, None, &folder, None)
+            .await
+            .unwrap();
         assert_eq!(r2.added, 0);
         assert_eq!(r2.updated, 1);
 
         let stored = messages_repo::get(&conn, &h1.id).await.unwrap();
         assert!(stored.flags.seen);
     });
+}
+
+#[test]
+fn sync_folder_fetches_bodies_for_new_messages() {
+    rt().block_on(async {
+        let conn = TursoConn::in_memory().await.unwrap();
+        run_migrations(&conn).await.unwrap();
+        let (acct_id, folder) = seed_account(&conn).await;
+
+        let h1 = header("m1", &acct_id, &folder.id, "first");
+        let h2 = header("m2", &acct_id, &folder.id, "second");
+
+        let mut bodies = std::collections::HashMap::new();
+        bodies.insert(
+            "m1".to_string(),
+            b"From: a\r\nSubject: first\r\n\r\nbody-1\r\n".to_vec(),
+        );
+        bodies.insert(
+            "m2".to_string(),
+            b"From: b\r\nSubject: second\r\n\r\nbody-2\r\n".to_vec(),
+        );
+
+        let backend = StubBackend {
+            folders: vec![folder.clone()],
+            responses: Mutex::new(vec![MessageList {
+                messages: vec![h1.clone(), h2.clone()],
+                new_state: SyncState {
+                    folder_id: folder.id.clone(),
+                    backend_state: "{\"uidvalidity\":1,\"highestmodseq\":0,\"uidnext\":3}".into(),
+                },
+                removed: vec![],
+            }]),
+            raw_bodies: bodies,
+            failing_ids: Default::default(),
+        };
+
+        let tmp = scratch_dir();
+        let blobs = BlobStore::new(&tmp);
+
+        let report = sync_folder(&conn, &backend, Some(&blobs), &folder, None)
+            .await
+            .unwrap();
+        assert_eq!(report.added, 2);
+        assert_eq!(report.bodies_fetched, 2);
+        assert_eq!(report.bodies_failed, 0);
+
+        // body_path now non-null for both messages.
+        let p1 = messages_repo::body_path(&conn, &h1.id).await.unwrap();
+        assert!(p1.is_some(), "body_path missing for m1");
+
+        // BlobStore::get returns the same bytes we handed the stub.
+        let back = blobs
+            .get(&acct_id, &folder.id, &h1.id)
+            .await
+            .expect("blob present");
+        assert_eq!(back, b"From: a\r\nSubject: first\r\n\r\nbody-1\r\n");
+    });
+}
+
+#[test]
+fn sync_folder_logs_and_skips_failed_body_fetches() {
+    rt().block_on(async {
+        let conn = TursoConn::in_memory().await.unwrap();
+        run_migrations(&conn).await.unwrap();
+        let (acct_id, folder) = seed_account(&conn).await;
+
+        let h_ok = header("ok", &acct_id, &folder.id, "fine");
+        let h_bad = header("bad", &acct_id, &folder.id, "broken");
+
+        let mut bodies = std::collections::HashMap::new();
+        bodies.insert("ok".to_string(), b"raw ok\r\n".to_vec());
+        // h_bad has no body in the map; even if it did, failing_ids
+        // forces a Protocol error.
+        let mut failing = std::collections::HashSet::new();
+        failing.insert("bad".to_string());
+
+        let backend = StubBackend {
+            folders: vec![folder.clone()],
+            responses: Mutex::new(vec![MessageList {
+                messages: vec![h_ok.clone(), h_bad.clone()],
+                new_state: SyncState {
+                    folder_id: folder.id.clone(),
+                    backend_state: "{\"uidvalidity\":1,\"highestmodseq\":0,\"uidnext\":3}".into(),
+                },
+                removed: vec![],
+            }]),
+            raw_bodies: bodies,
+            failing_ids: failing,
+        };
+
+        let tmp = scratch_dir();
+        let blobs = BlobStore::new(&tmp);
+
+        let report = sync_folder(&conn, &backend, Some(&blobs), &folder, None)
+            .await
+            .unwrap();
+        assert_eq!(report.added, 2);
+        assert_eq!(report.bodies_fetched, 1);
+        assert_eq!(report.bodies_failed, 1);
+
+        // The good message has a body_path; the bad one does not.
+        assert!(messages_repo::body_path(&conn, &h_ok.id)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(messages_repo::body_path(&conn, &h_bad.id)
+            .await
+            .unwrap()
+            .is_none());
+    });
+}
+
+/// Local tempdir helper — `capytain-storage` rolls its own to avoid a
+/// `tempfile` dev-dep, so this crate does the same.
+fn scratch_dir() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("capytain-sync-test-{}-{}", std::process::id(), n));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
 #[test]
@@ -269,9 +418,13 @@ fn sync_folder_reports_removed_count() {
                     MessageId("m_gone_3".into()),
                 ],
             }]),
+            raw_bodies: Default::default(),
+            failing_ids: Default::default(),
         };
 
-        let report = sync_folder(&conn, &backend, &folder, None).await.unwrap();
+        let report = sync_folder(&conn, &backend, None, &folder, None)
+            .await
+            .unwrap();
         assert_eq!(report.removed, 3);
     });
 }
