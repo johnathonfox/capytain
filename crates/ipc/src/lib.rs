@@ -87,6 +87,35 @@ pub struct MessagePage {
     pub unread_count: u32,
 }
 
+/// Events the sync engine emits to the UI as folders sync. The
+/// Tauri shell forwards these via `Window::emit("sync_event", …)`;
+/// the Dioxus UI listens and refetches the affected folder when its
+/// id matches the user's current selection.
+///
+/// Phase 1 Week 10 introduces this type alongside the desktop's
+/// startup-sync bootstrap. Live IDLE pushes (PR 7b) reuse the same
+/// shape — only the trigger changes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum SyncEvent {
+    /// A folder finished a sync cycle. Counts mirror `SyncReport`.
+    FolderSynced {
+        account: AccountId,
+        folder: FolderId,
+        added: u32,
+        updated: u32,
+        flag_updates: u32,
+        removed: u32,
+    },
+    /// A folder's sync cycle failed. The error string is rendered as
+    /// a UI banner; the engine retries on the next cycle.
+    FolderError {
+        account: AccountId,
+        folder: FolderId,
+        error: String,
+    },
+}
+
 /// What the UI gets back when a user opens a message.
 ///
 /// Phase 0 Week 5 populates only `headers` and `body_text`. HTML

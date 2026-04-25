@@ -26,6 +26,7 @@ mod linux_gtk;
 #[cfg(feature = "servo")]
 mod renderer_bridge;
 mod state;
+mod sync_engine;
 
 use std::path::PathBuf;
 
@@ -89,6 +90,13 @@ fn main() {
             // all trait calls marshal via `TauriDispatcher`.
             #[cfg(feature = "servo")]
             renderer_bridge::install_servo_renderer(app)?;
+
+            // Phase 1 Week 10: kick off a background sync of every
+            // configured account so the UI sees fresh mail without the
+            // user having to run `mailcli sync` first. Live IDLE
+            // watchers are layered on in PR 7b — the engine module
+            // already exposes the right seam for them.
+            sync_engine::spawn(app.handle().clone());
 
             Ok(())
         })
