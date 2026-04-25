@@ -17,6 +17,8 @@
 //! `watch()` stays at the trait default empty stream until Phase 1 Week
 //! 1 when EventSource lands.
 
+pub mod push;
+
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use jmap_client::client::Client;
@@ -28,6 +30,8 @@ use capytain_core::{
     MailBackend, MailError, MessageBody, MessageFlags, MessageHeaders, MessageId, MessageList,
     SyncState, ThreadId,
 };
+
+pub use push::watch_account;
 
 /// JMAP-backed [`MailBackend`].
 pub struct JmapBackend {
@@ -45,11 +49,7 @@ impl JmapBackend {
         access_token: &str,
         account_id: AccountId,
     ) -> Result<Self, MailError> {
-        let client = Client::new()
-            .credentials(jmap_client::client::Credentials::bearer(access_token))
-            .connect(session_url)
-            .await
-            .map_err(|e| MailError::Network(format!("JMAP connect {session_url}: {e}")))?;
+        let client = dial_client(session_url, access_token).await?;
         info!(session_url, "JMAP connected");
         Ok(Self {
             client: Mutex::new(client),
@@ -63,6 +63,19 @@ impl JmapBackend {
     pub fn session_url(&self) -> &str {
         &self.session_url
     }
+}
+
+/// Open a fresh JMAP `Client` against `session_url` with a bearer
+/// access token. Both [`JmapBackend::connect`] and the
+/// [`crate::push::watch_account`] watcher call through this so the
+/// connect logic — bearer credentials, session resolution — lives
+/// in one place. Mirrors `capytain_imap_client::dial_session`.
+pub async fn dial_client(session_url: &str, access_token: &str) -> Result<Client, MailError> {
+    Client::new()
+        .credentials(jmap_client::client::Credentials::bearer(access_token))
+        .connect(session_url)
+        .await
+        .map_err(|e| MailError::Network(format!("JMAP connect {session_url}: {e}")))
 }
 
 // ---------- MailBackend impl ----------

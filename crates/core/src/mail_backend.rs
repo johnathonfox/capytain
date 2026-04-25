@@ -51,10 +51,27 @@ pub struct MessageList {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum BackendEvent {
-    MessageAdded { folder: FolderId, id: MessageId },
-    MessageChanged { folder: FolderId, id: MessageId },
-    MessageRemoved { folder: FolderId, id: MessageId },
-    FolderChanged { folder: FolderId },
+    MessageAdded {
+        folder: FolderId,
+        id: MessageId,
+    },
+    MessageChanged {
+        folder: FolderId,
+        id: MessageId,
+    },
+    MessageRemoved {
+        folder: FolderId,
+        id: MessageId,
+    },
+    FolderChanged {
+        folder: FolderId,
+    },
+    /// Account-wide change pushed by a backend that doesn't surface
+    /// per-folder deltas (JMAP's EventSource is the textbook case —
+    /// it tells you "Email has new state" without naming a mailbox).
+    /// The sync engine reacts by running `sync_account` once per
+    /// debounce window for the affected account.
+    AccountChanged,
     ConnectionLost,
     ConnectionRestored,
 }

@@ -1277,6 +1277,7 @@ dependencies = [
  "async-trait",
  "capytain-core",
  "chrono",
+ "futures-util",
  "jmap-client",
  "thiserror 2.0.18",
  "tokio",
