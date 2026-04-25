@@ -275,13 +275,33 @@ impl MailBackend for JmapBackend {
     async fn update_flags(
         &self,
         messages: &[MessageId],
-        _add: MessageFlags,
-        _remove: MessageFlags,
+        add: MessageFlags,
+        remove: MessageFlags,
     ) -> Result<(), MailError> {
-        let _ = messages;
-        Err(MailError::Other(
-            "JMAP write path arrives in Phase 1 Week 2".into(),
-        ))
+        if messages.is_empty() {
+            return Ok(());
+        }
+        let client = self.client.lock().await;
+        // JMAP doesn't have a `STORE +FLAGS` batch primitive — each
+        // (id, keyword, set) tuple goes through `email_set_keyword`.
+        // For the typical mark-read flow that's `messages.len()`
+        // round-trips with one keyword each; batched mutations land
+        // in the polish pass when we move to building a single
+        // `Email/set` request manually.
+        for id in messages {
+            for (kw, set) in flag_diff(&add, true)
+                .iter()
+                .chain(flag_diff(&remove, false).iter())
+            {
+                client
+                    .email_set_keyword(&id.0, kw, *set)
+                    .await
+                    .map_err(|e| {
+                        MailError::Protocol(format!("Email/set keyword {kw} on {}: {e}", id.0))
+                    })?;
+            }
+        }
+        Ok(())
     }
 
     async fn move_messages(
@@ -410,6 +430,30 @@ fn translate_addrs(addrs: Option<&[jmap_client::email::EmailAddress]>) -> Vec<Em
             display_name: a.name().map(str::to_string),
         })
         .collect()
+}
+
+/// Translate a `MessageFlags` set into a list of `(keyword, set)`
+/// tuples for `Email/set`. `set_to` is the second tuple element —
+/// `true` for the "add" path, `false` for the "remove" path.
+/// Skips any flag that's `false` so we don't issue no-op patches.
+fn flag_diff(flags: &MessageFlags, set_to: bool) -> Vec<(String, bool)> {
+    let mut out = Vec::with_capacity(5);
+    if flags.seen {
+        out.push(("$seen".to_string(), set_to));
+    }
+    if flags.flagged {
+        out.push(("$flagged".to_string(), set_to));
+    }
+    if flags.answered {
+        out.push(("$answered".to_string(), set_to));
+    }
+    if flags.draft {
+        out.push(("$draft".to_string(), set_to));
+    }
+    if flags.forwarded {
+        out.push(("$forwarded".to_string(), set_to));
+    }
+    out
 }
 
 fn keywords_to_flags(keywords: &[&str]) -> MessageFlags {

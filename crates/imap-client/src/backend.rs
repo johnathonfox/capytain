@@ -449,13 +449,75 @@ impl MailBackend for ImapBackend {
     async fn update_flags(
         &self,
         messages: &[MessageId],
-        _add: MessageFlags,
-        _remove: MessageFlags,
+        add: MessageFlags,
+        remove: MessageFlags,
     ) -> Result<(), MailError> {
-        let _ = messages;
-        Err(MailError::Other(
-            "IMAP write path arrives in Phase 1 Week 2".into(),
-        ))
+        if messages.is_empty() {
+            return Ok(());
+        }
+        // Group ids by folder so each `STORE` runs against the right
+        // mailbox. The MessageId encoding is `imap|<uv>|<uid>|<folder>`
+        // so the folder is recoverable per id without consulting
+        // storage.
+        let mut by_folder: std::collections::HashMap<(String, u32), Vec<u32>> =
+            std::collections::HashMap::new();
+        for id in messages {
+            let r = MessageRef::decode(id)?;
+            by_folder
+                .entry((r.folder, r.uidvalidity))
+                .or_default()
+                .push(r.uid);
+        }
+
+        let add_flags = render_imap_flags(&add);
+        let rem_flags = render_imap_flags(&remove);
+        if add_flags.is_empty() && rem_flags.is_empty() {
+            return Ok(());
+        }
+
+        let mut session = self.session.lock().await;
+        for ((folder, uidvalidity), uids) in by_folder {
+            let mbox = session
+                .select(&folder)
+                .await
+                .map_err(|e| MailError::Protocol(format!("SELECT {folder}: {e}")))?;
+            let current_uv = mbox.uid_validity.ok_or_else(|| {
+                MailError::Protocol(format!("SELECT {folder}: missing UIDVALIDITY"))
+            })?;
+            if current_uv != uidvalidity {
+                return Err(MailError::Protocol(format!(
+                    "UIDVALIDITY changed for {folder} ({uidvalidity} → {current_uv}); refetch"
+                )));
+            }
+            let uid_set = uids
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            if !add_flags.is_empty() {
+                let q = format!("+FLAGS ({add_flags})");
+                let mut stream = session
+                    .uid_store(&uid_set, &q)
+                    .await
+                    .map_err(|e| MailError::Protocol(format!("STORE {q}: {e}")))?;
+                while let Some(r) = stream.next().await {
+                    r.map_err(|e| MailError::Protocol(format!("STORE response: {e}")))?;
+                }
+                drop(stream);
+            }
+            if !rem_flags.is_empty() {
+                let q = format!("-FLAGS ({rem_flags})");
+                let mut stream = session
+                    .uid_store(&uid_set, &q)
+                    .await
+                    .map_err(|e| MailError::Protocol(format!("STORE {q}: {e}")))?;
+                while let Some(r) = stream.next().await {
+                    r.map_err(|e| MailError::Protocol(format!("STORE response: {e}")))?;
+                }
+                drop(stream);
+            }
+        }
+        Ok(())
     }
 
     async fn move_messages(
@@ -694,6 +756,32 @@ fn addr_vec(addrs: Option<&Vec<imap_proto::Address<'_>>>) -> Vec<EmailAddress> {
             })
         })
         .collect()
+}
+
+/// Render a `MessageFlags` set as a space-separated IMAP flag list
+/// suitable for `+FLAGS (...)` / `-FLAGS (...)`. Skips `forwarded`
+/// when not set; emits `$Forwarded` (the de-facto Gmail/Apple
+/// convention) when set, since IMAP has no standard `\Forwarded`.
+/// Returns an empty string when no flags are set so the caller can
+/// skip the STORE round-trip entirely.
+fn render_imap_flags(flags: &MessageFlags) -> String {
+    let mut parts = Vec::with_capacity(5);
+    if flags.seen {
+        parts.push("\\Seen");
+    }
+    if flags.flagged {
+        parts.push("\\Flagged");
+    }
+    if flags.answered {
+        parts.push("\\Answered");
+    }
+    if flags.draft {
+        parts.push("\\Draft");
+    }
+    if flags.forwarded {
+        parts.push("$Forwarded");
+    }
+    parts.join(" ")
 }
 
 fn extract_flags(fetch: &Fetch) -> MessageFlags {

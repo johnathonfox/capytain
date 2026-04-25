@@ -9,13 +9,13 @@
 //! `messages_download_attachment`) land in Phase 1 alongside the
 //! outbox / optimistic-mutation engine.
 
-use capytain_core::{FolderRole, MessageHeaders};
+use capytain_core::{FolderRole, MessageFlags, MessageHeaders};
 use capytain_ipc::{FolderId, IpcResult, MessageId, MessagePage, RenderedMessage, SortOrder};
 use capytain_mime::{
     parse_rfc822, sanitize_email_html, sanitize_email_html_trusted, MessageIdentity,
 };
 use capytain_storage::{
-    repos::folders as folders_repo, repos::messages as messages_repo,
+    repos::folders as folders_repo, repos::messages as messages_repo, repos::outbox as outbox_repo,
     repos::remote_content_opt_ins, BlobStore,
 };
 use serde::Deserialize;
@@ -311,4 +311,88 @@ fn parse_and_sanitize(
         }
         None => (None, None, Vec::new()),
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MessagesMarkReadInput {
+    pub ids: Vec<MessageId>,
+    /// `true` marks read (sets `\Seen`); `false` marks unread.
+    pub seen: bool,
+}
+
+/// `messages_mark_read` — flip the seen flag locally and queue an
+/// outbox entry for the server.
+///
+/// Optimistic shape per `PHASE_1.md` Week 14: apply the local
+/// update first, enqueue the outbox row second, return. The
+/// background drain worker dispatches the row to
+/// `MailBackend::update_flags` and on success deletes the row.
+/// On failure it backs off; after `MAX_ATTEMPTS` the row enters
+/// the dead-letter state and the UI surfaces a "failed to sync"
+/// banner.
+///
+/// Per-account grouping: the outbox is keyed on `account_id`, so
+/// mixed-account batches enqueue one row per account. The
+/// `payload_json` shape is documented next to
+/// `capytain_sync::outbox_drain::FlagsPayload`.
+#[tauri::command]
+pub async fn messages_mark_read(
+    state: State<'_, AppState>,
+    input: MessagesMarkReadInput,
+) -> IpcResult<()> {
+    let MessagesMarkReadInput { ids, seen } = input;
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let db = state.db.lock().await;
+
+    // Optimistic local update: read each row, flip the bit, write.
+    // We don't pre-batch by account here because flag updates touch
+    // a single row each — pulling the existing record gives us the
+    // other flags so a future polish-pass `update_flags` against
+    // multiple bits works cleanly.
+    let mut by_account: std::collections::HashMap<capytain_core::AccountId, Vec<MessageId>> =
+        std::collections::HashMap::new();
+    for id in &ids {
+        let mut headers = match messages_repo::get(&*db, id).await {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(id = %id.0, "messages_mark_read: skipping unknown id: {e}");
+                continue;
+            }
+        };
+        if headers.flags.seen == seen {
+            continue;
+        }
+        headers.flags.seen = seen;
+        if let Err(e) = messages_repo::update_flags(&*db, id, &headers.flags).await {
+            tracing::warn!(id = %id.0, "messages_mark_read: local update failed: {e}");
+            continue;
+        }
+        by_account
+            .entry(headers.account_id)
+            .or_default()
+            .push(id.clone());
+    }
+
+    // Queue one outbox row per account. Payload is JSON of the
+    // Vec<MessageId> + the desired flag delta — drain dispatches.
+    for (account, ids) in by_account {
+        let add = MessageFlags {
+            seen,
+            ..Default::default()
+        };
+        let remove = MessageFlags {
+            seen: !seen,
+            ..Default::default()
+        };
+        let payload = serde_json::json!({
+            "ids": ids,
+            "add": add,
+            "remove": remove,
+        });
+        outbox_repo::enqueue(&*db, &account, "update_flags", &payload.to_string()).await?;
+    }
+    Ok(())
 }
