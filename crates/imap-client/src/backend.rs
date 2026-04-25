@@ -29,7 +29,10 @@ use crate::auth::XOAuth2;
 use crate::capabilities::require as require_caps;
 use crate::sync_state::{BackendState, MessageRef};
 
-type StreamT = TlsStream<TcpStream>;
+/// TLS-wrapped TCP stream that backs every IMAP session this crate
+/// produces. Exposed so sibling modules (notably `idle`) can take a
+/// `Session<StreamT>` directly without constructing an `ImapBackend`.
+pub type StreamT = TlsStream<TcpStream>;
 
 /// Production-grade IMAP backend: TLS, XOAUTH2, CONDSTORE + QRESYNC +
 /// IDLE required at connect.
@@ -55,7 +58,7 @@ impl ImapBackend {
         }
     }
 
-    /// Connect to `host:993` over TLS, authenticate via SASL XOAUTH2
+    /// Connect to `host:port` over TLS, authenticate via SASL XOAUTH2
     /// with the supplied `access_token`, verify required capabilities,
     /// and return a ready-to-use backend.
     pub async fn connect_tls(
@@ -65,47 +68,7 @@ impl ImapBackend {
         access_token: &str,
         account: AccountId,
     ) -> Result<Self, MailError> {
-        let tcp = TcpStream::connect((host, port))
-            .await
-            .map_err(|e| MailError::Network(format!("tcp connect {host}:{port}: {e}")))?;
-        let tls = tls_connect(host, tcp).await?;
-
-        let mut client = Client::new(tls);
-        // Read the server greeting. async-imap requires this before any
-        // commands run — without it the first command returns UNTAGGED.
-        let _greeting = client
-            .read_response()
-            .await
-            .map_err(|e| MailError::Protocol(format!("greeting: {e}")))?;
-
-        let authenticator = XOAuth2::new(email, access_token);
-        let mut session = client
-            .authenticate("XOAUTH2", &authenticator)
-            .await
-            .map_err(|(e, _client)| MailError::Auth(format!("XOAUTH2: {e}")))?;
-
-        // Force a CAPABILITY roundtrip; some servers only advertise the
-        // post-auth set after login, not in the greeting.
-        let caps = session
-            .capabilities()
-            .await
-            .map_err(|e| MailError::Protocol(format!("CAPABILITY: {e}")))?;
-        // `async_imap::types::Capability` is an enum (`Imap4rev1`,
-        // `Auth(String)`, `Atom(String)`). Debug-formatting it — what
-        // this code used to do — yielded strings like `Atom("IDLE")`
-        // that never matched the uppercase atom names the capabilities
-        // check expects. Pattern-match explicitly instead.
-        let cap_strings: Vec<String> = caps
-            .iter()
-            .map(|c| match c {
-                async_imap::types::Capability::Imap4rev1 => "IMAP4REV1".to_string(),
-                async_imap::types::Capability::Auth(s) => format!("AUTH={s}"),
-                async_imap::types::Capability::Atom(s) => s.clone(),
-            })
-            .collect();
-        tracing::debug!(capabilities = ?cap_strings, "IMAP server capabilities");
-        require_caps(&cap_strings)?;
-
+        let session = dial_session(host, port, email, access_token).await?;
         info!(host, email, "IMAP connected and authenticated");
         Ok(Self::from_session(session, account, host))
     }
@@ -114,6 +77,62 @@ impl ImapBackend {
     pub fn host(&self) -> &str {
         &self.host
     }
+}
+
+/// Open a fresh TLS+IMAP session against `host:port`, run XOAUTH2,
+/// verify required capabilities, and return the bare
+/// `async_imap::Session`. Both [`ImapBackend::connect_tls`] and the
+/// [`crate::idle`] watcher call through this; exposing it keeps the
+/// auth + CAPABILITY logic in one place rather than duplicating it
+/// for the IDLE side connection.
+pub async fn dial_session(
+    host: &str,
+    port: u16,
+    email: &str,
+    access_token: &str,
+) -> Result<Session<StreamT>, MailError> {
+    let tcp = TcpStream::connect((host, port))
+        .await
+        .map_err(|e| MailError::Network(format!("tcp connect {host}:{port}: {e}")))?;
+    let tls = tls_connect(host, tcp).await?;
+
+    let mut client = Client::new(tls);
+    // Read the server greeting. async-imap requires this before any
+    // commands run — without it the first command returns UNTAGGED.
+    let _greeting = client
+        .read_response()
+        .await
+        .map_err(|e| MailError::Protocol(format!("greeting: {e}")))?;
+
+    let authenticator = XOAuth2::new(email, access_token);
+    let mut session = client
+        .authenticate("XOAUTH2", &authenticator)
+        .await
+        .map_err(|(e, _client)| MailError::Auth(format!("XOAUTH2: {e}")))?;
+
+    // Force a CAPABILITY roundtrip; some servers only advertise the
+    // post-auth set after login, not in the greeting.
+    let caps = session
+        .capabilities()
+        .await
+        .map_err(|e| MailError::Protocol(format!("CAPABILITY: {e}")))?;
+    // `async_imap::types::Capability` is an enum (`Imap4rev1`,
+    // `Auth(String)`, `Atom(String)`). Debug-formatting it yields
+    // strings like `Atom("IDLE")` that never matched the uppercase
+    // atom names the capabilities check expects, so pattern-match
+    // explicitly here.
+    let cap_strings: Vec<String> = caps
+        .iter()
+        .map(|c| match c {
+            async_imap::types::Capability::Imap4rev1 => "IMAP4REV1".to_string(),
+            async_imap::types::Capability::Auth(s) => format!("AUTH={s}"),
+            async_imap::types::Capability::Atom(s) => s.clone(),
+        })
+        .collect();
+    tracing::debug!(capabilities = ?cap_strings, "IMAP server capabilities");
+    require_caps(&cap_strings)?;
+
+    Ok(session)
 }
 
 async fn tls_connect(host: &str, tcp: TcpStream) -> Result<StreamT, MailError> {

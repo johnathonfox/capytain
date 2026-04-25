@@ -28,7 +28,9 @@
 pub mod auth;
 pub mod backend;
 pub mod capabilities;
+pub mod idle;
 pub mod sync_state;
 
-pub use backend::ImapBackend;
+pub use backend::{dial_session, ImapBackend, StreamT};
+pub use idle::watch_folder;
 pub use sync_state::BackendState;
