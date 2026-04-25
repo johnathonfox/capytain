@@ -192,6 +192,12 @@ impl MailBackend for JmapBackend {
 
         Ok(MessageList {
             messages,
+            // JMAP `Email/changes` returns ID-level created/updated/
+            // destroyed sets but no per-message flag delta in the
+            // shape `flag_updates` expects. Surfacing JMAP keyword
+            // changes here lands alongside the `Email/changes` →
+            // `Email/get` follow-up fetch in the JMAP polish pass.
+            flag_updates: Vec::new(),
             new_state: SyncState {
                 folder_id: folder.clone(),
                 backend_state: new_state_token,

@@ -456,9 +456,10 @@ async fn sync_account(email: &str, paths: &DataPaths) -> Result<(), MailcliError
             .await?;
     let duration = start.elapsed();
     println!(
-        "Synced {} new, {} updated, {} removed, {} bodies fetched ({} failed), in {} ms",
+        "Synced {} new, {} updated, {} flag deltas, {} removed, {} bodies fetched ({} failed), in {} ms",
         report.added,
         report.updated,
+        report.flag_updates,
         report.removed,
         report.bodies_fetched,
         report.bodies_failed,

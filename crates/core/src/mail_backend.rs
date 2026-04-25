@@ -29,8 +29,17 @@ use crate::Folder;
 /// The result of a `list_messages` call.
 #[derive(Debug, Clone)]
 pub struct MessageList {
-    /// Headers for every message in the delta.
+    /// Full headers for messages newly appended in the folder since
+    /// the last cursor (UID > cached UIDNEXT on IMAP, JMAP equivalent).
     pub messages: Vec<MessageHeaders>,
+    /// Flag-only updates for already-known messages whose flags have
+    /// changed since the last cursor. On IMAP this is populated by the
+    /// CONDSTORE `UID FETCH ... (UID FLAGS) (CHANGEDSINCE <modseq>)`
+    /// pass — it lets the sync engine apply incremental flag changes
+    /// via `messages::update_flags` without a full header re-fetch.
+    /// Empty on full fetches and on backends that don't surface
+    /// per-message modseq deltas yet (JMAP currently).
+    pub flag_updates: Vec<(MessageId, MessageFlags)>,
     /// The new sync cursor to persist. Hand it back on the next call.
     pub new_state: SyncState,
     /// IDs of messages the server says have disappeared since `since`.
