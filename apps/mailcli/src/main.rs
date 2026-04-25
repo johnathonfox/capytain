@@ -434,35 +434,50 @@ async fn sync_account(email: &str, paths: &DataPaths) -> Result<(), MailcliError
     let conn = paths.open_db().await?;
     let account = resolve_account(&conn, email).await?;
     let backend = open_backend(&account).await?;
-
-    // Find the INBOX. The full sync engine in `capytain-sync` doesn't
-    // know which folder is "the one" for a Phase 0 single-folder sync;
-    // mailcli picks here and hands the chosen folder to `sync_folder`.
-    let folders = backend.list_folders().await?;
-    let inbox = folders
-        .into_iter()
-        .find(|f| {
-            f.role == Some(capytain_core::FolderRole::Inbox) || f.path.eq_ignore_ascii_case("INBOX")
-        })
-        .ok_or_else(|| {
-            MailcliError::Usage("could not find an INBOX folder on this account".into())
-        })?;
-
     let blobs = capytain_storage::BlobStore::new(paths.data_dir.join("blobs"));
 
     let start = Instant::now();
-    let report =
-        capytain_sync::sync_folder(&conn, backend.as_ref(), Some(&blobs), &inbox, Some(200))
-            .await?;
+    let outcomes =
+        capytain_sync::sync_account(&conn, backend.as_ref(), Some(&blobs), Some(200)).await?;
     let duration = start.elapsed();
+
+    // Aggregate counts across every folder we visited; print one
+    // line per folder for visibility on partial failures.
+    let mut total = capytain_sync::SyncReport::default();
+    for outcome in &outcomes {
+        match &outcome.result {
+            Ok(report) => {
+                println!(
+                    "  {}: {} new, {} updated, {} flag deltas, {} removed, {} bodies ({} failed)",
+                    outcome.folder_id.0,
+                    report.added,
+                    report.updated,
+                    report.flag_updates,
+                    report.removed,
+                    report.bodies_fetched,
+                    report.bodies_failed,
+                );
+                total.added += report.added;
+                total.updated += report.updated;
+                total.flag_updates += report.flag_updates;
+                total.removed += report.removed;
+                total.bodies_fetched += report.bodies_fetched;
+                total.bodies_failed += report.bodies_failed;
+            }
+            Err(e) => {
+                println!("  {}: FAILED — {}", outcome.folder_id.0, e);
+            }
+        }
+    }
     println!(
-        "Synced {} new, {} updated, {} flag deltas, {} removed, {} bodies fetched ({} failed), in {} ms",
-        report.added,
-        report.updated,
-        report.flag_updates,
-        report.removed,
-        report.bodies_fetched,
-        report.bodies_failed,
+        "Total: {} new, {} updated, {} flag deltas, {} removed, {} bodies ({} failed) across {} folders in {} ms",
+        total.added,
+        total.updated,
+        total.flag_updates,
+        total.removed,
+        total.bodies_fetched,
+        total.bodies_failed,
+        outcomes.len(),
         duration.as_millis()
     );
     Ok(())
