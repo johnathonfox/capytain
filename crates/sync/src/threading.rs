@@ -156,8 +156,16 @@ pub fn normalize_subject(raw: &str) -> String {
 fn strip_one_prefix(s: &str) -> &str {
     for prefix in ["re:", "fw:", "fwd:"] {
         let plen = prefix.len();
-        if s.len() >= plen && s[..plen].eq_ignore_ascii_case(prefix) {
-            return &s[plen..];
+        // `s.get(..plen)` returns `None` either when `plen` falls
+        // past the end OR when it lands inside a multibyte char
+        // (e.g. subject starts with `’`). Both cases mean "no
+        // prefix matched" — falling through to the next iteration
+        // is correct; a length-only guard followed by `s[..plen]`
+        // would panic on the second case.
+        if let Some(head) = s.get(..plen) {
+            if head.eq_ignore_ascii_case(prefix) {
+                return &s[plen..];
+            }
         }
     }
     s
@@ -181,6 +189,20 @@ mod tests {
     fn normalize_subject_collapses_whitespace() {
         assert_eq!(normalize_subject("  hello   world  "), "hello world");
         assert_eq!(normalize_subject("hello\tworld"), "hello world");
+    }
+
+    #[test]
+    fn normalize_subject_handles_leading_multibyte_char() {
+        // Real-world Robinhood subject crashed `s[..3]` because byte
+        // index 3 lands inside `’` (U+2019, 3 bytes). Regression for
+        // the panic surfaced post-OAuth on a fresh sync.
+        assert_eq!(
+            normalize_subject("We’ve updated our Robinhood Crypto Customer Agreement"),
+            "we’ve updated our robinhood crypto customer agreement",
+        );
+        // Non-ASCII char that happens to coincide with a `re:` prefix
+        // length — confirm we don't false-strip.
+        assert_eq!(normalize_subject("✅ done"), "✅ done");
     }
 
     #[test]
