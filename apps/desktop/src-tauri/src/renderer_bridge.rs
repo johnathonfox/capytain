@@ -84,8 +84,10 @@ pub fn install_servo_renderer<R: Runtime>(
     let servo_renderer = build_servo_renderer(app, &app_handle, Arc::clone(&dispatcher));
 
     let mut renderer: Box<dyn EmailRenderer> = match servo_renderer {
-        Ok(r) => {
+        Ok(mut r) => {
             tracing::info!("capytain-desktop: Servo renderer installed");
+            #[cfg(target_os = "linux")]
+            install_cursor_callback(&mut r, &app_handle);
             Box::new(r)
         }
         Err(e) => {
@@ -207,6 +209,81 @@ fn build_servo_renderer<R: Runtime>(
     _dispatcher: Arc<dyn MainThreadDispatch>,
 ) -> Result<ServoRenderer, Box<dyn std::error::Error>> {
     Err("Servo renderer is not yet implemented on this platform".into())
+}
+
+/// Wire Servo's cursor-change notifications to the Linux GTK
+/// DrawingArea so the OS pointer changes when the user hovers over
+/// links, text runs, resize handles, etc. inside the reader pane.
+///
+/// `notify_cursor_changed` fires from Servo's main-thread paint cycle;
+/// we still bounce through `run_on_main_thread` so we don't depend on
+/// that invariant — the marshalling crosses no boundary when the
+/// caller is already on the GTK thread.
+#[cfg(target_os = "linux")]
+fn install_cursor_callback<R: Runtime>(
+    renderer: &mut ServoRenderer,
+    app_handle: &AppHandle<R>,
+) {
+    let app_handle = app_handle.clone();
+    renderer.on_cursor_change(Box::new(move |cursor| {
+        let css_name = cursor_to_css_name(cursor);
+        let app_handle = app_handle.clone();
+        let _ = app_handle.clone().run_on_main_thread(move || {
+            use gtk::prelude::WidgetExt;
+            let Some(parent) = crate::linux_gtk::parent() else { return };
+            let Some(gdk_window) = parent.drawing_area.window() else { return };
+            let display = gdk::Window::display(&gdk_window);
+            let gdk_cursor = gdk::Cursor::from_name(&display, css_name);
+            gdk_window.set_cursor(gdk_cursor.as_ref());
+        });
+    }));
+}
+
+/// Map Servo's `Cursor` enum to the CSS cursor names that GDK 3's
+/// `gdk_cursor_new_from_name` accepts (the W3C `cursor` property
+/// keywords). Anything GDK doesn't recognize falls back to the
+/// theme's default cursor — so unknown values surface as a no-op
+/// rather than a crash.
+#[cfg(target_os = "linux")]
+fn cursor_to_css_name(cursor: capytain_renderer::Cursor) -> &'static str {
+    use capytain_renderer::Cursor;
+    match cursor {
+        Cursor::None => "none",
+        Cursor::Default => "default",
+        Cursor::Pointer => "pointer",
+        Cursor::ContextMenu => "context-menu",
+        Cursor::Help => "help",
+        Cursor::Progress => "progress",
+        Cursor::Wait => "wait",
+        Cursor::Cell => "cell",
+        Cursor::Crosshair => "crosshair",
+        Cursor::Text => "text",
+        Cursor::VerticalText => "vertical-text",
+        Cursor::Alias => "alias",
+        Cursor::Copy => "copy",
+        Cursor::Move => "move",
+        Cursor::NoDrop => "no-drop",
+        Cursor::NotAllowed => "not-allowed",
+        Cursor::Grab => "grab",
+        Cursor::Grabbing => "grabbing",
+        Cursor::EResize => "e-resize",
+        Cursor::NResize => "n-resize",
+        Cursor::NeResize => "ne-resize",
+        Cursor::NwResize => "nw-resize",
+        Cursor::SResize => "s-resize",
+        Cursor::SeResize => "se-resize",
+        Cursor::SwResize => "sw-resize",
+        Cursor::WResize => "w-resize",
+        Cursor::EwResize => "ew-resize",
+        Cursor::NsResize => "ns-resize",
+        Cursor::NeswResize => "nesw-resize",
+        Cursor::NwseResize => "nwse-resize",
+        Cursor::ColResize => "col-resize",
+        Cursor::RowResize => "row-resize",
+        Cursor::AllScroll => "all-scroll",
+        Cursor::ZoomIn => "zoom-in",
+        Cursor::ZoomOut => "zoom-out",
+    }
 }
 
 /// Auxiliary OS window used on the platforms that don't yet have

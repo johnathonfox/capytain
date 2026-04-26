@@ -40,7 +40,7 @@ use dpi::PhysicalSize;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, WindowHandle};
 use servo::WindowRenderingContext;
 
-use super::delegate::LinkCb;
+use super::delegate::{CursorCb, LinkCb};
 use super::{MainThreadDispatch, RendererError, ServoRenderer};
 
 impl ServoRenderer {
@@ -91,16 +91,19 @@ impl ServoRenderer {
         let rendering_context = Rc::new(rendering_context);
 
         let link_cb: Arc<Mutex<LinkCb>> = Arc::new(Mutex::new(None));
+        let cursor_cb: Arc<Mutex<CursorCb>> = Arc::new(Mutex::new(None));
 
         Self::install_state_on_main_thread(
             rendering_context,
             Arc::clone(&dispatch),
             Arc::clone(&link_cb),
+            Arc::clone(&cursor_cb),
         );
 
         Ok(ServoRenderer {
             dispatch,
             link_cb,
+            cursor_cb,
             next_handle: AtomicU64::new(0),
         })
     }

@@ -17,8 +17,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use servo::{
-    LoadStatus, NavigationRequest, PermissionRequest, RenderingContext, SoftwareRenderingContext,
-    WebView, WebViewDelegate, WindowRenderingContext,
+    Cursor, LoadStatus, NavigationRequest, PermissionRequest, RenderingContext,
+    SoftwareRenderingContext, WebView, WebViewDelegate, WindowRenderingContext,
 };
 
 /// Shared slot for the caller-registered link-click callback.
@@ -29,22 +29,32 @@ use servo::{
 /// link-click.
 pub type LinkCb = Option<Box<dyn FnMut(url::Url) + Send + 'static>>;
 
+/// Shared slot for the caller-registered cursor-change callback.
+/// Same shape and rationale as [`LinkCb`].
+pub type CursorCb = Option<Box<dyn FnMut(Cursor) + Send + 'static>>;
+
 /// The delegate Servo calls back into.
 ///
 /// Constructed with handles to the shared rendering context (so
 /// [`notify_new_frame_ready`](WebViewDelegate::notify_new_frame_ready)
 /// can drive the paint + present cycle without reaching into the outer
-/// renderer) and to the shared link-click callback slot.
+/// renderer) and to the shared link-click / cursor-change callback slots.
 pub struct CapytainDelegate {
     rendering_context: Rc<WindowRenderingContext>,
     link_cb: Arc<Mutex<LinkCb>>,
+    cursor_cb: Arc<Mutex<CursorCb>>,
 }
 
 impl CapytainDelegate {
-    pub fn new(rendering_context: Rc<WindowRenderingContext>, link_cb: Arc<Mutex<LinkCb>>) -> Self {
+    pub fn new(
+        rendering_context: Rc<WindowRenderingContext>,
+        link_cb: Arc<Mutex<LinkCb>>,
+        cursor_cb: Arc<Mutex<CursorCb>>,
+    ) -> Self {
         Self {
             rendering_context,
             link_cb,
+            cursor_cb,
         }
     }
 }
@@ -117,6 +127,18 @@ impl WebViewDelegate for CapytainDelegate {
     fn request_permission(&self, _webview: WebView, request: PermissionRequest) {
         tracing::debug!(feature = ?request.feature(), "servo: denying permission request");
         request.deny();
+    }
+
+    /// Servo asks the host to switch the OS cursor when hover state
+    /// changes (e.g. moving over a link, text run, resize handle).
+    /// Forward to the registered callback so the host widget can
+    /// translate the Servo `Cursor` enum into its native cursor type.
+    fn notify_cursor_changed(&self, _webview: WebView, cursor: Cursor) {
+        if let Ok(mut slot) = self.cursor_cb.lock() {
+            if let Some(cb) = slot.as_mut() {
+                cb(cursor);
+            }
+        }
     }
 
     /// Forward animation-state changes to `tracing` so we can see if

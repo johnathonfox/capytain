@@ -54,7 +54,7 @@ mod macos;
 mod windows;
 
 pub use corpus::{render_html_to_image, CorpusRenderer};
-use delegate::{CapytainDelegate, LinkCb};
+use delegate::{CapytainDelegate, CursorCb, LinkCb};
 
 /// On Linux, force Mesa's llvmpipe software EGL before any GL code
 /// runs. Bypasses the `wp_linux_drm_syncobj_surface_v1` protocol error
@@ -165,7 +165,17 @@ pub enum RendererError {
 pub struct ServoRenderer {
     dispatch: Arc<dyn MainThreadDispatch>,
     link_cb: Arc<Mutex<LinkCb>>,
+    cursor_cb: Arc<Mutex<CursorCb>>,
     next_handle: AtomicU64,
+}
+
+impl ServoRenderer {
+    /// Register a callback fired when Servo wants the host to switch
+    /// the OS cursor (hover over a link, text, resize handle, etc.).
+    /// Replaces any previously-registered cursor callback.
+    pub fn on_cursor_change(&mut self, cb: Box<dyn FnMut(servo::Cursor) + Send + 'static>) {
+        *self.cursor_cb.lock().expect("cursor_cb poisoned") = Some(cb);
+    }
 }
 
 impl ServoRenderer {
@@ -176,6 +186,7 @@ impl ServoRenderer {
         rendering_context: Rc<WindowRenderingContext>,
         dispatch: Arc<dyn MainThreadDispatch>,
         link_cb: Arc<Mutex<LinkCb>>,
+        cursor_cb: Arc<Mutex<CursorCb>>,
     ) {
         let waker: Box<dyn EventLoopWaker> = Box::new(DispatchingWaker {
             dispatch: Arc::clone(&dispatch),
@@ -194,6 +205,7 @@ impl ServoRenderer {
         let delegate = Rc::new(CapytainDelegate::new(
             Rc::clone(&rendering_context),
             Arc::clone(&link_cb),
+            Arc::clone(&cursor_cb),
         ));
 
         let webview: WebView = WebViewBuilder::new(&servo, rendering_context.clone())

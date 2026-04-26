@@ -40,6 +40,12 @@ pub use servo::{
     MainThreadDispatch, RendererError, ServoRenderer,
 };
 
+// Re-export Servo's `Cursor` enum so the desktop crate can register
+// cursor-change callbacks without taking a direct dep on the `servo`
+// crate (it pulls a fairly invasive build-time toolchain).
+#[cfg(feature = "servo")]
+pub use ::servo::Cursor;
+
 // When the `servo` feature is off, we re-export the null renderer so
 // downstream crates can depend on `capytain-renderer` and still have a
 // working `EmailRenderer` implementation for compile checks and tests.
