@@ -531,6 +531,25 @@ fn compose_reader_html(rendered: &RenderedMessage) -> String {
 </head>
 <body>
   <div class="capytain-body">{body_section}</div>
+  <script>
+    // Click forwarder. Servo's `request_navigation` fires on every
+    // navigation Servo initiates, but plain anchor clicks inside a
+    // `data:` URL document don't always make it through Servo's
+    // input pipeline (GTK DrawingArea doesn't auto-forward mouse
+    // events to Servo's input system on Linux). Catching the click
+    // in JS and explicitly setting `window.location.href` triggers
+    // a navigation request that the renderer delegate intercepts
+    // and routes to `webbrowser::open`. The delegate denies the
+    // navigation in-page, so the email content stays put.
+    document.addEventListener('click', function(e) {{
+      var node = e.target;
+      while (node && node.nodeName !== 'A') node = node.parentNode;
+      if (node && node.href) {{
+        e.preventDefault();
+        try {{ window.location.href = node.href; }} catch (err) {{}}
+      }}
+    }}, true);
+  </script>
 </body>
 </html>"#
     )
