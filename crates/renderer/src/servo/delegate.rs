@@ -39,13 +39,13 @@ pub type CursorCb = Option<Box<dyn FnMut(Cursor) + Send + 'static>>;
 /// [`notify_new_frame_ready`](WebViewDelegate::notify_new_frame_ready)
 /// can drive the paint + present cycle without reaching into the outer
 /// renderer) and to the shared link-click / cursor-change callback slots.
-pub struct QSLDelegate {
+pub struct QslDelegate {
     rendering_context: Rc<WindowRenderingContext>,
     link_cb: Arc<Mutex<LinkCb>>,
     cursor_cb: Arc<Mutex<CursorCb>>,
 }
 
-impl QSLDelegate {
+impl QslDelegate {
     pub fn new(
         rendering_context: Rc<WindowRenderingContext>,
         link_cb: Arc<Mutex<LinkCb>>,
@@ -59,7 +59,7 @@ impl QSLDelegate {
     }
 }
 
-impl WebViewDelegate for QSLDelegate {
+impl WebViewDelegate for QslDelegate {
     /// The paint contract documented in `docs/servo-composition.md` §6.1:
     /// when Servo signals a new frame, we must call `webview.paint()` or
     /// the back buffer never gets filled and the surface stays blank.
@@ -156,7 +156,7 @@ impl WebViewDelegate for QSLDelegate {
 
 /// Minimal `WebViewDelegate` for the headless Day 5 corpus harness.
 ///
-/// Same paint contract as [`QSLDelegate`] but against
+/// Same paint contract as [`QslDelegate`] but against
 /// `SoftwareRenderingContext` (CPU-side pixel buffer) rather than
 /// `WindowRenderingContext`. Does not surface link clicks — the corpus
 /// tests don't exercise navigation — and denies every permission and

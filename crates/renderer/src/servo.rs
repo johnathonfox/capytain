@@ -13,7 +13,7 @@
 //! │   • Arc<Mutex<LinkCb>>        │ thread│    • Rc<Servo>             │
 //! │   • AtomicU64 handle counter  │       │    • WebView               │
 //! │                               │       │    • Rc<WindowRenderingCtx>│
-//! │                               │       │    • Rc<QSLDelegate>  │
+//! │                               │       │    • Rc<QslDelegate>  │
 //! └───────────────────────────────┘       └────────────────────────────┘
 //! ```
 //!
@@ -54,7 +54,7 @@ mod macos;
 mod windows;
 
 pub use corpus::{render_html_to_image, CorpusRenderer};
-use delegate::{CursorCb, LinkCb, QSLDelegate};
+use delegate::{CursorCb, LinkCb, QslDelegate};
 
 /// On Linux, force Mesa's llvmpipe software EGL before any GL code
 /// runs. Bypasses the `wp_linux_drm_syncobj_surface_v1` protocol error
@@ -202,7 +202,7 @@ impl ServoRenderer {
                 .build(),
         );
 
-        let delegate = Rc::new(QSLDelegate::new(
+        let delegate = Rc::new(QslDelegate::new(
             Rc::clone(&rendering_context),
             Arc::clone(&link_cb),
             Arc::clone(&cursor_cb),
@@ -320,7 +320,7 @@ struct MainThreadState {
     servo: Rc<Servo>,
     webview: WebView,
     rendering_context: Rc<WindowRenderingContext>,
-    _delegate: Rc<QSLDelegate>,
+    _delegate: Rc<QslDelegate>,
 }
 
 // ---------------------------------------------------------------------------
