@@ -35,8 +35,9 @@ mod servo;
 
 #[cfg(feature = "servo")]
 pub use servo::{
-    apply_nvidia_wayland_workaround, render_html_to_image, CorpusRenderer, MainThreadDispatch,
-    RendererError, ServoRenderer,
+    apply_nvidia_wayland_workaround, forward_pointer_button_press, forward_pointer_button_release,
+    forward_pointer_left_viewport, forward_pointer_move, render_html_to_image, CorpusRenderer,
+    MainThreadDispatch, RendererError, ServoRenderer,
 };
 
 // When the `servo` feature is off, we re-export the null renderer so

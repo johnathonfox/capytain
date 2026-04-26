@@ -145,6 +145,24 @@ impl LinuxGtkParent {
         // clears the DrawingArea to the theme background on every
         // draw cycle and Servo's paint disappears.
         drawing_area.set_app_paintable(true);
+        // GTK widgets focus on click only when `can_focus` is set;
+        // without this, keyboard focus stays on the webview and
+        // never reaches the Servo surface.
+        drawing_area.set_can_focus(true);
+        // Subscribe the DrawingArea to the pointer events we
+        // forward to Servo. By default GTK widgets only receive a
+        // narrow set of events (expose, configure, etc.); button-
+        // press / motion / leave have to be opted into explicitly,
+        // otherwise the X11/Wayland event mask filters them out
+        // before they reach signal handlers.
+        drawing_area.add_events(
+            gdk::EventMask::BUTTON_PRESS_MASK
+                | gdk::EventMask::BUTTON_RELEASE_MASK
+                | gdk::EventMask::POINTER_MOTION_MASK
+                | gdk::EventMask::SCROLL_MASK
+                | gdk::EventMask::LEAVE_NOTIFY_MASK
+                | gdk::EventMask::ENTER_NOTIFY_MASK,
+        );
         // Pin the DrawingArea to the top-left of the overlay.
         // Margins push it to the right slot; without
         // `Align::Start`, GtkOverlay would center / fill the
@@ -157,6 +175,31 @@ impl LinuxGtkParent {
         // a visible Servo surface would be a flash of dead pixels.
         drawing_area.set_margin_start(10_000);
         drawing_area.set_margin_top(0);
+
+        // Wire pointer events into Servo's input pipeline. GDK
+        // delivers `(x, y)` in widget-local coordinates in device
+        // pixels — the same units `WebViewPoint::Device` expects.
+        // Each handler returns `Stop` so GTK doesn't bubble the
+        // event back up to the webview underneath.
+        drawing_area.connect_button_press_event(|_w, ev| {
+            let (x, y) = ev.position();
+            capytain_renderer::forward_pointer_button_press(ev.button(), x as f32, y as f32);
+            glib::Propagation::Stop
+        });
+        drawing_area.connect_button_release_event(|_w, ev| {
+            let (x, y) = ev.position();
+            capytain_renderer::forward_pointer_button_release(ev.button(), x as f32, y as f32);
+            glib::Propagation::Stop
+        });
+        drawing_area.connect_motion_notify_event(|_w, ev| {
+            let (x, y) = ev.position();
+            capytain_renderer::forward_pointer_move(x as f32, y as f32);
+            glib::Propagation::Stop
+        });
+        drawing_area.connect_leave_notify_event(|_w, _ev| {
+            capytain_renderer::forward_pointer_left_viewport();
+            glib::Propagation::Stop
+        });
 
         overlay.add_overlay(&drawing_area);
 

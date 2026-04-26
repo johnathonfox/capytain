@@ -39,8 +39,9 @@ use std::sync::{Arc, Mutex};
 
 use capytain_core::{ColorScheme, EmailRenderer, RenderHandle, RenderPolicy};
 use servo::{
-    EventLoopWaker, Preferences, RenderingContext, Servo, ServoBuilder, WebView, WebViewBuilder,
-    WindowRenderingContext,
+    DevicePoint, EventLoopWaker, InputEvent, MouseButton, MouseButtonAction, MouseButtonEvent,
+    MouseLeftViewportEvent, MouseMoveEvent, Preferences, RenderingContext, Servo, ServoBuilder,
+    WebView, WebViewBuilder, WebViewPoint, WindowRenderingContext,
 };
 
 mod corpus;
@@ -308,6 +309,88 @@ struct MainThreadState {
     webview: WebView,
     rendering_context: Rc<WindowRenderingContext>,
     _delegate: Rc<CapytainDelegate>,
+}
+
+// ---------------------------------------------------------------------------
+// Input event forwarding
+// ---------------------------------------------------------------------------
+//
+// Servo's WebView doesn't auto-receive input from a host-supplied
+// rendering surface (`WindowRenderingContext` is paint-only). The
+// embedder is responsible for translating native pointer/keyboard
+// events into [`InputEvent`] and calling `WebView::notify_input_event`.
+//
+// On the desktop Linux build the host widget is a `gtk::DrawingArea`
+// owned by `linux_gtk::LinuxGtkParent`. Its `button-press-event`,
+// `button-release-event`, `motion-notify-event`, and `leave-notify-event`
+// handlers call into these helpers, which:
+//
+// 1. Are public free functions so the desktop crate doesn't need to
+//    pull `servo`'s internal embedder-traits types into scope.
+// 2. Run only on the main thread — they read `MAIN_THREAD_STATE`
+//    directly without going through `MainThreadDispatch`. The GTK
+//    signal handlers fire on the main thread by definition, so this
+//    is sound.
+// 3. Are no-ops if the renderer isn't installed (ServoRenderer never
+//    constructed, install_state_on_main_thread never called).
+
+/// Forward a pointer-button press at device-pixel coordinates `(x, y)`
+/// (relative to the WebView's surface) to Servo. `button` is a GDK
+/// button code (1=left, 2=middle, 3=right).
+pub fn forward_pointer_button_press(button: u32, x: f32, y: f32) {
+    forward_button(button, MouseButtonAction::Down, x, y);
+}
+
+/// Forward a pointer-button release. See [`forward_pointer_button_press`].
+pub fn forward_pointer_button_release(button: u32, x: f32, y: f32) {
+    forward_button(button, MouseButtonAction::Up, x, y);
+}
+
+/// Forward a pointer-move event at device-pixel coordinates `(x, y)`.
+pub fn forward_pointer_move(x: f32, y: f32) {
+    let event = InputEvent::MouseMove(MouseMoveEvent::new(WebViewPoint::Device(
+        DevicePoint::new(x, y),
+    )));
+    forward(event);
+}
+
+/// Forward a "pointer left the surface" event. The host widget calls
+/// this on `leave-notify-event` so Servo can reset hover state, drop
+/// any in-flight drag, and stop animating the cursor.
+pub fn forward_pointer_left_viewport() {
+    let event = InputEvent::MouseLeftViewport(MouseLeftViewportEvent {
+        focus_moving_to_another_iframe: false,
+    });
+    forward(event);
+}
+
+fn forward_button(button: u32, action: MouseButtonAction, x: f32, y: f32) {
+    // GDK buttons: 1=left, 2=middle, 3=right, 8=back, 9=forward.
+    // Servo's `MouseButton::from(u64)` uses 0=left, 1=middle, 2=right
+    // — different numbering, so map explicitly rather than rely on
+    // implicit conversion.
+    let mapped = match button {
+        1 => MouseButton::Left,
+        2 => MouseButton::Middle,
+        3 => MouseButton::Right,
+        8 => MouseButton::Back,
+        9 => MouseButton::Forward,
+        other => MouseButton::Other(other as u16),
+    };
+    let event = InputEvent::MouseButton(MouseButtonEvent::new(
+        action,
+        mapped,
+        WebViewPoint::Device(DevicePoint::new(x, y)),
+    ));
+    forward(event);
+}
+
+fn forward(event: InputEvent) {
+    MAIN_THREAD_STATE.with(|cell| {
+        if let Some(state) = cell.borrow().as_ref() {
+            state.webview.notify_input_event(event);
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
