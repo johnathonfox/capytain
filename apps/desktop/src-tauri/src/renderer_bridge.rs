@@ -84,8 +84,13 @@ pub fn install_servo_renderer<R: Runtime>(
     let servo_renderer = build_servo_renderer(app, &app_handle, Arc::clone(&dispatcher));
 
     let mut renderer: Box<dyn EmailRenderer> = match servo_renderer {
-        Ok(mut r) => {
+        Ok(r) => {
             tracing::info!("capytain-desktop: Servo renderer installed");
+            // The cursor callback is only wired on Linux; the `r`
+            // binding stays immutable on macOS / Windows so we cfg
+            // the mut rebind here rather than on the match arm.
+            #[cfg(target_os = "linux")]
+            let mut r = r;
             #[cfg(target_os = "linux")]
             install_cursor_callback(&mut r, &app_handle);
             Box::new(r)

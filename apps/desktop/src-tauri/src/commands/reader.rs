@@ -12,7 +12,6 @@
 
 use capytain_core::RenderPolicy;
 use capytain_ipc::IpcResult;
-use dpi;
 use serde::Deserialize;
 use tauri::{AppHandle, Runtime, State};
 
@@ -104,7 +103,13 @@ pub async fn open_external_url(input: OpenExternalUrlInput) -> IpcResult<()> {
     Ok(())
 }
 
+/// `dead_code` allow: on non-Linux / no-Servo builds the consumer
+/// of these fields is `cfg`'d out, but serde still needs to see the
+/// fields to deserialize the IPC payload — the platforms that
+/// don't render Servo also send no `reader_set_position` calls in
+/// practice, but Tauri registers the command unconditionally.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct ReaderSetPositionInput {
     /// Bounding rect of the `.reader-body-fill` slot in window-
     /// relative CSS pixels. CSS rect coordinates can be negative
@@ -157,7 +162,7 @@ pub async fn reader_set_position(
         if w > 1 && h > 1 {
             let mut slot = state.servo_renderer.lock().await;
             if let Some(renderer) = slot.as_mut() {
-                renderer.resize(dpi::PhysicalSize::new(w as u32, h as u32));
+                renderer.resize(::dpi::PhysicalSize::new(w as u32, h as u32));
             }
         }
     }
