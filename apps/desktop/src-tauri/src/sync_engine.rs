@@ -479,7 +479,14 @@ async fn bootstrap_account(app: &AppHandle, account: &Account) -> Result<Vec<Fol
 
     let mut succeeded = Vec::with_capacity(outcomes.len());
     for (folder, result) in outcomes {
-        emit_folder_outcome(app, &account.id, &folder.id, &result, /* live = */ false).await;
+        emit_folder_outcome(
+            app,
+            &account.id,
+            &folder.id,
+            &result,
+            /* live = */ false,
+        )
+        .await;
         if result.is_ok() {
             succeeded.push(folder);
         }

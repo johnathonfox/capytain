@@ -313,11 +313,19 @@ pub fn App() -> Element {
 
     let onmousedown_sidebar = move |e: Event<MouseData>| {
         e.prevent_default();
-        drag.set(Some((SplitTarget::Sidebar, e.client_coordinates().x, sidebar_w())));
+        drag.set(Some((
+            SplitTarget::Sidebar,
+            e.client_coordinates().x,
+            sidebar_w(),
+        )));
     };
     let onmousedown_list = move |e: Event<MouseData>| {
         e.prevent_default();
-        drag.set(Some((SplitTarget::List, e.client_coordinates().x, list_w())));
+        drag.set(Some((
+            SplitTarget::List,
+            e.client_coordinates().x,
+            list_w(),
+        )));
     };
 
     let grid_style = format!(
@@ -453,9 +461,10 @@ fn StatusBar(status: Signal<SyncStatus>) -> Element {
             };
             ("status-dot ok", format!("{prefix} {folder}{counts}"))
         }
-        SyncStatus::Failed { folder, error } => {
-            ("status-dot error", format!("Sync failed: {folder} — {error}"))
-        }
+        SyncStatus::Failed { folder, error } => (
+            "status-dot error",
+            format!("Sync failed: {folder} — {error}"),
+        ),
     };
 
     rsx! {
@@ -1246,11 +1255,7 @@ fn SidebarMailboxRow(
 }
 
 #[component]
-fn SidebarLabelRow(
-    folder: Folder,
-    account_id: AccountId,
-    selection: Signal<Selection>,
-) -> Element {
+fn SidebarLabelRow(folder: Folder, account_id: AccountId, selection: Signal<Selection>) -> Element {
     let is_selected = selection
         .read()
         .folder
@@ -1473,8 +1478,8 @@ fn MessageListV2(folder: FolderId, selection: Signal<Selection>, sync_tick: Sync
     let folder_for_fetch = folder.clone();
     let tick_value = sync_tick();
     let limit_value = visible_limit();
-    let page = use_resource(
-        use_reactive!(|folder_for_fetch, tick_value, limit_value| async move {
+    let page = use_resource(use_reactive!(
+        |folder_for_fetch, tick_value, limit_value| async move {
             let _ = tick_value;
             invoke::<MessagePage>(
                 "messages_list",
@@ -1488,8 +1493,8 @@ fn MessageListV2(folder: FolderId, selection: Signal<Selection>, sync_tick: Sync
                 }),
             )
             .await
-        }),
-    );
+        }
+    ));
 
     // Lazy-fetch new IMAP messages whenever this folder is opened.
     // Fires once per `folder` value change. The Tauri command emits

@@ -360,9 +360,9 @@ pub fn forward_pointer_button_release(button: u32, x: f32, y: f32) {
 
 /// Forward a pointer-move event at device-pixel coordinates `(x, y)`.
 pub fn forward_pointer_move(x: f32, y: f32) {
-    let event = InputEvent::MouseMove(MouseMoveEvent::new(WebViewPoint::Device(
-        DevicePoint::new(x, y),
-    )));
+    let event = InputEvent::MouseMove(MouseMoveEvent::new(WebViewPoint::Device(DevicePoint::new(
+        x, y,
+    ))));
     forward(event);
 }
 

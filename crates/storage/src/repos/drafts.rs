@@ -172,9 +172,7 @@ fn row_to_draft(row: &Row) -> Result<Draft, StorageError> {
         "markdown" => DraftBodyKind::Markdown,
         _ => DraftBodyKind::Plain,
     };
-    let in_reply_to = row
-        .get_optional_str("in_reply_to")?
-        .map(|s| s.to_string());
+    let in_reply_to = row.get_optional_str("in_reply_to")?.map(|s| s.to_string());
     Ok(Draft {
         id: DraftId(row.get_str("id")?.to_string()),
         account_id: AccountId(row.get_str("account_id")?.to_string()),

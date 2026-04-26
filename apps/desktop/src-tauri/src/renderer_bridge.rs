@@ -220,18 +220,19 @@ fn build_servo_renderer<R: Runtime>(
 /// that invariant — the marshalling crosses no boundary when the
 /// caller is already on the GTK thread.
 #[cfg(target_os = "linux")]
-fn install_cursor_callback<R: Runtime>(
-    renderer: &mut ServoRenderer,
-    app_handle: &AppHandle<R>,
-) {
+fn install_cursor_callback<R: Runtime>(renderer: &mut ServoRenderer, app_handle: &AppHandle<R>) {
     let app_handle = app_handle.clone();
     renderer.on_cursor_change(Box::new(move |cursor| {
         let css_name = cursor_to_css_name(cursor);
         let app_handle = app_handle.clone();
         let _ = app_handle.clone().run_on_main_thread(move || {
             use gtk::prelude::WidgetExt;
-            let Some(parent) = crate::linux_gtk::parent() else { return };
-            let Some(gdk_window) = parent.drawing_area.window() else { return };
+            let Some(parent) = crate::linux_gtk::parent() else {
+                return;
+            };
+            let Some(gdk_window) = parent.drawing_area.window() else {
+                return;
+            };
             let display = gdk::Window::display(&gdk_window);
             let gdk_cursor = gdk::Cursor::from_name(&display, css_name);
             gdk_window.set_cursor(gdk_cursor.as_ref());
