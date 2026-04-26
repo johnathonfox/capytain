@@ -17,7 +17,11 @@ reload_html = true
 watch_path = ["src", "assets"]
 
 [web.resource]
-style = ["assets/tailwind.css"]
+# Stylesheet is wired via the `asset!()` macro in `src/app.rs` so dx
+# 0.7 actually copies the file (the `style = [...]` array injects a
+# `<link>` tag but doesn't bundle the file). Leaving these arrays
+# empty avoids the duplicate `<link>` injection.
+style = []
 script = []
 
 [web.resource.dev]

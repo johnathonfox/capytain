@@ -61,3 +61,26 @@ No action required until someone's sitting in front of the app and paying attent
 **Acceptance criteria:**
 
 - Branch protection rule on `main` requires the four current checks: `Check (ubuntu-latest)`, `Check (windows-latest)`, `cargo-deny`, `reuse lint`. No required reviews (solo-maintainer project). Force-pushes and deletions blocked. `enforce_admins: false` so the maintainer can still force-merge in genuine emergencies.
+
+---
+
+## Servo reader pane is disabled (overlay positioning unsolved)
+
+**State:** `renderer_bridge::install_servo_renderer` is commented out in `apps/desktop/src-tauri/src/main.rs`'s setup hook. The Servo crate stays linked, the `reader_render` IPC command still exists but is a no-op (the renderer slot is `None`). Email body rendering falls through the Dioxus reader pane's plaintext / sanitized-HTML fallback path while this is unresolved.
+
+**Why it's a "known issue" rather than fixed:** the existing `linux_gtk` module reparents Servo's `GtkDrawingArea` as a *sibling* of the Tauri webview inside the `GtkApplicationWindow`. That gives Servo a fixed ~720px horizontal slice of the window — invisible to CSS, immovable from the Dioxus side. Once the Phase 2 Week 16 redesign moved to a 200px / 280px / 1fr CSS-grid shell, the third pane started fighting Servo for screen space and lost.
+
+The proper fix is *coordinate bridging*:
+
+1. Wrap the Tauri webview in a `GtkOverlay`; add Servo's drawing area as an overlay child.
+2. In Dioxus, watch the reader column's `getBoundingClientRect()` (`ResizeObserver` + post-layout effect).
+3. Push those `(x, y, w, h)` values to Rust over a Tauri event.
+4. Update Servo's `gtk_widget_set_margin_*` (or `GtkFixed` allocation) to match every change.
+
+That's its own focused PR. Estimated 200–400 LOC of careful glue plus edge cases (window resize, sidebar collapse, devtools open, font-size change, scroll). Once stable, the renderer pane lives precisely inside the third grid track regardless of layout.
+
+**Acceptance criteria:**
+
+1. Reader pane visually contained within the Dioxus third grid track at the 1280×800 default size and at every resize between 800-wide and 2560-wide; no native widget bleeds beyond the column.
+2. Resize the window 100 times in a row in dev — no flicker, no off-by-one gaps between the CSS column edge and Servo's drawing area.
+3. Servo install line uncommented in `main.rs`; this `KNOWN_ISSUES.md` entry deleted in the same PR.

@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use capytain_core::{AccountId, EmailRenderer, MailBackend};
 use capytain_storage::TursoConn;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 /// Long-lived state attached to the Tauri app via `manage`.
 ///
@@ -53,6 +53,15 @@ pub struct AppState {
     /// `Send + Sync`: trait methods take `&mut self`, so exclusive
     /// access is required.
     pub servo_renderer: Mutex<Option<Box<dyn EmailRenderer>>>,
+
+    /// Fired by the `ui_ready` IPC command once the Dioxus app has
+    /// mounted in the webview. The sync engine awaits this (with a
+    /// short safety timeout) before its bootstrap pass so the
+    /// initial paint isn't competing with IMAP CONNECT + LIST +
+    /// SELECT churn for tokio worker threads. `Notify` buffers a
+    /// single permit, so the call ordering between the UI signal
+    /// and the engine's wait is irrelevant.
+    pub ui_ready: Arc<Notify>,
 }
 
 impl AppState {
@@ -66,6 +75,7 @@ impl AppState {
             backends: Mutex::new(HashMap::new()),
             data_dir,
             servo_renderer: Mutex::new(None),
+            ui_ready: Arc::new(Notify::new()),
         }
     }
 }

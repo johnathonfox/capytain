@@ -87,12 +87,30 @@ fn main() {
                 .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             app.manage(state);
 
-            // Install the Servo renderer once state is live. The
-            // renderer attaches to an auxiliary "servo-reader" window
-            // and stays on the main thread for its entire lifetime;
-            // all trait calls marshal via `TauriDispatcher`.
-            #[cfg(feature = "servo")]
-            renderer_bridge::install_servo_renderer(app)?;
+            // Servo install temporarily disabled during the Phase 2
+            // Week 16 UI redesign. The current `linux_gtk`
+            // reparenting strategy makes Servo a sibling GTK widget
+            // of the Tauri webview — it permanently occupies ~720px
+            // of window width, which collides with the new
+            // CSS-grid three-pane shell (the third pane gets
+            // squeezed into whatever the webview leaves over).
+            //
+            // The proper fix is option 1 from the design discussion:
+            // wrap the webview in a `GtkOverlay`, position Servo as
+            // an overlay child, and sync its allocation to the
+            // reader column's `getBoundingClientRect()` via a Tauri
+            // event on every layout change. That's its own focused
+            // PR — see `KNOWN_ISSUES.md` "Servo overlay positioning"
+            // and the `mod renderer_bridge` doc for the seam point.
+            // Until then, the `reader_render` IPC command exists
+            // but is a no-op (the renderer slot is None), and email
+            // body rendering is handled inline by the Dioxus reader
+            // pane's plaintext / sanitized-HTML fallback path.
+            //
+            // To re-enable for one-off Servo testing during the
+            // redesign, uncomment the line below.
+            // #[cfg(feature = "servo")]
+            // renderer_bridge::install_servo_renderer(app)?;
 
             // Phase 1 Week 10: kick off a background sync of every
             // configured account so the UI sees fresh mail without the
@@ -104,6 +122,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::ui_ready,
             commands::accounts::accounts_list,
             commands::folders::folders_list,
             commands::messages::messages_list,
@@ -113,7 +132,14 @@ fn main() {
             commands::messages::messages_move,
             commands::messages::messages_delete,
             commands::messages::messages_get,
+            commands::messages::messages_load_older,
+            commands::messages::messages_refresh_folder,
+            commands::drafts::drafts_save,
+            commands::drafts::drafts_load,
+            commands::drafts::drafts_list,
+            commands::drafts::drafts_delete,
             commands::reader::reader_render,
+            commands::reader::open_external_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Capytain");

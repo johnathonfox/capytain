@@ -101,6 +101,32 @@ pub trait MailBackend: Send + Sync {
         limit: Option<u32>,
     ) -> Result<MessageList, MailError>;
 
+    /// Fetch a batch of headers strictly **older** than the
+    /// caller's anchor cursor. Used by the desktop's "Load older
+    /// messages" pager to walk back through the historical tail
+    /// past the bounded initial-sync window.
+    ///
+    /// `before_anchor` is an opaque, backend-specific cursor:
+    /// - IMAP: lowest UID currently synced for the folder. The
+    ///   adapter does `UID FETCH <before-limit>:<before-1>` to get
+    ///   the next slice.
+    /// - JMAP: lowest `receivedAt` epoch-second of any synced
+    ///   message; adapter passes through to `Email/query`'s
+    ///   `before` filter.
+    ///
+    /// Returns up to `limit` headers. An empty `Ok(Vec::new())`
+    /// means the historical tail is exhausted (or the backend
+    /// can't paginate older). Default impl returns empty so any
+    /// backend that doesn't override stays compilable.
+    async fn fetch_older_headers(
+        &self,
+        _folder: &FolderId,
+        _before_anchor: u64,
+        _limit: u32,
+    ) -> Result<Vec<MessageHeaders>, MailError> {
+        Ok(Vec::new())
+    }
+
     /// Fetch the full body of a single message.
     async fn fetch_message(&self, id: &MessageId) -> Result<MessageBody, MailError>;
 

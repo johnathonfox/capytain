@@ -23,9 +23,9 @@ pub use error::{IpcError, IpcErrorKind, IpcResult};
 // Re-export the domain types the UI speaks in. These already derive
 // serde in `capytain-core`, so they cross the IPC boundary as-is.
 pub use capytain_core::{
-    Account, AccountId, Attachment, AttachmentRef, BackendKind, DraftId, EmailAddress, Folder,
-    FolderId, FolderRole, MessageBody, MessageFlags, MessageHeaders, MessageId, SyncState,
-    ThreadId,
+    Account, AccountId, Attachment, AttachmentRef, BackendKind, Draft, DraftAttachment,
+    DraftBodyKind, DraftId, EmailAddress, Folder, FolderId, FolderRole, MessageBody, MessageFlags,
+    MessageHeaders, MessageId, SyncState, ThreadId,
 };
 
 use chrono::{DateTime, Utc};

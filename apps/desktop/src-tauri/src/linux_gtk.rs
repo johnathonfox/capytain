@@ -5,6 +5,14 @@
 // `docs/week-6-day-4-gtk-integration.md` step 2 for the workspace-
 // wide `forbid → deny` rationale.
 
+// Phase 2 Week 16 — module orphaned while the Servo install path is
+// disabled in `main.rs` setup. Kept in tree because the GTK
+// reparenting helpers will be reused once the overlay-positioning
+// fix lands (just wrapped in a `GtkOverlay` instead of attached as
+// a sibling). See `docs/KNOWN_ISSUES.md` "Servo reader pane is
+// disabled".
+#![allow(dead_code)]
+
 //! Linux GTK child-widget integration for the Servo reader pane.
 //!
 //! Tauri 2 on Linux renders its main window as a

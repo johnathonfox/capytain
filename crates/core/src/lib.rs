@@ -18,6 +18,7 @@
 //!   The Servo-backed implementation lives in `capytain-renderer`.
 
 pub mod account;
+pub mod draft;
 pub mod error;
 pub mod folder;
 pub mod ids;
@@ -27,6 +28,7 @@ pub mod renderer;
 pub mod sync_state;
 
 pub use account::{Account, BackendKind};
+pub use draft::{Draft, DraftAttachment, DraftBodyKind};
 pub use error::{MailError, StorageError};
 pub use folder::{Folder, FolderRole};
 pub use ids::{AccountId, AttachmentRef, DraftId, FolderId, MessageId, ThreadId};
