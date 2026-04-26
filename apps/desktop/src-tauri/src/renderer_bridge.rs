@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+// Phase 2 Week 16 — Servo install path is temporarily disabled in
+// `main.rs` setup so the Dioxus three-pane shell isn't fighting
+// Servo's reparented GTK widget for screen real estate. All the
+// helpers here remain in tree, ready to wire back up once the
+// `GtkOverlay` + `getBoundingClientRect`-driven positioning fix
+// lands. See `docs/KNOWN_ISSUES.md` "Servo reader pane is disabled".
+#![allow(dead_code)]
+
 //! Bridge between Tauri's AppHandle and `capytain_renderer`.
 //!
 //! Two pieces live here:

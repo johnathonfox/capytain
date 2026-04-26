@@ -375,6 +375,77 @@ impl MailBackend for ImapBackend {
         })
     }
 
+    /// Pager: fetch headers for UIDs strictly below `before_anchor`,
+    /// up to `limit` messages. Used by the desktop's "Load older"
+    /// button to backfill messages past the bounded initial sync
+    /// window.
+    ///
+    /// `before_anchor` is the lowest UID the caller currently has
+    /// for this folder (cast through `u64` for trait neutrality;
+    /// IMAP UIDs always fit in `u32`). When `before_anchor <= 1`
+    /// the historical tail is already exhausted so we short-circuit
+    /// without dialing the server.
+    async fn fetch_older_headers(
+        &self,
+        folder: &FolderId,
+        before_anchor: u64,
+        limit: u32,
+    ) -> Result<Vec<MessageHeaders>, MailError> {
+        if before_anchor <= 1 || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let before = u32::try_from(before_anchor).map_err(|_| {
+            MailError::Protocol(format!("before_anchor {before_anchor} exceeds IMAP UID range"))
+        })?;
+
+        let mut session = self.session.lock().await;
+
+        let mbox = session
+            .select(&folder.0)
+            .await
+            .map_err(|e| MailError::Protocol(format!("SELECT {}: {e}", folder.0)))?;
+        let uidvalidity = mbox
+            .uid_validity
+            .ok_or_else(|| MailError::Protocol("SELECT missing UIDVALIDITY".into()))?;
+
+        let high = before.saturating_sub(1);
+        let low = before.saturating_sub(limit).max(1);
+        // IMAP UID FETCH accepts inverted ranges; the server
+        // returns whatever exists in the range (deleted UIDs are
+        // simply absent from the response).
+        let uid_set = format!("{low}:{high}");
+        let query = if self.gmail_ext {
+            "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE BODY.PEEK[HEADER] X-GM-LABELS)"
+        } else {
+            "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE BODY.PEEK[HEADER])"
+        };
+        let mut fetches = session
+            .uid_fetch(&uid_set, query)
+            .await
+            .map_err(|e| MailError::Protocol(format!("UID FETCH {uid_set} {query}: {e}")))?;
+
+        let mut messages = Vec::new();
+        while let Some(item) = fetches.next().await {
+            let fetch = item.map_err(|e| MailError::Protocol(format!("FETCH entry: {e}")))?;
+            match fetch_to_headers(&fetch, folder, uidvalidity, &self.account) {
+                Ok(Some(h)) => messages.push(h),
+                Ok(None) => {
+                    debug!(message = ?fetch.message, "older FETCH missing UID — skipping");
+                }
+                Err(e) => {
+                    warn!(error = %e, message = ?fetch.message, "older FETCH translate failed");
+                }
+            }
+        }
+        debug!(
+            folder = %folder.0,
+            range = %uid_set,
+            count = messages.len(),
+            "IMAP fetch_older_headers"
+        );
+        Ok(messages)
+    }
+
     async fn fetch_raw_message(&self, id: &MessageId) -> Result<Vec<u8>, MailError> {
         let r = MessageRef::decode(id)?;
         let mut session = self.session.lock().await;
@@ -703,7 +774,8 @@ fn name_to_folder(name: &async_imap::types::Name, account: &AccountId) -> Folder
             .iter()
             .map(|a| format!("{a:?}"))
             .collect::<Vec<_>>(),
-    );
+    )
+    .or_else(|| role_from_canonical_name(&path));
 
     Folder {
         id: FolderId(path.clone()),
@@ -714,6 +786,20 @@ fn name_to_folder(name: &async_imap::types::Name, account: &AccountId) -> Folder
         unread_count: 0,
         total_count: 0,
         parent: None,
+    }
+}
+
+/// Map RFC 3501's reserved "INBOX" mailbox name to
+/// [`FolderRole::Inbox`] when the server didn't include `\Inbox`
+/// SPECIAL-USE. Gmail in particular omits the attribute because
+/// INBOX is implicit per spec; without this fallback the watcher
+/// pool prioritizer doesn't recognize INBOX as a high-priority
+/// folder.
+fn role_from_canonical_name(path: &str) -> Option<FolderRole> {
+    if path.eq_ignore_ascii_case("INBOX") {
+        Some(FolderRole::Inbox)
+    } else {
+        None
     }
 }
 

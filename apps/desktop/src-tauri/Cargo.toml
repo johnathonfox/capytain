@@ -48,6 +48,7 @@ tauri-plugin-notification = "2"
 # drops Servo (Windows CI path).
 capytain-renderer = { workspace = true }
 async-trait = { workspace = true }
+chrono = { workspace = true }
 # `rustls` is a transitive dep (servo + tokio-rustls + hyper-rustls
 # all pull it in). Once Servo joins the graph both `ring` and
 # `aws-lc-rs` crypto providers end up enabled at the Cargo feature
@@ -71,6 +72,9 @@ serde = { workspace = true }
 tauri = { workspace = true, features = ["devtools", "unstable"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
+# Used by the `open_external_url` IPC command to launch URLs (clicked
+# in the reader pane's email iframe) in the user's OS default browser.
+webbrowser = { workspace = true }
 
 # Linux-only: the child-widget integration for the Servo reader pane.
 # See `apps/desktop/src-tauri/src/linux_gtk.rs` and

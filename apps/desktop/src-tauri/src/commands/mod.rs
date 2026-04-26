@@ -15,6 +15,25 @@
 //! them.
 
 pub mod accounts;
+pub mod drafts;
 pub mod folders;
 pub mod messages;
 pub mod reader;
+
+use capytain_ipc::IpcResult;
+use tauri::State;
+
+use crate::state::AppState;
+
+/// `ui_ready` — the Dioxus app calls this once the root component
+/// has mounted. The sync engine awaits this (with a 10s safety
+/// timeout) before kicking off its IMAP/JMAP bootstrap pass, so the
+/// initial UI paint isn't competing with sync traffic for runtime
+/// resources. Returns `Ok(())` immediately; the work is the
+/// `notify_one` side-effect.
+#[tauri::command]
+pub async fn ui_ready(state: State<'_, AppState>) -> IpcResult<()> {
+    state.ui_ready.notify_one();
+    tracing::info!("ui_ready: signalled sync engine");
+    Ok(())
+}

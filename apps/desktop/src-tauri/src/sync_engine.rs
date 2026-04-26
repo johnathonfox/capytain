@@ -23,11 +23,12 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use capytain_core::{Account, AccountId, BackendEvent, BackendKind, Folder, FolderId};
+use capytain_core::{Account, AccountId, BackendEvent, BackendKind, Folder, FolderId, FolderRole};
 use capytain_ipc::SyncEvent;
 use capytain_storage::{repos, BlobStore};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::backend_factory;
@@ -51,32 +52,81 @@ const DEBOUNCE: Duration = Duration::from_millis(500);
 /// `tx.send`.
 const EVENT_CHANNEL_BUFFER: usize = 64;
 
+/// Cap on simultaneous IMAP IDLE connections per account. Gmail
+/// rejects past ~15, Outlook/Yahoo around 16, iCloud as low as 5;
+/// 10 is the safe ceiling that leaves headroom for the cached
+/// foreground sync connection (`backend_factory::get_or_open`)
+/// and a transient outbox-drain dial. Folders past the cap fall
+/// back to the [`POLL_INTERVAL`] poller below. Priority is by
+/// [`FolderRole`] (Inbox / All / Sent / Drafts / Trash / Spam …)
+/// so well-known roles always get push.
+const MAX_IMAP_WATCHERS_PER_ACCOUNT: usize = 10;
+
+/// Cadence of the per-account poller for folders that didn't fit
+/// inside the watcher pool. 2 minutes balances responsiveness for
+/// label-only changes against IMAP server politeness — a SELECT +
+/// CONDSTORE pass on 20 folders every 2 min is well under any
+/// throttle threshold we've seen in practice.
+const POLL_INTERVAL: Duration = Duration::from_secs(120);
+
 /// Spawn the engine task. Returns immediately; the task runs in the
 /// background until the app exits.
-pub fn spawn(app: AppHandle) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+///
+/// Uses `tauri::async_runtime::spawn` rather than `tokio::spawn`
+/// because this function runs inside Tauri's synchronous `setup`
+/// closure — there is no ambient tokio runtime there. Tauri's
+/// runtime is tokio-backed, so once the engine task is running
+/// inside it the inner `tokio::spawn` / `tokio::select` calls in
+/// the watchers and reactive loop work normally.
+pub fn spawn(app: AppHandle) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
         if let Err(e) = run(&app).await {
             warn!("sync engine fatal: {e}");
         }
     })
 }
 
+/// Hard ceiling on the wait for `ui_ready`. Without this, a panic in
+/// the wasm bundle (or a missing `ui_ready` invoke) would silently
+/// disable sync forever. 10s comfortably covers a cold Dioxus mount
+/// even on a slow box; well past that the user is staring at a
+/// failed UI anyway and we should at least keep mail moving.
+const UI_READY_TIMEOUT: Duration = Duration::from_secs(10);
+
 async fn run(app: &AppHandle) -> Result<(), String> {
+    // Wait for the Dioxus app to signal it has mounted before doing
+    // any IMAP / JMAP work. Sync was launching CONNECT + LIST +
+    // SELECT on every folder before the webview had even painted,
+    // which made the first frame take 2-5s on accounts with many
+    // folders. The UI calls the `ui_ready` IPC command from a
+    // top-level `use_hook`, which fires `state.ui_ready.notify_one()`
+    // here.
+    let notify = {
+        let state: tauri::State<'_, AppState> = app.state();
+        state.ui_ready.clone()
+    };
+    match tokio::time::timeout(UI_READY_TIMEOUT, notify.notified()).await {
+        Ok(()) => debug!("sync engine: ui_ready received, starting bootstrap"),
+        Err(_) => warn!(
+            timeout_ms = UI_READY_TIMEOUT.as_millis() as u64,
+            "sync engine: ui_ready timeout — starting bootstrap anyway"
+        ),
+    }
+
     let accounts = list_accounts(app).await?;
     info!(count = accounts.len(), "sync engine: bootstrap pass");
 
-    // Bootstrap sync + collect watchers. IMAP accounts get one
-    // watcher per folder (FolderChanged events); JMAP accounts get
-    // one watcher per account (AccountChanged events).
-    let mut imap_targets: Vec<(AccountId, Folder)> = Vec::new();
+    // Bootstrap sync + collect watch targets. IMAP accounts get a
+    // capped watcher pool plus a poller for the rest; JMAP accounts
+    // get one EventSource watcher per account (AccountChanged
+    // events).
+    let mut imap_accounts: Vec<(AccountId, Vec<Folder>)> = Vec::new();
     let mut jmap_accounts: Vec<AccountId> = Vec::new();
     for account in &accounts {
         match bootstrap_account(app, account).await {
             Ok(folders) => match account.kind {
                 BackendKind::ImapSmtp => {
-                    for folder in folders {
-                        imap_targets.push((account.id.clone(), folder));
-                    }
+                    imap_accounts.push((account.id.clone(), folders));
                 }
                 BackendKind::Jmap => {
                     jmap_accounts.push(account.id.clone());
@@ -91,26 +141,54 @@ async fn run(app: &AppHandle) -> Result<(), String> {
         }
     }
 
-    if imap_targets.is_empty() && jmap_accounts.is_empty() {
+    let any_imap = imap_accounts.iter().any(|(_, fs)| !fs.is_empty());
+    if !any_imap && jmap_accounts.is_empty() {
         info!("sync engine: nothing to watch — exiting");
         return Ok(());
     }
 
-    // Single shared mpsc for both IMAP and JMAP watchers. Each
-    // forwarder tags its watcher's BackendEvent with the source
-    // account_id so the reactive loop can dispatch.
+    // Single shared mpsc for IMAP watchers, IMAP pollers, and JMAP
+    // EventSource watchers. Each forwarder tags BackendEvents with
+    // the source account_id so the reactive loop can dispatch.
     let (tx, mut rx) = mpsc::channel::<(AccountId, BackendEvent)>(EVENT_CHANNEL_BUFFER);
     let mut watcher_count = 0usize;
+    let mut polled_folder_count = 0usize;
 
-    for (account_id, folder) in &imap_targets {
-        let forward_tx = spawn_forwarder(account_id.clone(), tx.clone());
-        let _handle = imap_idle::spawn_watcher(
-            app.clone(),
-            account_id.clone(),
-            folder.id.clone(),
-            forward_tx,
+    // Per-account: pick top-N priority folders for live IDLE,
+    // hand the rest to a polling task. All folders end up in
+    // `folder_by_id` so the reactive loop can resolve either kind
+    // of FolderChanged event.
+    let mut all_imap_folders: Vec<(AccountId, Folder)> = Vec::new();
+    for (account_id, folders) in imap_accounts {
+        let total = folders.len();
+        for f in &folders {
+            all_imap_folders.push((account_id.clone(), f.clone()));
+        }
+        let (active, polled) = prioritize_imap_folders(folders);
+
+        for folder in &active {
+            let forward_tx = spawn_forwarder(account_id.clone(), tx.clone());
+            let _handle = imap_idle::spawn_watcher(
+                app.clone(),
+                account_id.clone(),
+                folder.id.clone(),
+                forward_tx,
+            );
+            watcher_count += 1;
+        }
+        if !polled.is_empty() {
+            let forward_tx = spawn_forwarder(account_id.clone(), tx.clone());
+            let polled_ids: Vec<FolderId> = polled.iter().map(|f| f.id.clone()).collect();
+            polled_folder_count += polled_ids.len();
+            let _handle = spawn_imap_poller(account_id.clone(), polled_ids, forward_tx);
+        }
+        debug!(
+            account = %account_id.0,
+            total_folders = total,
+            watchers = active.len(),
+            polled = polled.len(),
+            "imap watcher pool sized"
         );
-        watcher_count += 1;
     }
     for account_id in &jmap_accounts {
         let forward_tx = spawn_forwarder(account_id.clone(), tx.clone());
@@ -124,7 +202,8 @@ async fn run(app: &AppHandle) -> Result<(), String> {
     drop(tx);
     info!(
         watchers = watcher_count,
-        imap_folders = imap_targets.len(),
+        imap_folders_watched = all_imap_folders.len() - polled_folder_count,
+        imap_folders_polled = polled_folder_count,
         jmap_accounts = jmap_accounts.len(),
         "sync engine: live watchers spawned"
     );
@@ -149,7 +228,7 @@ async fn run(app: &AppHandle) -> Result<(), String> {
         });
     }
 
-    let folder_by_id: HashMap<(AccountId, FolderId), Folder> = imap_targets
+    let folder_by_id: HashMap<(AccountId, FolderId), Folder> = all_imap_folders
         .into_iter()
         .map(|(acct, folder)| ((acct, folder.id.clone()), folder))
         .collect();
@@ -231,6 +310,100 @@ async fn run(app: &AppHandle) -> Result<(), String> {
     }
 }
 
+/// Sort `folders` by [`FolderRole`] priority and split into
+/// `(active, polled)` at [`MAX_IMAP_WATCHERS_PER_ACCOUNT`].
+///
+/// Active folders get a live IDLE connection. Polled folders share a
+/// single per-account [`spawn_imap_poller`] task. Priority bands:
+///
+/// 1. Inbox — always live; new mail UX hinges on it.
+/// 2. All — Gmail's All Mail mirrors every label change, so one
+///    IDLE here covers most of the account regardless of the cap.
+/// 3. Sent / Drafts / Trash / Spam — touched on every send / move
+///    cycle; visible in default Sidebar groupings.
+/// 4. Important / Archive / Flagged — secondary built-in roles.
+/// 5. Untagged user folders — alphabetical so the assignment is
+///    stable across runs.
+///
+/// This is a free function (no `&self`) so it stays trivially
+/// testable with synthetic [`Folder`] vectors.
+fn prioritize_imap_folders(mut folders: Vec<Folder>) -> (Vec<Folder>, Vec<Folder>) {
+    fn band(role: &Option<FolderRole>) -> u8 {
+        match role {
+            Some(FolderRole::Inbox) => 0,
+            Some(FolderRole::All) => 1,
+            Some(FolderRole::Sent) => 2,
+            Some(FolderRole::Drafts) => 3,
+            Some(FolderRole::Trash) => 4,
+            Some(FolderRole::Spam) => 5,
+            Some(FolderRole::Important) => 6,
+            Some(FolderRole::Archive) => 7,
+            Some(FolderRole::Flagged) => 8,
+            // Untagged folders: deterministic alphabetical, but
+            // ranked below every well-known role.
+            None => 100,
+            // `_` covers any future variant of the
+            // `#[non_exhaustive]` enum.
+            Some(_) => 99,
+        }
+    }
+    folders.sort_by(|a, b| {
+        band(&a.role)
+            .cmp(&band(&b.role))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    if folders.len() <= MAX_IMAP_WATCHERS_PER_ACCOUNT {
+        (folders, Vec::new())
+    } else {
+        let polled = folders.split_off(MAX_IMAP_WATCHERS_PER_ACCOUNT);
+        (folders, polled)
+    }
+}
+
+/// Spawn one polling task that periodically emits
+/// [`BackendEvent::FolderChanged`] for each folder in `folders`.
+/// The reactive loop debounces these the same way as IDLE-driven
+/// events, so the existing [`sync_one_folder`] pipeline handles
+/// them — no separate poll-side sync code path.
+///
+/// Used for folders that didn't fit inside the IDLE pool. Cadence
+/// is [`POLL_INTERVAL`]. Tasks exit when the receiver is dropped.
+fn spawn_imap_poller(
+    account: AccountId,
+    folders: Vec<FolderId>,
+    tx: mpsc::Sender<BackendEvent>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        if folders.is_empty() {
+            return;
+        }
+        info!(
+            account = %account.0,
+            folder_count = folders.len(),
+            interval_secs = POLL_INTERVAL.as_secs(),
+            "spawning IMAP poll loop for un-watched folders"
+        );
+        let mut ticker = tokio::time::interval(POLL_INTERVAL);
+        // First tick fires immediately by default; skip it so the
+        // bootstrap pass we just finished isn't followed by a
+        // redundant full re-sync.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            for folder in &folders {
+                let event = BackendEvent::FolderChanged {
+                    folder: folder.clone(),
+                };
+                if tx.send(event).await.is_err() {
+                    debug!(account = %account.0, "poll loop: receiver dropped, exiting");
+                    return;
+                }
+            }
+        }
+    })
+}
+
 /// Spawn a small forwarder task that re-broadcasts `BackendEvent`
 /// from a single watcher onto the engine's shared `(AccountId,
 /// BackendEvent)` channel. Returns the per-watcher sender end.
@@ -257,56 +430,71 @@ async fn list_accounts(app: &AppHandle) -> Result<Vec<Account>, String> {
         .map_err(|e| format!("list accounts: {e}"))
 }
 
-/// Run the initial sync_account pass for one account and emit the
-/// per-folder events. Returns the list of folders the backend
-/// advertised so the engine can spawn watchers for them.
+/// Run the initial sync pass for one account and emit the
+/// per-folder events. Returns the list of folders that synced
+/// successfully — preserving server-reported [`FolderRole`] so
+/// the watcher-pool prioritizer can pick the right ones to push.
+///
+/// We list folders ourselves (rather than relying on
+/// [`capytain_sync::sync_account`]'s flat outcome list) so the
+/// returned [`Folder`] structs keep their roles, names, and paths
+/// for downstream prioritization. The per-folder sync is otherwise
+/// identical to what `sync_account` would do.
 async fn bootstrap_account(app: &AppHandle, account: &Account) -> Result<Vec<Folder>, String> {
     let state: tauri::State<'_, AppState> = app.state();
     let backend = backend_factory::get_or_open(&state, &account.id)
         .await
         .map_err(|e| format!("open backend: {e}"))?;
 
+    let folders = backend
+        .list_folders()
+        .await
+        .map_err(|e| format!("list_folders: {e}"))?;
+
     let blobs = BlobStore::new(state.data_dir.join("blobs"));
 
-    let db = state.db.lock().await;
-    let outcomes = capytain_sync::sync_account(&*db, backend.as_ref(), Some(&blobs), Some(200))
-        .await
-        .map_err(|e| format!("sync_account: {e}"))?;
-    drop(db);
+    // Run every per-folder sync_folder under one db-lock acquisition.
+    // We collect (folder, result) pairs and release the lock before
+    // emit_folder_outcome runs, since it re-takes the lock for the
+    // unread-count read.
+    let outcomes: Vec<(Folder, Result<_, _>)> = {
+        let db = state.db.lock().await;
+        let mut acc = Vec::with_capacity(folders.len());
+        for folder in folders {
+            let result = capytain_sync::sync_folder(
+                &*db,
+                backend.as_ref(),
+                Some(&blobs),
+                &folder,
+                Some(200),
+            )
+            .await;
+            if let Err(e) = &result {
+                warn!(folder = %folder.id.0, "bootstrap sync_folder failed: {e}");
+            }
+            acc.push((folder, result));
+        }
+        acc
+    };
 
-    let mut folders = Vec::with_capacity(outcomes.len());
-    for outcome in outcomes {
-        emit_folder_outcome(
-            app,
-            &account.id,
-            &outcome.folder_id,
-            &outcome.result,
-            /* live = */ false,
-        )
-        .await;
-
-        // Build a minimal Folder for the watch list. We only need
-        // the id; the watcher uses the folder path string from
-        // FolderId, not the rest.
-        if outcome.result.is_ok() {
-            folders.push(Folder {
-                id: outcome.folder_id.clone(),
-                account_id: account.id.clone(),
-                name: outcome.folder_id.0.clone(),
-                path: outcome.folder_id.0.clone(),
-                role: None,
-                unread_count: 0,
-                total_count: 0,
-                parent: None,
-            });
+    let mut succeeded = Vec::with_capacity(outcomes.len());
+    for (folder, result) in outcomes {
+        emit_folder_outcome(app, &account.id, &folder.id, &result, /* live = */ false).await;
+        if result.is_ok() {
+            succeeded.push(folder);
         }
     }
-    Ok(folders)
+    Ok(succeeded)
 }
 
 /// Re-sync a single folder in response to a debounced
 /// `FolderChanged` event, then emit `SyncEvent::FolderSynced`.
-async fn sync_one_folder(
+///
+/// Also reachable from the `messages_refresh_folder` Tauri command,
+/// which the UI calls when the user opens a folder so newly-arrived
+/// IMAP messages show up without waiting for the next IDLE wake-up
+/// or 2-minute poll.
+pub async fn sync_one_folder(
     app: &AppHandle,
     blobs: &BlobStore,
     account_id: &AccountId,
@@ -510,5 +698,70 @@ impl capytain_sync::outbox_drain::BackendResolver for AppHandleResolver {
     ) -> Result<std::sync::Arc<dyn capytain_core::MailBackend>, capytain_core::MailError> {
         let state: tauri::State<'_, AppState> = self.app.state();
         backend_factory::get_or_open(&state, account).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{prioritize_imap_folders, MAX_IMAP_WATCHERS_PER_ACCOUNT};
+    use capytain_core::{AccountId, Folder, FolderId, FolderRole};
+
+    fn folder(path: &str, role: Option<FolderRole>) -> Folder {
+        Folder {
+            id: FolderId(path.to_string()),
+            account_id: AccountId("acct".to_string()),
+            name: path.to_string(),
+            path: path.to_string(),
+            role,
+            unread_count: 0,
+            total_count: 0,
+            parent: None,
+        }
+    }
+
+    #[test]
+    fn small_account_keeps_everything_active() {
+        let folders = vec![
+            folder("INBOX", Some(FolderRole::Inbox)),
+            folder("Sent", Some(FolderRole::Sent)),
+            folder("user/projects", None),
+        ];
+        let (active, polled) = prioritize_imap_folders(folders);
+        assert_eq!(active.len(), 3);
+        assert!(polled.is_empty());
+    }
+
+    #[test]
+    fn cap_at_max_and_keep_well_known_roles() {
+        let mut folders: Vec<Folder> = (0..30)
+            .map(|i| folder(&format!("user/{i:02}"), None))
+            .collect();
+        folders.push(folder("INBOX", Some(FolderRole::Inbox)));
+        folders.push(folder("[Gmail]/All Mail", Some(FolderRole::All)));
+        folders.push(folder("[Gmail]/Sent Mail", Some(FolderRole::Sent)));
+        folders.push(folder("Drafts", Some(FolderRole::Drafts)));
+
+        let (active, polled) = prioritize_imap_folders(folders);
+
+        assert_eq!(active.len(), MAX_IMAP_WATCHERS_PER_ACCOUNT);
+        assert_eq!(polled.len(), 30 + 4 - MAX_IMAP_WATCHERS_PER_ACCOUNT);
+
+        // Inbox / All / Sent / Drafts must always make the cut.
+        let active_paths: Vec<_> = active.iter().map(|f| f.path.as_str()).collect();
+        assert!(active_paths.contains(&"INBOX"));
+        assert!(active_paths.contains(&"[Gmail]/All Mail"));
+        assert!(active_paths.contains(&"[Gmail]/Sent Mail"));
+        assert!(active_paths.contains(&"Drafts"));
+    }
+
+    #[test]
+    fn untagged_split_is_alphabetical_and_stable() {
+        let folders: Vec<Folder> = ["delta", "alpha", "charlie", "bravo"]
+            .iter()
+            .map(|p| folder(p, None))
+            .collect();
+        let (active, _) = prioritize_imap_folders(folders);
+        let paths: Vec<_> = active.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["alpha", "bravo", "charlie", "delta"]);
     }
 }

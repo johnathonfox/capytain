@@ -558,3 +558,139 @@ pub async fn messages_delete(
     }
     Ok(())
 }
+
+#[derive(Debug, Deserialize)]
+pub struct MessagesLoadOlderInput {
+    pub folder: FolderId,
+    pub limit: u32,
+}
+
+/// `messages_load_older` — pager backfill for the message-list pane.
+///
+/// Asks the account's [`MailBackend`] for headers strictly older than
+/// the lowest currently-synced message in `folder`, persists the
+/// returned rows (running the standard threading pass on each insert),
+/// and returns the count added.
+///
+/// IMAP backends compute the anchor from the lowest local UID and
+/// run a UID FETCH inverted-range request; JMAP and other backends
+/// without an override get the trait's default empty implementation
+/// for now (Phase 2 follow-up wires up `Email/query` paging).
+///
+/// Returns `0` when the historical tail is exhausted, when the
+/// folder is empty (so the bootstrap sync is the right tool, not
+/// the pager), or when the backend can't paginate older.
+#[tauri::command]
+pub async fn messages_load_older(
+    state: State<'_, AppState>,
+    input: MessagesLoadOlderInput,
+) -> IpcResult<u32> {
+    let MessagesLoadOlderInput { folder, limit } = input;
+    let limit = limit.clamp(1, MAX_PAGE_LIMIT);
+
+    // Resolve the account id from the folder row so we can open the
+    // right backend. `list_by_folder` with a generous cap pulls every
+    // header so we can derive the IMAP UID floor below.
+    let (account_id, anchor) = {
+        let db = state.db.lock().await;
+        let folder_row = folders_repo::get(&*db, &folder).await?;
+        let local = messages_repo::list_by_folder(&*db, &folder, MAX_PAGE_LIMIT, 0).await?;
+        let anchor = lowest_imap_uid(&local);
+        (folder_row.account_id, anchor)
+    };
+
+    let Some(anchor) = anchor else {
+        tracing::debug!(folder = %folder.0, "messages_load_older: empty folder, nothing to page");
+        return Ok(0);
+    };
+
+    let backend = backend_factory::get_or_open(&state, &account_id).await?;
+
+    let older = backend.fetch_older_headers(&folder, anchor, limit).await?;
+
+    if older.is_empty() {
+        tracing::debug!(
+            folder = %folder.0,
+            anchor,
+            "messages_load_older: backend returned no older messages"
+        );
+        return Ok(0);
+    }
+
+    let mut added = 0u32;
+    let db = state.db.lock().await;
+    for h in &older {
+        match messages_repo::find(&*db, &h.id).await? {
+            Some(_) => {
+                // Already in DB — skip insert; the bootstrap or live
+                // sync got there first. Don't count toward `added`.
+                continue;
+            }
+            None => {
+                messages_repo::insert(&*db, h, None).await?;
+                if let Err(e) = capytain_sync::threading::attach_to_thread(&*db, h).await {
+                    tracing::warn!(message = %h.id.0, "thread assembly failed: {e}");
+                }
+                added += 1;
+            }
+        }
+    }
+    drop(db);
+
+    tracing::info!(
+        folder = %folder.0,
+        anchor,
+        returned = older.len(),
+        inserted = added,
+        "messages_load_older"
+    );
+    Ok(added)
+}
+
+/// Walk a slice of locally-cached headers, decode each id with the
+/// IMAP `MessageRef` codec, and return the smallest UID. JMAP-shaped
+/// ids fail the decode and are silently skipped — for those backends
+/// the pager isn't usable until `Email/query` paging lands.
+///
+/// Returns `None` when the slice is empty or no id parses as IMAP.
+fn lowest_imap_uid(messages: &[MessageHeaders]) -> Option<u64> {
+    messages
+        .iter()
+        .filter_map(|m| capytain_imap_client::MessageRef::decode(&m.id).ok())
+        .map(|r| u64::from(r.uid))
+        .min()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MessagesRefreshFolderInput {
+    pub folder: FolderId,
+}
+
+/// `messages_refresh_folder` — kick a one-shot sync of one folder.
+///
+/// Triggered by the UI when the user opens a folder. The reactive
+/// `sync_engine` already pushes new mail via IMAP IDLE for the top
+/// 10 folders per account (and a 2-min poll for the rest), but this
+/// command bridges the gap: clicking a folder always pulls server
+/// state immediately rather than waiting on the next watcher cycle.
+///
+/// Returns `()`; sync_one_folder emits its own `sync_event` so the
+/// caller doesn't need to bump `sync_tick` itself — the UI's
+/// reactive resources refetch automatically when the event lands.
+#[tauri::command]
+pub async fn messages_refresh_folder(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    input: MessagesRefreshFolderInput,
+) -> IpcResult<()> {
+    let folder_id = input.folder;
+    let folder = {
+        let db = state.db.lock().await;
+        folders_repo::get(&*db, &folder_id).await?
+    };
+    let blobs = BlobStore::new(state.data_dir.join("blobs"));
+    let account_id = folder.account_id.clone();
+    crate::sync_engine::sync_one_folder(&app, &blobs, &account_id, &folder).await;
+    tracing::info!(folder = %folder_id.0, "messages_refresh_folder");
+    Ok(())
+}

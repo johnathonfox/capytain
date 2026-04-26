@@ -61,3 +61,44 @@ pub async fn reader_render<R: Runtime>(
 
     Ok(())
 }
+
+#[derive(Debug, Deserialize)]
+pub struct OpenExternalUrlInput {
+    pub url: String,
+}
+
+/// `open_external_url` — hand an http(s) / mailto URL to the OS
+/// default browser.
+///
+/// Triggered when the user clicks a link inside the reader pane's
+/// email iframe. The iframe runs a tiny click interceptor that
+/// `postMessage`s the URL to the parent window; the Dioxus app
+/// invokes this command in response. We deliberately allow only
+/// `http`, `https`, and `mailto` schemes — `javascript:`,
+/// `file://`, etc. would be a privilege-escalation hand-off from
+/// untrusted email content to the host OS.
+#[tauri::command]
+pub async fn open_external_url(input: OpenExternalUrlInput) -> IpcResult<()> {
+    let url = input.url.trim();
+    let lower = url.to_ascii_lowercase();
+    let allowed = lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("mailto:");
+    if !allowed {
+        tracing::warn!(%url, "open_external_url: rejecting non-http(s)/mailto scheme");
+        return Err(capytain_ipc::IpcError::new(
+            capytain_ipc::IpcErrorKind::Permission,
+            format!("unsupported URL scheme: {url}"),
+        ));
+    }
+
+    if let Err(e) = webbrowser::open(url) {
+        tracing::warn!(%url, error = %e, "open_external_url: webbrowser::open failed");
+        return Err(capytain_ipc::IpcError::new(
+            capytain_ipc::IpcErrorKind::Internal,
+            format!("failed to open URL: {e}"),
+        ));
+    }
+    tracing::info!(%url, "open_external_url");
+    Ok(())
+}

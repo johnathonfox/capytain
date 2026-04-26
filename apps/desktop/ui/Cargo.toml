@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 capytain-ipc = { workspace = true }
+chrono = { workspace = true }
 dioxus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -31,6 +32,18 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 serde-wasm-bindgen = "0.6"
+# Used by the compose pane's 5s auto-save debounce. Pulls only the
+# `futures` feature so we get `gloo_timers::future::sleep` and
+# nothing else on the wasm side.
+gloo-timers = { version = "0.3", features = ["futures"] }
+
+# `chrono::Utc::now()` on wasm32-unknown-unknown falls through to
+# `std::time::SystemTime::now()`, which the stdlib leaves unimplemented
+# and panics with "time not implemented on this platform". The
+# `wasmbind` feature routes chrono's clock through `Date.now()` via
+# js-sys instead. Workspace chrono only enables `clock` + `serde` so
+# the host builds stay narrow; add the wasm-only feature here.
+chrono = { workspace = true, features = ["wasmbind"] }
 
 # `getrandom` is reachable transitively (capytain-auth → rand). On
 # wasm32-unknown-unknown it needs a backend opt-in; `wasm_js` routes

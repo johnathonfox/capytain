@@ -33,4 +33,4 @@ pub mod sync_state;
 
 pub use backend::{dial_session, ImapBackend, StreamT};
 pub use idle::watch_folder;
-pub use sync_state::BackendState;
+pub use sync_state::{BackendState, MessageRef};
