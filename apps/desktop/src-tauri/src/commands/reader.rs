@@ -102,3 +102,78 @@ pub async fn open_external_url(input: OpenExternalUrlInput) -> IpcResult<()> {
     tracing::info!(%url, "open_external_url");
     Ok(())
 }
+
+#[derive(Debug, Deserialize)]
+pub struct ReaderSetPositionInput {
+    /// Bounding rect of the `.reader-body-fill` slot in window-
+    /// relative CSS pixels. CSS rect coordinates can be negative
+    /// during transitions; the Rust side clamps before passing to
+    /// GTK. `f64` because `getBoundingClientRect` returns floats.
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// `reader_set_position` — push the reader-body element's bounding
+/// rect at GTK so Servo's overlay surface tracks the slot.
+///
+/// Called from the UI's `ResizeObserver` whenever
+/// `.reader-body-fill` changes shape (window resize, splitter drag,
+/// compose pane open/close, etc.). Rust clamps + casts to i32 and
+/// hands off to `LinuxGtkParent::set_position` on the GTK main
+/// thread via Tauri's `run_on_main_thread`.
+///
+/// No-ops on platforms / builds without the Servo install. Returns
+/// `Ok(())` regardless so the UI can fire blindly without branching
+/// on platform.
+#[tauri::command]
+pub async fn reader_set_position(
+    app: tauri::AppHandle,
+    input: ReaderSetPositionInput,
+) -> IpcResult<()> {
+    #[cfg(all(target_os = "linux", feature = "servo"))]
+    {
+        let Some(parent) = crate::linux_gtk::parent() else {
+            return Ok(());
+        };
+        let x = input.x.round() as i32;
+        let y = input.y.round() as i32;
+        let w = input.width.round() as i32;
+        let h = input.height.round() as i32;
+        if let Err(e) = app.run_on_main_thread(move || parent.set_position(x, y, w, h)) {
+            tracing::debug!(error = %e, "reader_set_position: dispatch failed (app shutdown?)");
+        }
+    }
+    #[cfg(not(all(target_os = "linux", feature = "servo")))]
+    {
+        let _ = app;
+        let _ = input;
+    }
+    Ok(())
+}
+
+/// `reader_clear` — move Servo's overlay surface off-screen.
+///
+/// Called when the user deselects a message or opens the Compose
+/// pane: the Dioxus reader pane shows a placeholder ("Select a
+/// message to read") and Servo's surface should be invisible
+/// rather than freezing the previous render in place. Same
+/// no-op-on-other-platforms shape as `reader_set_position`.
+#[tauri::command]
+pub async fn reader_clear(app: tauri::AppHandle) -> IpcResult<()> {
+    #[cfg(all(target_os = "linux", feature = "servo"))]
+    {
+        let Some(parent) = crate::linux_gtk::parent() else {
+            return Ok(());
+        };
+        if let Err(e) = app.run_on_main_thread(move || parent.hide()) {
+            tracing::debug!(error = %e, "reader_clear: dispatch failed (app shutdown?)");
+        }
+    }
+    #[cfg(not(all(target_os = "linux", feature = "servo")))]
+    {
+        let _ = app;
+    }
+    Ok(())
+}

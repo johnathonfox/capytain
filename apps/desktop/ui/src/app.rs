@@ -68,26 +68,73 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
         });
     }
 
-    // Wires a single window-message listener that forwards
-    // `capytain-link-click` payloads from the reader iframe into the
-    // `open_external_url` Tauri command. Idempotent — re-registers on
-    // every call, but the previous listener is replaced. We keep it
-    // simple here in JS rather than going through `web_sys` for the
-    // event listener glue.
-    export function registerLinkClickBridge() {
-        if (window.__capytainLinkBridge) {
-            window.removeEventListener('message', window.__capytainLinkBridge);
+    // Watch `.reader-body-fill`'s bounding rect and push it to the
+    // Rust side over `reader_set_position`. ResizeObserver fires
+    // whenever the element's content-box changes shape (window
+    // resize, splitter drag, compose pane open/close); window resize
+    // alone doesn't change the element's content-box if the column
+    // is `1fr`, so we also listen on `window.resize` to catch
+    // viewport-relative shifts that don't change the element size
+    // but do change its `(x, y)`. Idempotent — repeat calls
+    // tear down the previous observer first.
+    export function startReaderBodyTracker() {
+        if (window.__capytainReaderTracker) {
+            window.__capytainReaderTracker.dispose();
         }
-        const handler = function(ev) {
-            const d = ev && ev.data;
-            if (d && d.type === 'capytain-link-click' && typeof d.url === 'string') {
-                window.__TAURI_INTERNALS__
-                    .invoke('open_external_url', { input: { url: d.url } })
-                    .catch(function(e) { console.warn('open_external_url:', e); });
-            }
+        const push = function() {
+            const el = document.querySelector('.reader-body-fill');
+            if (!el) return;
+            const r = el.getBoundingClientRect();
+            // Skip during pre-mount / hidden states; sending zeros
+            // would race with `reader_clear` and cause flicker.
+            if (r.width <= 0 || r.height <= 0) return;
+            window.__TAURI_INTERNALS__
+                .invoke('reader_set_position', {
+                    input: { x: r.x, y: r.y, width: r.width, height: r.height },
+                })
+                .catch(function(e) { console.warn('reader_set_position:', e); });
         };
-        window.__capytainLinkBridge = handler;
-        window.addEventListener('message', handler);
+        // Run once now in case the element is already mounted.
+        push();
+        // ResizeObserver is per-element. Use a MutationObserver as a
+        // boot-time safety net for the first paint when the element
+        // doesn't exist yet — it'll start watching as soon as the
+        // node is added.
+        let resizeObs = null;
+        const tryAttach = function() {
+            const el = document.querySelector('.reader-body-fill');
+            if (!el || resizeObs) return;
+            resizeObs = new ResizeObserver(push);
+            resizeObs.observe(el);
+            push();
+        };
+        tryAttach();
+        const mutObs = new MutationObserver(tryAttach);
+        mutObs.observe(document.body, { childList: true, subtree: true });
+        // Window resize: rect's (x, y) can shift even if the element
+        // itself didn't change size (rare, but happens during splitter
+        // drag if the window edge moves).
+        const onResize = function() { push(); };
+        window.addEventListener('resize', onResize);
+
+        window.__capytainReaderTracker = {
+            dispose: function() {
+                if (resizeObs) resizeObs.disconnect();
+                mutObs.disconnect();
+                window.removeEventListener('resize', onResize);
+            },
+            push: push,
+        };
+    }
+
+    // Force one push on demand. Useful right after the user clicks
+    // a different message — Dioxus may have re-laid-out the body
+    // slot and we want Servo's surface re-positioned in the same
+    // animation frame.
+    export function pushReaderBodyRect() {
+        if (window.__capytainReaderTracker) {
+            window.__capytainReaderTracker.push();
+        }
     }
 "#)]
 extern "C" {
@@ -97,8 +144,11 @@ extern "C" {
     #[wasm_bindgen(catch, js_name = tauriListen)]
     async fn tauri_listen(event: &str, handler: &js_sys::Function) -> Result<JsValue, JsValue>;
 
-    #[wasm_bindgen(js_name = registerLinkClickBridge)]
-    fn register_link_click_bridge();
+    #[wasm_bindgen(js_name = startReaderBodyTracker)]
+    fn start_reader_body_tracker();
+
+    #[wasm_bindgen(js_name = pushReaderBodyRect)]
+    fn push_reader_body_rect();
 }
 
 /// Thin wrapper around the Tauri `invoke` bridge. Serializes `args` to
@@ -199,12 +249,14 @@ pub fn App() -> Element {
         });
     });
 
-    // Reader-iframe link-click bridge: every <a href> click in the
-    // sandboxed email iframe posts `{type:'capytain-link-click', url}`
-    // up to this window. Forward each URL to `open_external_url` so it
-    // launches in the OS default browser. Wired here once per app.
-    use_hook(move || {
-        register_link_click_bridge();
+    // Reader-body tracker: watches the `.reader-body-fill` element's
+    // bounding rect (ResizeObserver + window resize) and pushes
+    // `(x, y, w, h)` to the Rust side via `reader_set_position`,
+    // which moves Servo's overlay surface to track. Servo handles
+    // link clicks natively via `on_link_click` → `webbrowser::open`,
+    // so we no longer need the iframe-side postMessage bridge.
+    use_hook(|| {
+        start_reader_body_tracker();
     });
 
     // Tell the Rust side the UI is mounted so the sync engine can
@@ -456,30 +508,6 @@ fn compose_reader_html(rendered: &RenderedMessage) -> String {
 </head>
 <body>
   <div class="capytain-body">{body_section}</div>
-  <script>
-    // Click interceptor: every <a href> in the email gets caught
-    // here and forwarded to the parent window. The parent invokes
-    // the `open_external_url` Tauri command, which routes the URL
-    // through the OS default browser. The iframe is sandboxed with
-    // `allow-scripts` only — no same-origin, no top navigation, no
-    // popups. This script is fully under our control; the upstream
-    // sanitizer in `capytain_mime::sanitize_email_html` already
-    // strips any sender-supplied <script> before this document is
-    // composed, so the only JS the email document runs is this one.
-    document.addEventListener('click', function(e) {{
-      var node = e.target;
-      while (node && node.nodeName !== 'A') node = node.parentNode;
-      if (node && node.href) {{
-        e.preventDefault();
-        try {{
-          window.parent.postMessage(
-            {{ type: 'capytain-link-click', url: node.href }},
-            '*'
-          );
-        }} catch (err) {{}}
-      }}
-    }}, true);
-  </script>
 </body>
 </html>"#
     )
@@ -1627,6 +1655,22 @@ fn folder_title_from_selection(folder: &FolderId, _selection: &Signal<Selection>
 #[component]
 fn ReaderPaneV2(selection: Signal<Selection>, sync_tick: SyncTick) -> Element {
     let message_id = selection.read().message.clone();
+
+    // Hide Servo's overlay surface whenever no message is selected.
+    // The Dioxus placeholder text shows through the gap. Without
+    // this the previous render would freeze in place under the
+    // "Select a message" copy.
+    {
+        let has_message = message_id.is_some();
+        use_effect(use_reactive!(|has_message| {
+            if !has_message {
+                wasm_bindgen_futures::spawn_local(async {
+                    let _ = invoke::<()>("reader_clear", serde_json::json!({})).await;
+                });
+            }
+        }));
+    }
+
     rsx! {
         section {
             class: "reader-pane",
@@ -1701,6 +1745,26 @@ fn ReaderV2(id: MessageId, sync_tick: SyncTick) -> Element {
                 } else {
                     rendered.headers.subject.clone()
                 };
+
+                // Push the body HTML to the Servo overlay surface.
+                // `reader_render` is a no-op when Servo isn't
+                // installed (slot is None), so this is safe across
+                // platforms/builds. After the render, force one
+                // tracker push so the surface lands in the right
+                // spot on the same frame the new content paints.
+                let render_payload = body_doc.clone();
+                use_effect(move || {
+                    let payload = render_payload.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let _ = invoke::<()>(
+                            "reader_render",
+                            serde_json::json!({ "input": { "html": payload } }),
+                        )
+                        .await;
+                    });
+                    push_reader_body_rect();
+                });
+
                 rsx! {
                     div {
                         class: "reader-header-block",
@@ -1752,29 +1816,15 @@ fn ReaderV2(id: MessageId, sync_tick: SyncTick) -> Element {
                             ReaderAttachments { attachments: rendered.attachments.clone() }
                         }
                     }
-                    // Body lives outside the header block so it can
-                    // own the remaining vertical space and scroll
-                    // internally. `srcdoc` sandboxes the email so its
-                    // CSS / scripts can't leak into the app shell;
-                    // the sanitizer in `compose_reader_html` already
-                    // strips scripts, the explicit `sandbox` attr is
-                    // belt + suspenders. Servo would normally render
-                    // this in a native pane — disabled until the
-                    // overlay-positioning fix in KNOWN_ISSUES.md lands.
-                    div {
-                        class: "reader-body-fill",
-                        iframe {
-                            srcdoc: "{body_doc}",
-                            // `allow-scripts` only — no `allow-same-origin`,
-                            // no `allow-top-navigation`, no `allow-popups`.
-                            // The injected click interceptor in
-                            // `compose_reader_html` runs under this and
-                            // forwards link clicks to the parent via
-                            // postMessage; a Dioxus listener forwards them
-                            // to the `open_external_url` IPC command.
-                            "sandbox": "allow-scripts",
-                        }
-                    }
+                    // Body slot — transparent placeholder. The
+                    // ResizeObserver wired in App() watches this
+                    // element's bounding rect and pushes it to
+                    // Rust over `reader_set_position`, which moves
+                    // Servo's `gtk::DrawingArea` to overlap exactly
+                    // here. Visible content is painted by Servo,
+                    // not by Dioxus, so this div is intentionally
+                    // empty.
+                    div { class: "reader-body-fill" }
                 }
             }
         }
