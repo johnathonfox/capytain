@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Integration tests for `capytain_sync::sync_folder`.
+//! Integration tests for `qsl_sync::sync_folder`.
 //!
 //! Drives the function with a stub `MailBackend` against an in-memory
 //! Turso database. The IMAP/JMAP adapters' own protocol behavior is
@@ -13,17 +13,17 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use tokio::runtime::Runtime;
 
-use capytain_core::{
+use qsl_core::{
     Account, AccountId, AttachmentRef, BackendKind, EmailAddress, Folder, FolderId, FolderRole,
     MailBackend, MailError, MessageBody, MessageFlags, MessageHeaders, MessageId, MessageList,
     SyncState,
 };
-use capytain_storage::{
+use qsl_storage::{
     repos::{folders as folders_repo, messages as messages_repo, sync_states as sync_states_repo},
     run_migrations, BlobStore, TursoConn,
 };
 
-use capytain_sync::sync_folder;
+use qsl_sync::sync_folder;
 
 // ---------- Stub backend ----------
 
@@ -156,7 +156,7 @@ async fn seed_account(conn: &TursoConn) -> (AccountId, Folder) {
         email_address: "x@example.com".into(),
         created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
     };
-    capytain_storage::repos::accounts::insert(conn, &acct)
+    qsl_storage::repos::accounts::insert(conn, &acct)
         .await
         .unwrap();
     let folder = Folder {
@@ -552,7 +552,7 @@ fn sync_account_walks_every_folder_and_collects_outcomes() {
             failing_ids: Default::default(),
         };
 
-        let outcomes = capytain_sync::sync_account(&conn, &backend, None, None)
+        let outcomes = qsl_sync::sync_account(&conn, &backend, None, None)
             .await
             .unwrap();
         assert_eq!(outcomes.len(), 2);
@@ -620,7 +620,7 @@ fn sync_account_continues_after_per_folder_failures() {
             failing_ids: Default::default(),
         };
 
-        let outcomes = capytain_sync::sync_account(&conn, &backend, None, None)
+        let outcomes = qsl_sync::sync_account(&conn, &backend, None, None)
             .await
             .unwrap();
         assert_eq!(outcomes.len(), 2);
@@ -806,13 +806,13 @@ fn threading_creates_new_thread_when_no_match() {
     });
 }
 
-/// Local tempdir helper — `capytain-storage` rolls its own to avoid a
+/// Local tempdir helper — `qsl-storage` rolls its own to avoid a
 /// `tempfile` dev-dep, so this crate does the same.
 fn scratch_dir() -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("capytain-sync-test-{}-{}", std::process::id(), n));
+    let dir = std::env::temp_dir().join(format!("qsl-sync-test-{}-{}", std::process::id(), n));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }

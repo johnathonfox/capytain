@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "capytain-storage"
-description = "Capytain storage layer: DbConn trait, migrations, and the blob store."
+name = "qsl-storage"
+description = "QSL storage layer: DbConn trait, migrations, and the blob store."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,7 +12,7 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
-capytain-core = { workspace = true }
+qsl-core = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 rand = { workspace = true }

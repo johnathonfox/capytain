@@ -8,8 +8,8 @@
 //! `accounts_set_display_name`) arrive in Week 5 part 2 once the
 //! settings UI needs them.
 
-use capytain_ipc::{Account, IpcResult};
-use capytain_storage::repos::accounts as accounts_repo;
+use qsl_ipc::{Account, IpcResult};
+use qsl_storage::repos::accounts as accounts_repo;
 use tauri::State;
 
 use crate::state::AppState;
@@ -19,7 +19,7 @@ use crate::state::AppState;
 ///
 /// This is the Phase 0 Week 5 proof-of-life command: it exercises
 /// the full wiring chain (Dioxus → `invoke` → Tauri router → `State<AppState>` →
-/// `capytain_storage::repos::accounts` → Turso → back across the IPC boundary
+/// `qsl_storage::repos::accounts` → Turso → back across the IPC boundary
 /// as serde JSON) without needing the backend cache, keyring, or OAuth flow.
 #[tauri::command]
 pub async fn accounts_list(state: State<'_, AppState>) -> IpcResult<Vec<Account>> {

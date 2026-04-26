@@ -1,6 +1,6 @@
 -- SPDX-License-Identifier: Apache-2.0
 --
--- Capytain schema v4. Phase 2 Week 17: local drafts.
+-- QSL schema v4. Phase 2 Week 17: local drafts.
 --
 -- Drafts persist between app launches and survive process crashes.
 -- Phase 2 Week 18 (SMTP) and Week 19 (JMAP) introduce a `save_draft`

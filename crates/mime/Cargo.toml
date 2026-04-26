@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "capytain-mime"
-description = "Capytain MIME parse and build helpers on top of mail-parser and mail-builder."
+name = "qsl-mime"
+description = "QSL MIME parse and build helpers on top of mail-parser and mail-builder."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,7 +14,7 @@ publish.workspace = true
 [dependencies]
 adblock = { workspace = true }
 ammonia = { workspace = true }
-capytain-core = { workspace = true }
+qsl-core = { workspace = true }
 chrono = { workspace = true }
 mail-parser = { workspace = true }
 

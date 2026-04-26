@@ -31,8 +31,8 @@
 use chrono::{Duration, Utc};
 use tracing::{debug, instrument};
 
-use capytain_core::{MessageHeaders, StorageError};
-use capytain_storage::{
+use qsl_core::{MessageHeaders, StorageError};
+use qsl_storage::{
     repos::{messages as messages_repo, threads as threads_repo},
     DbConn,
 };
@@ -84,7 +84,7 @@ pub async fn attach_to_thread(
 async fn resolve_existing_thread(
     conn: &dyn DbConn,
     headers: &MessageHeaders,
-) -> Result<Option<capytain_core::ThreadId>, StorageError> {
+) -> Result<Option<qsl_core::ThreadId>, StorageError> {
     // Step 1: In-Reply-To.
     if let Some(in_reply_to) = headers.in_reply_to.as_deref() {
         if let Some(t) = thread_of_message(conn, headers, in_reply_to).await? {
@@ -119,7 +119,7 @@ async fn thread_of_message(
     conn: &dyn DbConn,
     headers: &MessageHeaders,
     rfc822_message_id: &str,
-) -> Result<Option<capytain_core::ThreadId>, StorageError> {
+) -> Result<Option<qsl_core::ThreadId>, StorageError> {
     let row =
         messages_repo::find_by_rfc822_id(conn, &headers.account_id, rfc822_message_id).await?;
     Ok(row.and_then(|m| m.thread_id))

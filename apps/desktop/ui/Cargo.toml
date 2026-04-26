@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "capytain-ui"
-description = "Capytain desktop UI: Dioxus (Rust -> WASM) rendered inside the Tauri webview."
+name = "qsl-ui"
+description = "QSL desktop UI: Dioxus (Rust -> WASM) rendered inside the Tauri webview."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,11 +12,11 @@ authors.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "capytain-ui"
+name = "qsl-ui"
 path = "src/main.rs"
 
 [dependencies]
-capytain-ipc = { workspace = true }
+qsl-ipc = { workspace = true }
 chrono = { workspace = true }
 dioxus = { workspace = true }
 serde = { workspace = true }
@@ -45,7 +45,7 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 # the host builds stay narrow; add the wasm-only feature here.
 chrono = { workspace = true, features = ["wasmbind"] }
 
-# `getrandom` is reachable transitively (capytain-auth → rand). On
+# `getrandom` is reachable transitively (qsl-auth → rand). On
 # wasm32-unknown-unknown it needs a backend opt-in; `wasm_js` routes
 # randomness through the browser's `crypto.getRandomValues`. Declare
 # both major versions so feature unification reaches all copies.

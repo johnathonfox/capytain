@@ -13,7 +13,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use serde::Deserialize;
 use tracing::{debug, info};
 
-use capytain_core::AccountId;
+use qsl_core::AccountId;
 
 use crate::error::AuthError;
 use crate::keyring::TokenVault;

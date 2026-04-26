@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# cargo-deny policy for Capytain.
+# cargo-deny policy for QSL.
 #
 # Policy shape (DESIGN.md §10.2 step 6):
 #   (a) Fail the build on any dependency under GPL, AGPL, SSPL, or any
@@ -35,8 +35,8 @@ ignore = [
     # --- Timing side-channels in Servo-transitive crypto crates ---
     #
     # Both advisories are real timing side-channels in cryptographic signing
-    # / key operations, but neither is reachable in Capytain's use of Servo:
-    # `capytain_renderer::servo::apply_reader_pane_preferences` disables
+    # / key operations, but neither is reachable in QSL's use of Servo:
+    # `qsl_renderer::servo::apply_reader_pane_preferences` disables
     # every DOM API (serviceworker, webrtc, webgpu, …) that could let email
     # content reach WebCrypto's `SubtleCrypto` — the only path the reader
     # pipeline could exercise these crates through. The sanitizer upstream
@@ -73,7 +73,7 @@ ignore = [
     # RUSTSEC-2024-0429 — `glib 0.18` `VariantStrIter::impl_get` unsound:
     # `&p` passed to a C out-parameter function, which recent rustc
     # optimizations now disregard, leading to NULL-deref panics on iter.
-    # Not reachable in Capytain: we never construct a `glib::Variant`
+    # Not reachable in QSL: we never construct a `glib::Variant`
     # containing nested strings, nor call `VariantStrIter`. The Tauri 2
     # Linux backend uses glib GObject methods + signal handlers, not
     # Variant container iteration. Revisit when Tauri / gtk-rs migrate
@@ -152,7 +152,7 @@ exceptions = [
     # --- Phase 1 Week 8: remote-content blocking ---
 
     # Brave's ad-block engine, MPL-2.0. Direct dep of
-    # `capytain-mime` for the reader-pane filter list. We consume
+    # `qsl-mime` for the reader-pane filter list. We consume
     # the crate unmodified; if we ever need to carry patches, this
     # entry needs re-review under the same §3.3 reasoning as the
     # rest of the MPL-2.0 family.
@@ -171,7 +171,7 @@ exceptions = [
     { allow = ["MPL-2.0"], crate = "dtoa-short" },
 
     # --- Servo 0.1.0 engine and its MPL-2.0-licensed vendored tree ---
-    # Pulled in by `capytain-renderer` (Phase 0 Week 6 Day 2). Every entry
+    # Pulled in by `qsl-renderer` (Phase 0 Week 6 Day 2). Every entry
     # below is a direct or transitive dep of `servo = "0.1"`; the list is
     # exhaustive against the cargo-deny check at the HEAD of the Day 2
     # PR — new Servo releases may add or remove crates here, and each

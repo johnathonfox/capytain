@@ -4,7 +4,7 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 
-use capytain_core::{Account, AccountId, BackendKind, StorageError};
+use qsl_core::{Account, AccountId, BackendKind, StorageError};
 
 use crate::conn::{DbConn, Params, Row, Value};
 

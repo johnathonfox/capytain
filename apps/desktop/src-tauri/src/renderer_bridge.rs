@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bridge between Tauri's AppHandle and `capytain_renderer`.
+//! Bridge between Tauri's AppHandle and `qsl_renderer`.
 //!
 //! Two pieces live here:
 //!
-//! 1. [`TauriDispatcher`] — the [`capytain_renderer::MainThreadDispatch`]
+//! 1. [`TauriDispatcher`] — the [`qsl_renderer::MainThreadDispatch`]
 //!    implementation backed by [`tauri::AppHandle::run_on_main_thread`].
 //!    One instance per app; handed to the renderer at construction and
 //!    to its internal `EventLoopWaker` for Servo to drive the loop.
@@ -14,14 +14,14 @@
 //!    registers the link-click callback.
 //!
 //! The Linux NVIDIA EGL-Wayland env-var workaround lives in
-//! `capytain_renderer::apply_nvidia_wayland_workaround` and is called
+//! `qsl_renderer::apply_nvidia_wayland_workaround` and is called
 //! directly from `main` — shared with the corpus integration test.
 
 use std::sync::Arc;
 
-use capytain_core::EmailRenderer;
-use capytain_renderer::{MainThreadDispatch, ServoRenderer};
 use dpi::PhysicalSize;
+use qsl_core::EmailRenderer;
+use qsl_renderer::{MainThreadDispatch, ServoRenderer};
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::state::AppState;
@@ -85,7 +85,7 @@ pub fn install_servo_renderer<R: Runtime>(
 
     let mut renderer: Box<dyn EmailRenderer> = match servo_renderer {
         Ok(r) => {
-            tracing::info!("capytain-desktop: Servo renderer installed");
+            tracing::info!("qsl-desktop: Servo renderer installed");
             // The cursor callback is only wired on Linux; the `r`
             // binding stays immutable on macOS / Windows so we cfg
             // the mut rebind here rather than on the match arm.
@@ -96,7 +96,7 @@ pub fn install_servo_renderer<R: Runtime>(
             Box::new(r)
         }
         Err(e) => {
-            tracing::warn!("capytain-desktop: Servo renderer unavailable on this platform: {e}");
+            tracing::warn!("qsl-desktop: Servo renderer unavailable on this platform: {e}");
             return Ok(());
         }
     };
@@ -110,13 +110,13 @@ pub fn install_servo_renderer<R: Runtime>(
     renderer.on_link_click(Box::new(|url| {
         let scheme = url.scheme();
         if !matches!(scheme, "http" | "https" | "mailto") {
-            tracing::warn!(%url, scheme, "capytain-desktop: rejecting non-http(s)/mailto link from reader");
+            tracing::warn!(%url, scheme, "qsl-desktop: rejecting non-http(s)/mailto link from reader");
             return;
         }
         let url_str = url.as_str();
         match webbrowser::open(url_str) {
-            Ok(()) => tracing::info!(%url, "capytain-desktop: opened reader link in default browser"),
-            Err(e) => tracing::warn!(%url, error = %e, "capytain-desktop: webbrowser::open failed"),
+            Ok(()) => tracing::info!(%url, "qsl-desktop: opened reader link in default browser"),
+            Err(e) => tracing::warn!(%url, error = %e, "qsl-desktop: webbrowser::open failed"),
         }
     }));
 
@@ -251,8 +251,8 @@ fn install_cursor_callback<R: Runtime>(renderer: &mut ServoRenderer, app_handle:
 /// theme's default cursor — so unknown values surface as a no-op
 /// rather than a crash.
 #[cfg(target_os = "linux")]
-fn cursor_to_css_name(cursor: capytain_renderer::Cursor) -> &'static str {
-    use capytain_renderer::Cursor;
+fn cursor_to_css_name(cursor: qsl_renderer::Cursor) -> &'static str {
+    use qsl_renderer::Cursor;
     match cursor {
         Cursor::None => "none",
         Cursor::Default => "default",
@@ -300,7 +300,7 @@ fn build_auxiliary_window<R: Runtime>(
     app_handle: &AppHandle<R>,
 ) -> Result<tauri::Window<R>, Box<dyn std::error::Error>> {
     let reader_window = tauri::window::WindowBuilder::new(app_handle, "servo-reader")
-        .title("Capytain Reader (Servo)")
+        .title("QSL Reader (Servo)")
         .inner_size(
             f64::from(READER_INITIAL_WIDTH),
             f64::from(READER_INITIAL_HEIGHT),

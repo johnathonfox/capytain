@@ -128,7 +128,7 @@ impl CorpusRenderer {
     /// to settle (design doc §6.3) — so the result is stable, not the
     /// half-laid-out frame that a naive paint-then-read would yield.
     pub fn render(&self, html: &str) -> Result<RgbaImage, RendererError> {
-        let data_url = super::make_data_url(html, capytain_core::ColorScheme::Light)
+        let data_url = super::make_data_url(html, qsl_core::ColorScheme::Light)
             .map_err(|e| RendererError::RenderingContext(format!("data url: {e}")))?;
 
         self.webview.load(data_url);

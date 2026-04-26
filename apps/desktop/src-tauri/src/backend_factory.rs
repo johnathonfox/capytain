@@ -10,18 +10,18 @@
 //!
 //! Mirrors `mailcli::open_backend` — the two are kept in lockstep
 //! deliberately rather than extracted into a shared crate, since
-//! `capytain-sync` is meant to stay backend-agnostic via the
-//! `MailBackend` trait. Pulling `capytain-imap-client` and
-//! `capytain-jmap-client` into the engine would invert the
+//! `qsl-sync` is meant to stay backend-agnostic via the
+//! `MailBackend` trait. Pulling `qsl-imap-client` and
+//! `qsl-jmap-client` into the engine would invert the
 //! dependency direction.
 
 use std::sync::Arc;
 
-use capytain_auth::{lookup as provider_lookup, refresh_access_token, TokenVault};
-use capytain_core::{Account, AccountId, BackendKind, MailBackend, MailError};
-use capytain_imap_client::ImapBackend;
-use capytain_jmap_client::JmapBackend;
-use capytain_storage::repos;
+use qsl_auth::{lookup as provider_lookup, refresh_access_token, TokenVault};
+use qsl_core::{Account, AccountId, BackendKind, MailBackend, MailError};
+use qsl_imap_client::ImapBackend;
+use qsl_jmap_client::JmapBackend;
+use qsl_storage::repos;
 
 use crate::state::AppState;
 
@@ -139,7 +139,7 @@ fn provider_slug_from_id(id: &AccountId) -> Option<&str> {
 
 /// Refresh the OAuth access token for an IMAP-backed account and
 /// return the parameters needed to dial a fresh side session via
-/// `capytain_imap_client::dial_session`.
+/// `qsl_imap_client::dial_session`.
 ///
 /// Used by the IDLE watcher to open an additional connection per
 /// folder (separate from the cached `MailBackend` that serves sync
@@ -198,7 +198,7 @@ pub async fn fresh_imap_params(
 
 /// Refresh the OAuth access token for a JMAP-backed account and
 /// return the parameters needed to dial a fresh side `Client` via
-/// `capytain_jmap_client::dial_client`. Mirror of
+/// `qsl_jmap_client::dial_client`. Mirror of
 /// [`fresh_imap_params`] for the EventSource watcher.
 pub async fn fresh_jmap_params(
     state: &AppState,

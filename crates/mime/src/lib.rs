@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Capytain MIME helpers — thin wrappers over `mail-parser`.
+//! QSL MIME helpers — thin wrappers over `mail-parser`.
 //!
-//! Presents Capytain domain types (`MessageHeaders`, `MessageBody`,
+//! Presents QSL domain types (`MessageHeaders`, `MessageBody`,
 //! `Attachment`, `EmailAddress`) to callers and keeps the underlying
-//! parser crate out of the public surface. Both `capytain-imap-client`
-//! and `capytain-jmap-client` call into [`parse_rfc822`] when a
+//! parser crate out of the public surface. Both `qsl-imap-client`
+//! and `qsl-jmap-client` call into [`parse_rfc822`] when a
 //! `fetch_message` response comes back as raw bytes.
 
 use std::borrow::Cow;
@@ -19,12 +19,12 @@ pub mod remote_content;
 // which gives us one uniform shape regardless of whether the underlying
 // header was a list or a group of addresses.
 
-use capytain_core::{
+use qsl_core::{
     AccountId, Attachment, AttachmentRef, EmailAddress, FolderId, MessageBody, MessageFlags,
     MessageHeaders, MessageId, ThreadId,
 };
 
-/// Parse a raw RFC 822 blob into a Capytain [`MessageBody`].
+/// Parse a raw RFC 822 blob into a QSL [`MessageBody`].
 ///
 /// Identity fields the adapter supplies (its own opaque IDs, the account
 /// and folder) are taken as parameters; the parser only owns the
@@ -157,7 +157,7 @@ pub fn parse_headers(raw: &[u8], identity: MessageIdentity<'_>) -> Option<Messag
 }
 
 /// Pull `In-Reply-To` and `References` out of an RFC 5322 header
-/// block (no body). Used by `capytain-imap-client` after a
+/// block (no body). Used by `qsl-imap-client` after a
 /// `BODY.PEEK[HEADER]` FETCH — the structured ENVELOPE only
 /// surfaces `In-Reply-To`, so the threading pipeline needs a
 /// follow-up parse to recover `References` for the chain-walk
@@ -324,7 +324,7 @@ fn snippet_from(parsed: &Message<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capytain_core::{AccountId, FolderId, MessageFlags, MessageId};
+    use qsl_core::{AccountId, FolderId, MessageFlags, MessageId};
 
     const SAMPLE: &[u8] = b"From: Jane Doe <jane@example.com>\r\n\
 To: me@example.com\r\n\

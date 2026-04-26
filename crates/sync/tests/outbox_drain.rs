@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Integration tests for `capytain_sync::outbox_drain`.
+//! Integration tests for `qsl_sync::outbox_drain`.
 //!
 //! Drives the worker against a stub `MailBackend` + an in-memory
 //! Turso DB. Exercises the success path, the retry-with-backoff
@@ -13,12 +13,12 @@ use async_trait::async_trait;
 use chrono::Utc;
 use tokio::runtime::Runtime;
 
-use capytain_core::{
+use qsl_core::{
     Account, AccountId, AttachmentRef, BackendKind, Folder, FolderId, MailBackend, MailError,
     MessageBody, MessageFlags, MessageId, MessageList, SyncState,
 };
-use capytain_storage::{repos::outbox as outbox_repo, run_migrations, TursoConn};
-use capytain_sync::outbox_drain::{
+use qsl_storage::{repos::outbox as outbox_repo, run_migrations, TursoConn};
+use qsl_sync::outbox_drain::{
     self, BackendResolver, DeletePayload, DrainOutcome, MovePayload, UpdateFlagsPayload,
 };
 
@@ -145,7 +145,7 @@ async fn seed_account(conn: &TursoConn) -> AccountId {
         email_address: "x@example.com".into(),
         created_at: Utc::now(),
     };
-    capytain_storage::repos::accounts::insert(conn, &acct)
+    qsl_storage::repos::accounts::insert(conn, &acct)
         .await
         .unwrap();
     acct.id

@@ -9,12 +9,10 @@
 //! `messages_download_attachment`) land in Phase 1 alongside the
 //! outbox / optimistic-mutation engine.
 
-use capytain_core::{FolderRole, MessageFlags, MessageHeaders};
-use capytain_ipc::{FolderId, IpcResult, MessageId, MessagePage, RenderedMessage, SortOrder};
-use capytain_mime::{
-    parse_rfc822, sanitize_email_html, sanitize_email_html_trusted, MessageIdentity,
-};
-use capytain_storage::{
+use qsl_core::{FolderRole, MessageFlags, MessageHeaders};
+use qsl_ipc::{FolderId, IpcResult, MessageId, MessagePage, RenderedMessage, SortOrder};
+use qsl_mime::{parse_rfc822, sanitize_email_html, sanitize_email_html_trusted, MessageIdentity};
+use qsl_storage::{
     repos::folders as folders_repo, repos::messages as messages_repo, repos::outbox as outbox_repo,
     repos::remote_content_opt_ins, BlobStore,
 };
@@ -278,11 +276,7 @@ fn parse_and_sanitize(
     bytes: &[u8],
     headers: &MessageHeaders,
     sender_is_trusted: bool,
-) -> (
-    Option<String>,
-    Option<String>,
-    Vec<capytain_core::Attachment>,
-) {
+) -> (Option<String>, Option<String>, Vec<qsl_core::Attachment>) {
     let parsed = parse_rfc822(
         bytes,
         MessageIdentity {
@@ -334,7 +328,7 @@ pub struct MessagesMarkReadInput {
 /// Per-account grouping: the outbox is keyed on `account_id`, so
 /// mixed-account batches enqueue one row per account. The
 /// `payload_json` shape is documented next to
-/// `capytain_sync::outbox_drain::FlagsPayload`.
+/// `qsl_sync::outbox_drain::FlagsPayload`.
 #[tauri::command]
 pub async fn messages_mark_read(
     state: State<'_, AppState>,
@@ -352,7 +346,7 @@ pub async fn messages_mark_read(
     // a single row each — pulling the existing record gives us the
     // other flags so a future polish-pass `update_flags` against
     // multiple bits works cleanly.
-    let mut by_account: std::collections::HashMap<capytain_core::AccountId, Vec<MessageId>> =
+    let mut by_account: std::collections::HashMap<qsl_core::AccountId, Vec<MessageId>> =
         std::collections::HashMap::new();
     for id in &ids {
         let mut headers = match messages_repo::get(&*db, id).await {
@@ -416,7 +410,7 @@ pub async fn messages_flag(state: State<'_, AppState>, input: MessagesFlagInput)
     }
 
     let db = state.db.lock().await;
-    let mut by_account: std::collections::HashMap<capytain_core::AccountId, Vec<MessageId>> =
+    let mut by_account: std::collections::HashMap<qsl_core::AccountId, Vec<MessageId>> =
         std::collections::HashMap::new();
     for id in &ids {
         let mut headers = match messages_repo::get(&*db, id).await {
@@ -477,7 +471,7 @@ pub async fn messages_move(state: State<'_, AppState>, input: MessagesMoveInput)
     }
 
     let db = state.db.lock().await;
-    let mut by_account: std::collections::HashMap<capytain_core::AccountId, Vec<MessageId>> =
+    let mut by_account: std::collections::HashMap<qsl_core::AccountId, Vec<MessageId>> =
         std::collections::HashMap::new();
     for id in &ids {
         let headers = match messages_repo::get(&*db, id).await {
@@ -532,7 +526,7 @@ pub async fn messages_delete(
     }
 
     let db = state.db.lock().await;
-    let mut by_account: std::collections::HashMap<capytain_core::AccountId, Vec<MessageId>> =
+    let mut by_account: std::collections::HashMap<qsl_core::AccountId, Vec<MessageId>> =
         std::collections::HashMap::new();
     for id in &ids {
         let headers = match messages_repo::get(&*db, id).await {
@@ -628,7 +622,7 @@ pub async fn messages_load_older(
             }
             None => {
                 messages_repo::insert(&*db, h, None).await?;
-                if let Err(e) = capytain_sync::threading::attach_to_thread(&*db, h).await {
+                if let Err(e) = qsl_sync::threading::attach_to_thread(&*db, h).await {
                     tracing::warn!(message = %h.id.0, "thread assembly failed: {e}");
                 }
                 added += 1;
@@ -656,7 +650,7 @@ pub async fn messages_load_older(
 fn lowest_imap_uid(messages: &[MessageHeaders]) -> Option<u64> {
     messages
         .iter()
-        .filter_map(|m| capytain_imap_client::MessageRef::decode(&m.id).ok())
+        .filter_map(|m| qsl_imap_client::MessageRef::decode(&m.id).ok())
         .map(|r| u64::from(r.uid))
         .min()
 }

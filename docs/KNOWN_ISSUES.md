@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 Capytain Contributors
+SPDX-FileCopyrightText: 2026 QSL Contributors
 SPDX-License-Identifier: Apache-2.0
 -->
 
@@ -31,7 +31,7 @@ This is the short list. Phase-specific deferrals (Fastmail smoke, macOS / Window
 **Acceptance criteria (when this becomes fixable):**
 
 1. A Servo upstream patch to `WebView::take_screenshot` adds either (a) a tighter internal timeout with an error return instead of an indefinite wait, or (b) an explicit "skip the image-cache wait" flag we can set for corpus contexts.
-2. OR: a minimal Servo-only repro outside `capytain-renderer` that isolates which internal dependency is blocking; that points at a fix we can apply server-side.
+2. OR: a minimal Servo-only repro outside `qsl-renderer` that isolates which internal dependency is blocking; that points at a fix we can apply server-side.
 
 Neither is tractable for Phase 0. Un-ignore on Ubuntu only after one of the two lands.
 

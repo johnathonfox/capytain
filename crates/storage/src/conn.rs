@@ -12,7 +12,7 @@
 
 use async_trait::async_trait;
 
-use capytain_core::StorageError;
+use qsl_core::StorageError;
 
 /// A set of positional parameters for a prepared statement.
 ///

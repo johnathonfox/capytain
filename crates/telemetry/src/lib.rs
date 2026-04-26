@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared tracing initialization for every Capytain binary.
+//! Shared tracing initialization for every QSL binary.
 //!
 //! Binaries call [`init`] exactly once at startup. The helper wires
 //! [`tracing_subscriber::fmt`] to write structured logs to **stderr** so that
@@ -12,14 +12,14 @@
 //! 1. The `filter` argument to [`init`] if it is `Some`. This is what
 //!    `mailcli --log-level` threads through.
 //! 2. The `RUST_LOG` environment variable.
-//! 3. A fallback of `info` for Capytain crates, `warn` for everything else.
+//! 3. A fallback of `info` for QSL crates, `warn` for everything else.
 //!
 //! # Example
 //!
 //! ```no_run
 //! // In a binary's `main`:
-//! capytain_telemetry::init(None).expect("telemetry");
-//! tracing::info!("capytain up");
+//! qsl_telemetry::init(None).expect("telemetry");
+//! tracing::info!("qsl up");
 //! ```
 
 use std::error::Error;
@@ -35,12 +35,12 @@ pub type InitError = Box<dyn Error + Send + Sync + 'static>;
 /// Default filter directive used when neither an explicit filter nor
 /// `RUST_LOG` is provided.
 ///
-/// - All `capytain_*` crates at `info`
+/// - All `qsl_*` crates at `info`
 /// - Third-party crates at `warn`
-pub const DEFAULT_FILTER: &str = "warn,capytain_core=info,capytain_storage=info,\
-    capytain_imap_client=info,capytain_smtp_client=info,capytain_jmap_client=info,\
-    capytain_mime=info,capytain_sync=info,capytain_search=info,capytain_auth=info,\
-    capytain_ipc=info,capytain_telemetry=info,capytain_desktop=info,capytain_ui=info,\
+pub const DEFAULT_FILTER: &str = "warn,qsl_core=info,qsl_storage=info,\
+    qsl_imap_client=info,qsl_smtp_client=info,qsl_jmap_client=info,\
+    qsl_mime=info,qsl_sync=info,qsl_search=info,qsl_auth=info,\
+    qsl_ipc=info,qsl_telemetry=info,qsl_desktop=info,qsl_ui=info,\
     mailcli=info";
 
 /// Initialize the global tracing subscriber.

@@ -17,13 +17,13 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 
-use capytain_core::{AccountId, StorageError};
+use qsl_core::{AccountId, StorageError};
 
 use crate::conn::{DbConn, Params, Row, Value};
 
 /// Caller-side handle for one outbox row. The `payload_json` is
 /// kept opaque here — each `op_kind` chooses its own shape, and the
-/// drain worker in `capytain-sync` deserializes per kind.
+/// drain worker in `qsl-sync` deserializes per kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxEntry {
     pub id: String,

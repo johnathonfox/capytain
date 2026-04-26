@@ -1,6 +1,6 @@
-# Capytain — starter bundle
+# QSL — starter bundle
 
-This archive contains everything I authored for the Capytain project. Drop the
+This archive contains everything I authored for the QSL project. Drop the
 contents at the root of an empty repo and follow the setup guide below.
 
 ## What's included
@@ -42,7 +42,7 @@ See DESIGN.md §10.2 for the detailed licensing setup steps.
 
 ```sh
 # Extract this archive into an empty directory
-cd capytain
+cd qsl
 curl -o LICENSE https://www.apache.org/licenses/LICENSE-2.0.txt
 # (fill in [yyyy] and [name of copyright owner] in the LICENSE appendix)
 curl -o CODE_OF_CONDUCT.md https://raw.githubusercontent.com/EthicalSource/contributor_covenant/master/content/version/2/1/code_of_conduct.md
@@ -53,7 +53,7 @@ git init
 git branch -M main
 git add .
 git commit -s -m "chore: initial commit"
-git remote add origin git@github.com:johnathonfox/capytain.git
+git remote add origin git@github.com:johnathonfox/qsl.git
 git push -u origin main
 ```
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Capytain sync engine.
+//! QSL sync engine.
 //!
 //! Owns the top-level sync loop. Phase 1 Week 9 lands the per-folder
 //! header sync orchestrator extracted from `mailcli`; subsequent weeks
@@ -8,8 +8,8 @@
 //! event channel) plus the lazy-body-fetch path that `messages_get`
 //! triggers when a reader-pane request arrives for a header-only row.
 //!
-//! The crate depends on `capytain-storage` and the `MailBackend` trait
-//! from `capytain-core`. It deliberately knows nothing about IMAP- or
+//! The crate depends on `qsl-storage` and the `MailBackend` trait
+//! from `qsl-core`. It deliberately knows nothing about IMAP- or
 //! JMAP-specific quirks: a backend either returns the right shape or
 //! it raises a `MailError` the caller can act on.
 
@@ -19,8 +19,8 @@ pub mod threading;
 use thiserror::Error;
 use tracing::{debug, instrument, warn};
 
-use capytain_core::{Folder, MailBackend, MailError, MessageHeaders, StorageError};
-use capytain_storage::{
+use qsl_core::{Folder, MailBackend, MailError, MessageHeaders, StorageError};
+use qsl_storage::{
     repos::{folders, messages, sync_states},
     BlobStore, DbConn,
 };
@@ -187,7 +187,7 @@ pub async fn sync_folder(
 /// One folder's slice of a [`sync_account`] cycle.
 #[derive(Debug)]
 pub struct FolderSyncOutcome {
-    pub folder_id: capytain_core::FolderId,
+    pub folder_id: qsl_core::FolderId,
     pub result: Result<SyncReport, SyncError>,
 }
 

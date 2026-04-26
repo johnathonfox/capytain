@@ -20,8 +20,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument, warn};
 
-use capytain_core::{FolderId, MailError, MessageFlags, MessageId, StorageError};
-use capytain_storage::{repos::outbox as outbox_repo, DbConn};
+use qsl_core::{FolderId, MailError, MessageFlags, MessageId, StorageError};
+use qsl_storage::{repos::outbox as outbox_repo, DbConn};
 
 /// Op-kind tag used for `update_flags` payloads.
 pub const OP_UPDATE_FLAGS: &str = "update_flags";
@@ -81,8 +81,8 @@ pub struct DeletePayload {
 pub trait BackendResolver: Send + Sync {
     async fn open(
         &self,
-        account: &capytain_core::AccountId,
-    ) -> Result<std::sync::Arc<dyn capytain_core::MailBackend>, MailError>;
+        account: &qsl_core::AccountId,
+    ) -> Result<std::sync::Arc<dyn qsl_core::MailBackend>, MailError>;
 }
 
 /// Process every row whose `next_attempt_at <= now`. Returns one

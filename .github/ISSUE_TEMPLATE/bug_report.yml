@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Capytain is experimental — there's no maintainer committed to response. This issue may or may not receive a reply.
+        QSL is experimental — there's no maintainer committed to response. This issue may or may not receive a reply.
   - type: input
     attributes:
       label: OS and version

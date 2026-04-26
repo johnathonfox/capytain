@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "capytain-core"
-description = "Capytain domain types, errors, and core traits."
+name = "qsl-core"
+description = "QSL domain types, errors, and core traits."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

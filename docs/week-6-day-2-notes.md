@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 Capytain Contributors
+SPDX-FileCopyrightText: 2026 QSL Contributors
 SPDX-License-Identifier: Apache-2.0
 -->
 
@@ -59,7 +59,7 @@ trait surface has five of them:
 `request_navigation` alone provides the navigation-gating seam that
 the design doc split across two methods. The remaining missing
 methods don't exist on 0.1.0's surface — the defaults ship the
-"deny" behavior implicitly. `CapytainDelegate` implements only the
+"deny" behavior implicitly. `QSLDelegate` implements only the
 five that exist.
 
 ### 4. `Preferences` has no `js_enabled`
@@ -116,7 +116,7 @@ approach we landed on:
 - `ServoRenderer` (the trait impl) holds only `Send + Sync` types:
   `Arc<dyn MainThreadDispatch>`, `Arc<Mutex<LinkCb>>`, `AtomicU64`.
 - The actual Servo state (`Rc<Servo>`, `WebView`, `Rc<WindowRendering
-  Context>`, `Rc<CapytainDelegate>`) lives in a `thread_local!` on
+  Context>`, `Rc<QSLDelegate>`) lives in a `thread_local!` on
   whichever thread called `new_linux` / `new_macos` — the Tauri main
   thread in production.
 - Every trait method dispatches onto the main thread via the caller-
@@ -133,7 +133,7 @@ No `unsafe`; the workspace `forbid(unsafe_code)` lint stays green.
 Turso's default feature bundle includes `mimalloc`, which declares a
 `#[global_allocator]`. Servo includes `servo-allocator` which also
 declares one (tikv-jemallocator). A binary may have exactly one
-`#[global_allocator]`. Linking `capytain-desktop` (which depends on
+`#[global_allocator]`. Linking `qsl-desktop` (which depends on
 both) fails with:
 
 ```
@@ -142,7 +142,7 @@ allocator in: servo_allocator
 ```
 
 **Fix applied:** disable turso's default features at the workspace
-decl, re-enabling just `sync` (the feature `capytain-storage`
+decl, re-enabling just `sync` (the feature `qsl-storage`
 actually needs). Servo keeps its jemalloc; turso falls back to the
 system allocator. No measurable perf change observed in the Phase 0
 scoped workloads; revisit in Phase 1 if storage-heavy paths get
@@ -150,27 +150,27 @@ sluggish.
 
 ### 9. Feature-flag propagation for Windows CI
 
-Design doc assumed Servo would be default-on in `capytain-renderer`.
+Design doc assumed Servo would be default-on in `qsl-renderer`.
 That fights with the Windows CI job — the `windows-latest` runner
 doesn't ship the SpiderMonkey / cmake / clang-cl toolchain, so every
 Windows clippy run would try (and fail) to build Servo.
 
-**What we did instead:** `capytain-renderer` keeps a `servo` feature
-but leaves it **off** by default. `capytain-desktop` owns a
+**What we did instead:** `qsl-renderer` keeps a `servo` feature
+but leaves it **off** by default. `qsl-desktop` owns a
 desktop-level `servo` feature (default-on) that propagates to
-`capytain-renderer/servo`. `apps/desktop/src-tauri` depends on the
+`qsl-renderer/servo`. `apps/desktop/src-tauri` depends on the
 renderer with `default-features = false` so the only way Servo gets
 linked is through the desktop feature toggle.
 
 This means:
-- `cargo build -p capytain-desktop` — Linux dev path — servo on.
-- `cargo build -p capytain-desktop --no-default-features` — Windows
+- `cargo build -p qsl-desktop` — Linux dev path — servo on.
+- `cargo build -p qsl-desktop --no-default-features` — Windows
   CI path — servo off; the desktop binary links a `None`-shaped
   renderer via `AppState::servo_renderer: Mutex<Option<_>>`, and
   reader commands degrade gracefully.
 - `cargo clippy --workspace` on Linux — servo on throughout.
-- Windows CI explicitly `--exclude`s both `capytain-renderer` and
-  `capytain-desktop` from the workspace run and verifies them
+- Windows CI explicitly `--exclude`s both `qsl-renderer` and
+  `qsl-desktop` from the workspace run and verifies them
   separately in their no-servo shapes.
 
 ---
@@ -213,7 +213,7 @@ Windows (§4.2's `WS_CHILD` `HWND`).
 the `new_macos` function body. A future Mac-hardware session needs
 to:
 
-1. Actually run `cargo build -p capytain-desktop` on Mac and see if
+1. Actually run `cargo build -p qsl-desktop` on Mac and see if
    it links. Servo's macOS build path has its own native-dep story
    that §7 doesn't fully enumerate.
 2. Validate that `WindowRenderingContext::new` accepts the
@@ -235,7 +235,7 @@ to:
 Not in scope for Day 2 at all. Tracked as a follow-up PR: implement
 `ServoRenderer::new_windows` per design doc §4.2, install the Servo
 native build deps on the Windows CI runner, and extend the CI matrix
-to stop `--exclude`ing `capytain-renderer` / `capytain-desktop`.
+to stop `--exclude`ing `qsl-renderer` / `qsl-desktop`.
 
 ---
 
@@ -253,11 +253,11 @@ to stop `--exclude`ing `capytain-renderer` / `capytain-desktop`.
 - `cargo check --workspace`, `cargo clippy --workspace --all-targets
   -- -D warnings`, `cargo fmt --all --check`, `cargo test --workspace`,
   `reuse lint` — all green.
-- `cargo build --release -p capytain-desktop` — succeeds, ~2m17s on
+- `cargo build --release -p qsl-desktop` — succeeds, ~2m17s on
   a 32-core box after cache is warm.
 - App boot: database opens, migrations run, Tauri event loop starts,
   WebRender initializes on the NVIDIA GPU, Servo engine constructs,
-  `capytain-desktop: Servo renderer installed` fires from
+  `qsl-desktop: Servo renderer installed` fires from
   `renderer_bridge::install_servo_renderer`. **The entire code path
   through trait construction is exercised.**
 

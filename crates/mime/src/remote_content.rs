@@ -96,13 +96,13 @@ pub fn default_engine() -> &'static Engine {
 /// True if `url` (loaded as `request_type` — `"image"` / `"script"`
 /// / `"other"` / etc.) matches a block rule in the provided engine.
 ///
-/// The synthetic source URL `https://capytain.local/reader/` fixes
+/// The synthetic source URL `https://qsl.local/reader/` fixes
 /// the third-party bit to "always true" (every remote URL in an
 /// email body is third-party to the user), which is what the filter
 /// rules above expect. Invalid URLs are not treated as blocked —
 /// the ammonia sanitizer handles malformed URL values separately.
 pub fn is_blocked(engine: &Engine, url: &str, request_type: &str) -> bool {
-    match Request::new(url, "https://capytain.local/reader/", request_type) {
+    match Request::new(url, "https://qsl.local/reader/", request_type) {
         Ok(req) => engine.check_network_request(&req).matched,
         Err(_) => false,
     }

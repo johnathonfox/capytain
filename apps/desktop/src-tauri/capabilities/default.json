@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default permissions granted to the main Capytain window. Locked down to the capytain-defined commands only — no ambient filesystem, shell, or OS access.",
+  "description": "Default permissions granted to the main QSL window. Locked down to the qsl-defined commands only — no ambient filesystem, shell, or OS access.",
   "windows": ["main"],
   "permissions": [
     "core:default",

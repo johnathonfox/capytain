@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "capytain-smtp-client"
-description = "Capytain SMTP submission adapter over lettre."
+name = "qsl-smtp-client"
+description = "QSL SMTP submission adapter over lettre."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,8 +1,8 @@
-# Capytain — Design Specification
+# QSL — Design Specification
 
 > A modern, cross-platform, open-source desktop email client written primarily in Rust.
 >
-> **Status: experimental.** Capytain is a personal project published in the open under Apache 2.0. There is no maintainer committed to support or response at this time. Use, fork, and build on it freely under the terms of the license.
+> **Status: experimental.** QSL is a personal project published in the open under Apache 2.0. There is no maintainer committed to support or response at this time. Use, fork, and build on it freely under the terms of the license.
 
 ## 1. Overview and Goals
 
@@ -210,7 +210,7 @@ The v1 implementation is `ServoRenderer`. The trait exists for clean architectur
 | Logging | **tracing** + **tracing-subscriber** | structured logs, spans per account/folder |
 | Error handling | **thiserror** in libs, **anyhow** at the binary edges | standard Rust pattern |
 | Serialization | **serde** + **serde_json** | for IPC and config |
-| Config | **figment** or hand-rolled TOML | per-user config at `~/.config/capytain/` |
+| Config | **figment** or hand-rolled TOML | per-user config at `~/.config/qsl/` |
 
 **A note on Turso.** Turso keeps the storage layer pure Rust with native async, MVCC via BEGIN CONCURRENT, and encryption at rest built-in. It's in beta as of early 2026, which means we should expect to file bugs, occasionally carry patches, and track releases closely — that's the cost of the Rust-native principle in §1, and it's budgeted in. The `crates/storage` layer sits behind a connection trait for clean separation and testability, not as a swap-out hatch. Turso's file-format compatibility with SQLite is still a useful property — any SQLite CLI works against our database files for debugging and forensics — but it's a tooling bonus, not a rip-cord.
 

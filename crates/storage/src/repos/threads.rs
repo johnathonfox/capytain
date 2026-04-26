@@ -5,16 +5,16 @@
 //! The schema is per `DESIGN.md` §4.4 — one `threads` row per
 //! conversation, with `messages.thread_id` foreign-keyed in.
 //! Phase 1 Week 13 wires the assembly pipeline that
-//! `capytain-sync::sync_folder` calls after each message insert.
+//! `qsl-sync::sync_folder` calls after each message insert.
 //!
-//! The assembly resolver lives over in `capytain-sync` because it
+//! The assembly resolver lives over in `qsl-sync` because it
 //! needs cross-repo coordination (`messages_repo::find_by_message_id`,
 //! `threads_repo::insert`, etc.). This module just owns the
 //! per-thread CRUD.
 
 use chrono::{DateTime, TimeZone, Utc};
 
-use capytain_core::{AccountId, MessageId, StorageError, ThreadId};
+use qsl_core::{AccountId, MessageId, StorageError, ThreadId};
 
 use crate::conn::{DbConn, Params, Row, Value};
 
@@ -25,7 +25,7 @@ pub struct Thread {
     pub account_id: AccountId,
     pub root_message_id: Option<MessageId>,
     /// Subject normalized for the lexical-fallback assembly path
-    /// (see `capytain_sync::threading::normalize_subject`). Stored
+    /// (see `qsl_sync::threading::normalize_subject`). Stored
     /// once at thread creation so the lookup query stays a simple
     /// indexed equality check; rebuilding when subjects diverge is
     /// not worth it.

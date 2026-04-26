@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Capytain",
+  "productName": "QSL",
   "version": "0.0.0",
-  "identifier": "app.capytain.desktop",
+  "identifier": "app.qsl.desktop",
   "build": {
     "frontendDist": "../ui/dist"
   },
@@ -10,7 +10,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Capytain",
+        "title": "QSL",
         "width": 1280,
         "height": 800,
         "minWidth": 960,
@@ -27,9 +27,9 @@
     "active": true,
     "targets": "all",
     "category": "Productivity",
-    "copyright": "Copyright (c) Capytain Contributors",
-    "shortDescription": "Capytain — a Rust-native desktop email client.",
-    "longDescription": "Capytain is an experimental desktop email client written end-to-end in Rust. Phase 0 scaffolding.",
+    "copyright": "Copyright (c) QSL Contributors",
+    "shortDescription": "QSL — a Rust-native desktop email client.",
+    "longDescription": "QSL is an experimental desktop email client written end-to-end in Rust. Phase 0 scaffolding.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

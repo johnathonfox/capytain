@@ -1,6 +1,6 @@
 -- SPDX-License-Identifier: Apache-2.0
 --
--- Capytain schema v1. Matches DESIGN.md §4.4 with minor column-naming
+-- QSL schema v1. Matches DESIGN.md §4.4 with minor column-naming
 -- adjustments for SQLite idiomatics (snake_case, explicit NOT NULL, no
 -- backticks). Addresses, labels, and anything with a variable shape are
 -- stored as TEXT holding JSON; numbers are INTEGER; bodies live on disk
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS folders (
     unread_count         INTEGER NOT NULL DEFAULT 0,
     total_count          INTEGER NOT NULL DEFAULT 0,
     parent_id            TEXT    REFERENCES folders(id) ON DELETE SET NULL,
-    -- Opaque per-folder sync cursor (see capytain-core::SyncState). For IMAP
+    -- Opaque per-folder sync cursor (see qsl-core::SyncState). For IMAP
     -- this carries the serialized (uidvalidity, highestmodseq, uidnext)
     -- tuple; for JMAP it carries the server's state token verbatim.
     sync_state           TEXT

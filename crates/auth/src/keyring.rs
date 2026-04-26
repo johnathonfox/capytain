@@ -3,7 +3,7 @@
 //! Refresh-token storage in the OS keychain.
 //!
 //! One entry per account, scoped to the keychain service
-//! `com.capytain.app`. On macOS this shows up in Keychain Access; on
+//! `com.qsl.app`. On macOS this shows up in Keychain Access; on
 //! Windows in Credential Manager; on Linux in Secret Service (GNOME
 //! Keyring / KWallet).
 //!
@@ -11,24 +11,24 @@
 //! process memory. Passwords are never persisted because they never
 //! cross our code path in the first place.
 
-use capytain_core::AccountId;
 use keyring::Entry;
+use qsl_core::AccountId;
 use tracing::debug;
 
 use crate::error::AuthError;
 use crate::tokens::RefreshToken;
 
-/// Keychain service identifier used for every Capytain entry.
-pub const KEYCHAIN_SERVICE: &str = "com.capytain.app";
+/// Keychain service identifier used for every QSL entry.
+pub const KEYCHAIN_SERVICE: &str = "com.qsl.app";
 
-/// Facade over the OS keychain for Capytain's refresh tokens.
+/// Facade over the OS keychain for QSL's refresh tokens.
 #[derive(Debug)]
 pub struct TokenVault {
     service: String,
 }
 
 impl TokenVault {
-    /// Build a vault that uses the default `com.capytain.app` service.
+    /// Build a vault that uses the default `com.qsl.app` service.
     pub fn new() -> Self {
         Self {
             service: KEYCHAIN_SERVICE.to_string(),
@@ -37,7 +37,7 @@ impl TokenVault {
 
     /// Build a vault with a custom service name. Tests use this to
     /// namespace parallel runs so they don't step on each other (and so
-    /// a developer's real Capytain refresh tokens don't get clobbered
+    /// a developer's real QSL refresh tokens don't get clobbered
     /// by the test suite).
     pub fn with_service(service: impl Into<String>) -> Self {
         Self {

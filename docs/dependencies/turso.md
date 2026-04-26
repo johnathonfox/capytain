@@ -1,24 +1,24 @@
 <!--
-SPDX-FileCopyrightText: 2026 Capytain Contributors
+SPDX-FileCopyrightText: 2026 QSL Contributors
 SPDX-License-Identifier: Apache-2.0
 -->
 
 # Turso Engagement Log
 
-Capytain's storage layer runs on [Turso](https://github.com/tursodatabase/turso), a pure-Rust SQLite-compatible embedded database. Turso is in active development and shipping sub-1.0 releases; this document tracks how we engage with it, what's currently broken, and when we vendor a patch.
+QSL's storage layer runs on [Turso](https://github.com/tursodatabase/turso), a pure-Rust SQLite-compatible embedded database. Turso is in active development and shipping sub-1.0 releases; this document tracks how we engage with it, what's currently broken, and when we vendor a patch.
 
 ## Pinned version
 
 - **Crate:** `turso` 0.5.x (currently 0.5.3)
 - **Workspace declaration:** `Cargo.toml` `[workspace.dependencies]` → `turso = "0.5"` (tilde-compatible within 0.5.x)
 
-Bumping the minor or major version requires re-running the full storage test suite (`cargo test -p capytain-storage`) and updating this file.
+Bumping the minor or major version requires re-running the full storage test suite (`cargo test -p qsl-storage`) and updating this file.
 
 ## Upstream-patch-after-N-days policy
 
 Per [`DESIGN.md` §12](../../DESIGN.md#12-open-questions):
 
-> **N = 14 days.** If a Turso bug or missing feature blocks us and upstream has not landed (or clearly committed to landing) a fix within 14 days of a tracked issue, we vendor a patch. The vendored patch ships as a `[patch.crates-io]` entry plus a fork on `github.com/johnathonfox/turso` with the Capytain fix cherry-picked on top. We upstream the patch in parallel and drop our fork as soon as the official release lands.
+> **N = 14 days.** If a Turso bug or missing feature blocks us and upstream has not landed (or clearly committed to landing) a fix within 14 days of a tracked issue, we vendor a patch. The vendored patch ships as a `[patch.crates-io]` entry plus a fork on `github.com/johnathonfox/turso` with the QSL fix cherry-picked on top. We upstream the patch in parallel and drop our fork as soon as the official release lands.
 
 We prefer upstreaming over long-lived forks. A vendored patch is an admission of a maintenance cost, not a strategic choice.
 
@@ -28,7 +28,7 @@ We prefer upstreaming over long-lived forks. A vendored patch is an admission of
 
 Turso 0.5.3 ships `pub struct Transaction {}` with no methods — the transaction API is declared but unimplemented. `Connection::unchecked_transaction()` and `Connection::transaction()` both return this empty struct.
 
-**Workaround:** `capytain-storage` drives transactions at the SQL level via raw `BEGIN` / `COMMIT` / `ROLLBACK` statements on the underlying connection. This matches SQLite's actual transaction model and is correct, just less ergonomic than a typed Transaction wrapper would be.
+**Workaround:** `qsl-storage` drives transactions at the SQL level via raw `BEGIN` / `COMMIT` / `ROLLBACK` statements on the underlying connection. This matches SQLite's actual transaction model and is correct, just less ergonomic than a typed Transaction wrapper would be.
 
 **Impact:** `crates/storage/src/turso_conn.rs` has a `TursoTx` struct that holds a borrowed `&turso::Connection` and issues text commands. If Turso ships a real Transaction API later, we'll swap the implementation under the same `DbConn`/`Tx` trait surface without any callers changing.
 

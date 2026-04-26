@@ -3,11 +3,11 @@
 //! Integration tests for the storage layer.
 //!
 //! Each public domain type is round-tripped through Turso (via
-//! [`capytain_storage::TursoConn::in_memory`] + the schema v1 migration) and
+//! [`qsl_storage::TursoConn::in_memory`] + the schema v1 migration) and
 //! asserted equal to the original. Generators come from `proptest`'s
 //! `Strategy` API; the shrinker keeps test output readable.
 //!
-//! Run with `cargo test -p capytain-storage --test roundtrip`. To scale the
+//! Run with `cargo test -p qsl-storage --test roundtrip`. To scale the
 //! search set `PROPTEST_CASES=N` (default is 256).
 
 use chrono::{DateTime, TimeZone, Utc};
@@ -15,11 +15,11 @@ use proptest::collection::vec;
 use proptest::prelude::*;
 use tokio::runtime::Runtime;
 
-use capytain_core::{
+use qsl_core::{
     Account, AccountId, Attachment, AttachmentRef, BackendKind, EmailAddress, Folder, FolderId,
     FolderRole, MessageFlags, MessageHeaders, MessageId, SyncState, ThreadId,
 };
-use capytain_storage::{repos, run_migrations, DbConn, TursoConn};
+use qsl_storage::{repos, run_migrations, DbConn, TursoConn};
 
 // ---------- Generators ----------
 
@@ -438,18 +438,18 @@ fn migrations_idempotent() {
         let rows = conn
             .query(
                 "SELECT COUNT(*) AS c FROM _schema_version",
-                capytain_storage::Params::empty(),
+                qsl_storage::Params::empty(),
             )
             .await
             .unwrap();
-        let expected = capytain_storage::MIGRATIONS.len() as i64;
+        let expected = qsl_storage::MIGRATIONS.len() as i64;
         assert_eq!(rows[0].get_i64("c").unwrap(), expected);
     });
 }
 
 #[test]
 fn remote_content_opt_in_add_check_remove() {
-    use capytain_storage::repos::remote_content_opt_ins as opt_ins;
+    use qsl_storage::repos::remote_content_opt_ins as opt_ins;
     let rt = rt();
     rt.block_on(async move {
         let conn = fresh_conn().await;
@@ -525,12 +525,12 @@ fn transaction_rollback_reverts_writes() {
             tx.execute(
                 "INSERT INTO accounts (id, kind, display_name, email_address, created_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                capytain_storage::Params(vec![
-                    capytain_storage::Value::Text(&acct.id.0),
-                    capytain_storage::Value::OwnedText("jmap".into()),
-                    capytain_storage::Value::Text(&acct.display_name),
-                    capytain_storage::Value::Text(&acct.email_address),
-                    capytain_storage::Value::Integer(acct.created_at.timestamp()),
+                qsl_storage::Params(vec![
+                    qsl_storage::Value::Text(&acct.id.0),
+                    qsl_storage::Value::OwnedText("jmap".into()),
+                    qsl_storage::Value::Text(&acct.display_name),
+                    qsl_storage::Value::Text(&acct.email_address),
+                    qsl_storage::Value::Integer(acct.created_at.timestamp()),
                 ]),
             )
             .await

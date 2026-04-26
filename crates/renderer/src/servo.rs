@@ -13,7 +13,7 @@
 //! │   • Arc<Mutex<LinkCb>>        │ thread│    • Rc<Servo>             │
 //! │   • AtomicU64 handle counter  │       │    • WebView               │
 //! │                               │       │    • Rc<WindowRenderingCtx>│
-//! │                               │       │    • Rc<CapytainDelegate>  │
+//! │                               │       │    • Rc<QSLDelegate>  │
 //! └───────────────────────────────┘       └────────────────────────────┘
 //! ```
 //!
@@ -37,7 +37,7 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use capytain_core::{ColorScheme, EmailRenderer, RenderHandle, RenderPolicy};
+use qsl_core::{ColorScheme, EmailRenderer, RenderHandle, RenderPolicy};
 use servo::{
     DevicePoint, EventLoopWaker, InputEvent, MouseButton, MouseButtonAction, MouseButtonEvent,
     MouseLeftViewportEvent, MouseMoveEvent, Preferences, RenderingContext, Servo, ServoBuilder,
@@ -54,7 +54,7 @@ mod macos;
 mod windows;
 
 pub use corpus::{render_html_to_image, CorpusRenderer};
-use delegate::{CapytainDelegate, CursorCb, LinkCb};
+use delegate::{CursorCb, LinkCb, QSLDelegate};
 
 /// On Linux, force Mesa's llvmpipe software EGL before any GL code
 /// runs. Bypasses the `wp_linux_drm_syncobj_surface_v1` protocol error
@@ -202,7 +202,7 @@ impl ServoRenderer {
                 .build(),
         );
 
-        let delegate = Rc::new(CapytainDelegate::new(
+        let delegate = Rc::new(QSLDelegate::new(
             Rc::clone(&rendering_context),
             Arc::clone(&link_cb),
             Arc::clone(&cursor_cb),
@@ -320,7 +320,7 @@ struct MainThreadState {
     servo: Rc<Servo>,
     webview: WebView,
     rendering_context: Rc<WindowRenderingContext>,
-    _delegate: Rc<CapytainDelegate>,
+    _delegate: Rc<QSLDelegate>,
 }
 
 // ---------------------------------------------------------------------------
@@ -464,7 +464,7 @@ fn apply_reader_pane_preferences(prefs: &mut Preferences) {
     prefs.dom_servoparser_async_html_tokenizer_enabled = false;
 
     // Expose the rendered reader pane to AccessKit — accessibility is
-    // a first-class concern for Capytain (PRINCIPLES.md §accessibility).
+    // a first-class concern for QSL (PRINCIPLES.md §accessibility).
     prefs.accessibility_enabled = true;
 }
 
@@ -484,7 +484,7 @@ fn make_data_url(
 ) -> Result<url::Url, url::ParseError> {
     let scheme_str = match color_scheme {
         ColorScheme::Dark => "dark",
-        // `ColorScheme` is `#[non_exhaustive]` (capytain-core), so a
+        // `ColorScheme` is `#[non_exhaustive]` (qsl-core), so a
         // wildcard is required; every other variant — Light today,
         // future additions — maps to the default light rendering.
         _ => "light",

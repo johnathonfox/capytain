@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Capytain IMAP adapter — [`MailBackend`] implementation over
+//! QSL IMAP adapter — [`MailBackend`] implementation over
 //! `async-imap`.
 //!
-//! This crate bridges the IMAP protocol and Capytain's
+//! This crate bridges the IMAP protocol and QSL's
 //! protocol-agnostic mail abstraction. At construction time the backend
-//! is handed a fresh OAuth2 access token (minted by `capytain-auth`) and
+//! is handed a fresh OAuth2 access token (minted by `qsl-auth`) and
 //! a TLS stream; it then:
 //!
 //! 1. Authenticates via SASL XOAUTH2.

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "capytain-desktop"
-description = "Capytain desktop shell: Tauri 2 host process for the Dioxus UI."
+name = "qsl-desktop"
+description = "QSL desktop shell: Tauri 2 host process for the Dioxus UI."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,7 +13,7 @@ publish.workspace = true
 build = "build.rs"
 
 [[bin]]
-name = "capytain-desktop"
+name = "qsl-desktop"
 path = "src/main.rs"
 
 [build-dependencies]
@@ -21,22 +21,22 @@ tauri-build = { workspace = true }
 
 [features]
 # `servo` controls whether the Servo-backed renderer is linked into
-# the desktop app. Default-on so `cargo build -p capytain-desktop`
+# the desktop app. Default-on so `cargo build -p qsl-desktop`
 # produces the real reader pane on Linux / macOS; turn off for a
 # stubbed build (e.g. Windows CI until Servo-on-Windows lands).
 default = ["servo"]
-servo = ["capytain-renderer/servo"]
+servo = ["qsl-renderer/servo"]
 
 [dependencies]
-capytain-auth = { workspace = true }
-capytain-core = { workspace = true }
-capytain-imap-client = { workspace = true }
-capytain-ipc = { workspace = true }
-capytain-jmap-client = { workspace = true }
-capytain-mime = { workspace = true }
-capytain-storage = { workspace = true }
-capytain-sync = { workspace = true }
-capytain-telemetry = { workspace = true }
+qsl-auth = { workspace = true }
+qsl-core = { workspace = true }
+qsl-imap-client = { workspace = true }
+qsl-ipc = { workspace = true }
+qsl-jmap-client = { workspace = true }
+qsl-mime = { workspace = true }
+qsl-storage = { workspace = true }
+qsl-sync = { workspace = true }
+qsl-telemetry = { workspace = true }
 serde_json = { workspace = true }
 # OS-native desktop notifications. Plugin path means we don't need
 # any extra capability tokens — the plugin's default permission set
@@ -44,9 +44,9 @@ serde_json = { workspace = true }
 tauri-plugin-notification = "2"
 # The workspace-level decl sets `default-features = false`; desktop
 # re-enables renderer's `servo` via its OWN `[features]` table so a
-# `cargo build -p capytain-desktop --no-default-features` cleanly
+# `cargo build -p qsl-desktop --no-default-features` cleanly
 # drops Servo (Windows CI path).
-capytain-renderer = { workspace = true }
+qsl-renderer = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 # `rustls` is a transitive dep (servo + tokio-rustls + hyper-rustls

@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Identifies an `Account` inside Capytain's local storage.
+/// Identifies an `Account` inside QSL's local storage.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct AccountId(pub String);

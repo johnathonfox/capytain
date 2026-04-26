@@ -1,11 +1,11 @@
 <!--
-SPDX-FileCopyrightText: 2026 Capytain Contributors
+SPDX-FileCopyrightText: 2026 QSL Contributors
 SPDX-License-Identifier: Apache-2.0
 -->
 
 # Fastmail Engagement Log
 
-Capytain's JMAP backend (`capytain-jmap-client`) talks to Fastmail's JMAP service via OAuth2 + bearer token. This document tracks the OAuth client setup runbook, observed protocol quirks, and the canonical session URL pin.
+QSL's JMAP backend (`qsl-jmap-client`) talks to Fastmail's JMAP service via OAuth2 + bearer token. This document tracks the OAuth client setup runbook, observed protocol quirks, and the canonical session URL pin.
 
 ## Session URL
 
@@ -20,15 +20,15 @@ Fastmail's OAuth2 is PKCE-only for native clients (no client secret). Steps for 
 
 1. Sign in to <https://www.fastmail.com> and go to **Settings → Privacy & Security → Connected apps & API tokens → Manage OAuth clients**.
 2. Click **New OAuth Client**, set:
-   - **Name:** `Capytain (dev)` (or similar)
+   - **Name:** `QSL (dev)` (or similar)
    - **Redirect URI:** `http://127.0.0.1:0/callback` (port 0 = "any free port"; the loopback flow's listener picks one at runtime)
    - **Scopes:** at minimum `urn:ietf:params:jmap:core` and `urn:ietf:params:jmap:mail`. Add `urn:ietf:params:jmap:submission` for SMTP. The `protocol-imap` and `protocol-smtp` scopes (already in `crates/auth/src/providers/fastmail.rs`) cover the legacy IMAP/SMTP fallback.
    - **PKCE:** required (no secret).
 3. Copy the **Client ID** Fastmail issues. Drop it into the workspace-root `.env`:
 
    ```sh
-   echo "CAPYTAIN_FASTMAIL_CLIENT_ID=<paste-here>" >> .env
-   echo "CAPYTAIN_FASTMAIL_CLIENT_SECRET=" >> .env  # PKCE-only — leave empty
+   echo "QSL_FASTMAIL_CLIENT_ID=<paste-here>" >> .env
+   echo "QSL_FASTMAIL_CLIENT_SECRET=" >> .env  # PKCE-only — leave empty
    ```
 
 4. `cargo build` — the `crates/auth/build.rs` script picks the values up via `dotenvy` and bakes them into the binary via `rustc-env`.
@@ -56,7 +56,7 @@ Total: ... in <ms> ms
 Then open the desktop:
 
 ```sh
-cargo run -p capytain-desktop
+cargo run -p qsl-desktop
 ```
 
 Tail the log for `JMAP EventSource watcher started` once per JMAP account. Send yourself a test message from another client → desktop log should show `JMAP push state change` within a few seconds, followed by `live sync_account folder` lines and a `sync_event` Tauri emit; the UI message-list pane refetches.

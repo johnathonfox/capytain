@@ -38,7 +38,7 @@
 //! See `docs/week-6-day-4-gtk-integration.md` for the original design
 //! and the hardware-gating rationale; `docs/upstream/surfman-explicit-sync.md`
 //! for why the native NVIDIA EGL-Wayland path is broken and we rely
-//! on the Mesa llvmpipe fallback (`capytain_renderer::apply_nvidia_wayland_workaround`).
+//! on the Mesa llvmpipe fallback (`qsl_renderer::apply_nvidia_wayland_workaround`).
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -183,21 +183,21 @@ impl LinuxGtkParent {
         // event back up to the webview underneath.
         drawing_area.connect_button_press_event(|_w, ev| {
             let (x, y) = ev.position();
-            capytain_renderer::forward_pointer_button_press(ev.button(), x as f32, y as f32);
+            qsl_renderer::forward_pointer_button_press(ev.button(), x as f32, y as f32);
             glib::Propagation::Stop
         });
         drawing_area.connect_button_release_event(|_w, ev| {
             let (x, y) = ev.position();
-            capytain_renderer::forward_pointer_button_release(ev.button(), x as f32, y as f32);
+            qsl_renderer::forward_pointer_button_release(ev.button(), x as f32, y as f32);
             glib::Propagation::Stop
         });
         drawing_area.connect_motion_notify_event(|_w, ev| {
             let (x, y) = ev.position();
-            capytain_renderer::forward_pointer_move(x as f32, y as f32);
+            qsl_renderer::forward_pointer_move(x as f32, y as f32);
             glib::Propagation::Stop
         });
         drawing_area.connect_leave_notify_event(|_w, _ev| {
-            capytain_renderer::forward_pointer_left_viewport();
+            qsl_renderer::forward_pointer_left_viewport();
             glib::Propagation::Stop
         });
 

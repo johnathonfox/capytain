@@ -1,9 +1,9 @@
 <!--
-SPDX-FileCopyrightText: 2026 Capytain Contributors
+SPDX-FileCopyrightText: 2026 QSL Contributors
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Capytain Engineering Decisions
+# QSL Engineering Decisions
 
 Append-only log of meaningful design / implementation choices. Format per entry: a one-line summary, the **decision**, the **why**, and any **alternatives considered**. Newest entries on top.
 
@@ -54,7 +54,7 @@ Append-only log of meaningful design / implementation choices. Format per entry:
 
 **Decision.** The desktop sync engine spawns one fixed-cadence drain task on a 5-second `tokio::time::interval`. Per-row failures bump `attempts` and reschedule via the schedule `30s · 4^(attempts-1)` with ±20% uniform jitter, capped by transitioning the row to a dead-letter state once `attempts == MAX_ATTEMPTS = 5`. DLQ rows (`next_attempt_at = NULL`) are surfaced to the UI as a synthetic `SyncEvent::FolderError` so the existing `sync_event` listener picks them up without a new IPC type.
 
-**Why.** The spec exit criterion ("Marking a message read in Capytain updates Gmail within seconds") wants short median latency without flooding the server when something genuinely fails. 5s is short enough that humans don't notice; the 30s/2m/8m/30m schedule is the standard pattern for non-critical retry. Jitter keeps a thundering-herd of optimistic clicks (e.g. "mark all as read" on 200 messages) from re-firing in lockstep. Hard cap at 5 keeps a permanently broken row from quietly retrying forever.
+**Why.** The spec exit criterion ("Marking a message read in QSL updates Gmail within seconds") wants short median latency without flooding the server when something genuinely fails. 5s is short enough that humans don't notice; the 30s/2m/8m/30m schedule is the standard pattern for non-critical retry. Jitter keeps a thundering-herd of optimistic clicks (e.g. "mark all as read" on 200 messages) from re-firing in lockstep. Hard cap at 5 keeps a permanently broken row from quietly retrying forever.
 
 **Alternatives.**
 - Eager drain on each `messages_mark_read` invocation — would land the typical case faster, but couples UI commands to a background concern. Tick-based stays simpler.
@@ -75,7 +75,7 @@ Append-only log of meaningful design / implementation choices. Format per entry:
 
 ## 2026-04-25 · Threading: ASCII subject normalization, 30-day recency window
 
-**Decision.** `capytain_sync::threading::normalize_subject` ASCII-lowercases the subject and collapses whitespace; it does **not** apply Unicode case folding. The subject-fallback step in the assembly pipeline only matches threads whose `last_date` is within the last **30 days**.
+**Decision.** `qsl_sync::threading::normalize_subject` ASCII-lowercases the subject and collapses whitespace; it does **not** apply Unicode case folding. The subject-fallback step in the assembly pipeline only matches threads whose `last_date` is within the last **30 days**.
 
 **Why.** `PHASE_1.md`'s "Open Questions for Phase 1" already named both choices and leaned ASCII / 30 days. Per-insert performance matters because thread assembly runs synchronously inside `sync_folder`. CJK subject threads might miss-match on this lower-cost path; the `In-Reply-To` and `References` chain steps run first and resolve well-behaved clients regardless of subject locale.
 
@@ -87,7 +87,7 @@ Append-only log of meaningful design / implementation choices. Format per entry:
 
 ## 2026-04-25 · Threading: store `In-Reply-To` and `References` on `MessageHeaders`
 
-**Decision.** Added `in_reply_to: Option<String>` and `references: Vec<String>` directly to `capytain_core::MessageHeaders`. Both adapters populate them at sync time — IMAP via a `BODY.PEEK[HEADER]` extension to the FETCH query, JMAP via `Email/get`'s native `inReplyTo` / `references` fields. Persisted to the messages table via a new migration `0003_threading_columns.sql` (a TEXT column for `in_reply_to` and a JSON-array column `references_json` paralleling the existing `from_json` / `labels_json` pattern).
+**Decision.** Added `in_reply_to: Option<String>` and `references: Vec<String>` directly to `qsl_core::MessageHeaders`. Both adapters populate them at sync time — IMAP via a `BODY.PEEK[HEADER]` extension to the FETCH query, JMAP via `Email/get`'s native `inReplyTo` / `references` fields. Persisted to the messages table via a new migration `0003_threading_columns.sql` (a TEXT column for `in_reply_to` and a JSON-array column `references_json` paralleling the existing `from_json` / `labels_json` pattern).
 
 **Why.** Thread assembly runs synchronously after a message insert and walks both fields; surfacing them only on `MessageBody` (which currently exists) would require a second async fetch path or postpone threading until the body-fetch pass. Carrying them on `MessageHeaders` keeps the assembly pipeline a pure DB operation and lets `messages_repo::find_by_rfc822_id` (the one new lookup it needs) run against the indexed `rfc822_message_id` column we already had.
 
@@ -101,7 +101,7 @@ Append-only log of meaningful design / implementation choices. Format per entry:
 
 **Decision.** The IMAP `list_messages` FETCH query asks for the **full** RFC 5322 header block (`BODY.PEEK[HEADER]`) rather than the targeted `BODY.PEEK[HEADER.FIELDS (REFERENCES IN-REPLY-TO)]` shape that RFC 3501 §6.4.5 also permits.
 
-**Why.** `imap-proto`'s `MessageSection` enum (the response parser type) carries only `Header` / `Mime` / `Text` variants — there's no structured way to represent `HEADER.FIELDS (…)`. The server-side response would arrive as either a wrong-shape `BodySection` (which `Fetch::header()` ignores) or fail to parse cleanly. Sending the unscoped `BODY.PEEK[HEADER]` returns the full block as `MessageSection::Header`, which `Fetch::header()` already exposes; we then parse with `mail-parser` (already a workspace dep via `capytain-mime`).
+**Why.** `imap-proto`'s `MessageSection` enum (the response parser type) carries only `Header` / `Mime` / `Text` variants — there's no structured way to represent `HEADER.FIELDS (…)`. The server-side response would arrive as either a wrong-shape `BodySection` (which `Fetch::header()` ignores) or fail to parse cleanly. Sending the unscoped `BODY.PEEK[HEADER]` returns the full block as `MessageSection::Header`, which `Fetch::header()` already exposes; we then parse with `mail-parser` (already a workspace dep via `qsl-mime`).
 
 **Alternatives.**
 - Targeted header-fields fetch — would save bytes on the wire (typical `Subject` + envelope fields are smaller than the full header), but the parser-side support isn't there in `imap-proto` 0.16.
@@ -127,8 +127,8 @@ The full-header cost is typically <4 KB per message; against `RFC822.SIZE` + `IN
 
 **Decision.** `apps/desktop/src-tauri/src/backend_factory.rs` and `apps/mailcli/src/main.rs::open_backend` carry parallel implementations of "given an `Account`, refresh OAuth and return a live `MailBackend`".
 
-**Why.** `capytain-sync` is the natural shared home, but extracting the factory would force the engine crate to depend on `capytain-imap-client` + `capytain-jmap-client`, inverting the dependency direction (the adapter crates depend on `capytain-core`'s `MailBackend` trait — not the other way around). Keeping the engine backend-agnostic via the trait is more valuable than de-duplicating ~80 lines of straightforward dispatch.
+**Why.** `qsl-sync` is the natural shared home, but extracting the factory would force the engine crate to depend on `qsl-imap-client` + `qsl-jmap-client`, inverting the dependency direction (the adapter crates depend on `qsl-core`'s `MailBackend` trait — not the other way around). Keeping the engine backend-agnostic via the trait is more valuable than de-duplicating ~80 lines of straightforward dispatch.
 
 **Alternatives.**
-- Extract into a new `capytain-backends` crate that depends on both adapters and exposes one `open_backend(account) -> Arc<dyn MailBackend>` — defensible, but ships a crate whose only purpose is glue and inverts no real complexity.
-- Move the factory into `capytain-sync` directly — same dependency-direction problem.
+- Extract into a new `qsl-backends` crate that depends on both adapters and exposes one `open_backend(account) -> Arc<dyn MailBackend>` — defensible, but ships a crate whose only purpose is glue and inverts no real complexity.
+- Move the factory into `qsl-sync` directly — same dependency-direction problem.

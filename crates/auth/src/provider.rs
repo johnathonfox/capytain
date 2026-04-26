@@ -6,7 +6,7 @@
 use crate::error::AuthError;
 
 /// Broad classification of a provider's backend protocol. Consumers in
-/// `capytain-sync` decide which `MailBackend` implementation to spin up
+/// `qsl-sync` decide which `MailBackend` implementation to spin up
 /// based on this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -21,7 +21,7 @@ pub enum ProviderKind {
 ///
 /// Everything is `&'static str` — provider profiles are compile-time
 /// constants in [`crate::providers`]. Fork maintainers override at the
-/// build boundary via `CAPYTAIN_{PROVIDER}_CLIENT_ID`.
+/// build boundary via `QSL_{PROVIDER}_CLIENT_ID`.
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderProfile {
     /// Display-friendly name (`"Gmail"`, `"Fastmail"`).
@@ -55,7 +55,7 @@ impl ProviderProfile {
     pub fn require_client_id(&self) -> Result<&'static str, AuthError> {
         if self.client_id.is_empty() {
             Err(AuthError::ProviderNotConfigured(format!(
-                "{slug}: set CAPYTAIN_{upper}_CLIENT_ID at build time",
+                "{slug}: set QSL_{upper}_CLIENT_ID at build time",
                 slug = self.slug,
                 upper = self.slug.to_ascii_uppercase()
             )))

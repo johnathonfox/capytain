@@ -3,15 +3,15 @@
 //! `reader_*` Tauri commands — the reader-pane Servo renderer seam.
 //!
 //! Phase 0 Week 6 scope: `reader_render` takes raw HTML from the UI
-//! and hands it to [`capytain_renderer::ServoRenderer`]. The UI is
+//! and hands it to [`qsl_renderer::ServoRenderer`]. The UI is
 //! responsible for composing the HTML (today: format headers + plain
 //! text body into a minimal styled document in `apps/desktop/ui`).
 //! Real sanitization (ammonia strip → adblock pass) arrives in Phase
 //! 1 alongside the remote-content policy; this seam lets the reader
 //! pane light up end-to-end on selection before that work lands.
 
-use capytain_core::RenderPolicy;
-use capytain_ipc::IpcResult;
+use qsl_core::RenderPolicy;
+use qsl_ipc::IpcResult;
 use serde::Deserialize;
 use tauri::{AppHandle, Runtime, State};
 
@@ -31,7 +31,7 @@ pub struct ReaderRenderInput {
 ///
 /// # Thread affinity
 ///
-/// `capytain_renderer::ServoRenderer` is `Send + Sync` at the type
+/// `qsl_renderer::ServoRenderer` is `Send + Sync` at the type
 /// level, but every Servo `WebView` call has to happen on the thread
 /// that constructed the engine (design doc §6.6). The renderer handles
 /// this internally: each trait-method call marshals onto the Tauri
@@ -86,16 +86,16 @@ pub async fn open_external_url(input: OpenExternalUrlInput) -> IpcResult<()> {
         || lower.starts_with("mailto:");
     if !allowed {
         tracing::warn!(%url, "open_external_url: rejecting non-http(s)/mailto scheme");
-        return Err(capytain_ipc::IpcError::new(
-            capytain_ipc::IpcErrorKind::Permission,
+        return Err(qsl_ipc::IpcError::new(
+            qsl_ipc::IpcErrorKind::Permission,
             format!("unsupported URL scheme: {url}"),
         ));
     }
 
     if let Err(e) = webbrowser::open(url) {
         tracing::warn!(%url, error = %e, "open_external_url: webbrowser::open failed");
-        return Err(capytain_ipc::IpcError::new(
-            capytain_ipc::IpcErrorKind::Internal,
+        return Err(qsl_ipc::IpcError::new(
+            qsl_ipc::IpcErrorKind::Internal,
             format!("failed to open URL: {e}"),
         ));
     }

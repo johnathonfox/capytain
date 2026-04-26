@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Capytain JMAP adapter — [`MailBackend`] implementation over
+//! QSL JMAP adapter — [`MailBackend`] implementation over
 //! `jmap-client` v0.4.
 //!
 //! The backend is constructed with a session URL and a bearer access
-//! token minted by `capytain-auth`:
+//! token minted by `qsl-auth`:
 //!
 //! 1. `jmap_client::client::Client::new().credentials(Credentials::bearer(token)).connect(session_url)`.
 //! 2. `mailbox_get(None, None)` for discovery → `Vec<Folder>`.
@@ -25,7 +25,7 @@ use jmap_client::client::Client;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
-use capytain_core::{
+use qsl_core::{
     AccountId, Attachment, AttachmentRef, BackendKind, EmailAddress, Folder, FolderId, FolderRole,
     MailBackend, MailError, MessageBody, MessageFlags, MessageHeaders, MessageId, MessageList,
     SyncState, ThreadId,
@@ -69,7 +69,7 @@ impl JmapBackend {
 /// access token. Both [`JmapBackend::connect`] and the
 /// [`crate::push::watch_account`] watcher call through this so the
 /// connect logic — bearer credentials, session resolution — lives
-/// in one place. Mirrors `capytain_imap_client::dial_session`.
+/// in one place. Mirrors `qsl_imap_client::dial_session`.
 pub async fn dial_client(session_url: &str, access_token: &str) -> Result<Client, MailError> {
     Client::new()
         .credentials(jmap_client::client::Credentials::bearer(access_token))
@@ -429,7 +429,7 @@ fn email_to_headers(
         date,
         flags,
         // JMAP mailboxes serve as both folders and labels; a message in
-        // multiple mailboxes shows up in each. For Capytain, the
+        // multiple mailboxes shows up in each. For QSL, the
         // secondary mailboxes become labels.
         labels: email.mailbox_ids().iter().map(|s| s.to_string()).collect(),
         snippet,
@@ -491,7 +491,7 @@ fn keywords_to_flags(keywords: &[&str]) -> MessageFlags {
     flags
 }
 
-/// Translate JMAP's built-in mailbox roles (RFC 8621 §2) into Capytain's
+/// Translate JMAP's built-in mailbox roles (RFC 8621 §2) into QSL's
 /// `FolderRole`. `All` and `Flagged` don't exist as standard JMAP roles
 /// — Gmail's "All Mail" and "Starred" are IMAP-specific concepts that
 /// show up in JMAP as custom labels, which we surface as the None
@@ -529,7 +529,7 @@ mod tests {
             Some(FolderRole::Drafts)
         );
         assert_eq!(jmap_role_to_folder_role(&R::Trash), Some(FolderRole::Trash));
-        // Fastmail / JMAP uses "Junk"; Capytain normalizes to Spam.
+        // Fastmail / JMAP uses "Junk"; QSL normalizes to Spam.
         assert_eq!(jmap_role_to_folder_role(&R::Junk), Some(FolderRole::Spam));
         assert_eq!(
             jmap_role_to_folder_role(&R::Archive),

@@ -17,7 +17,7 @@
 
 use chrono::Utc;
 
-use capytain_core::{AccountId, StorageError};
+use qsl_core::{AccountId, StorageError};
 
 use crate::conn::{DbConn, Params, Value};
 

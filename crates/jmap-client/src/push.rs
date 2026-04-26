@@ -23,11 +23,11 @@
 //! quickly (otherwise EventSource just stays silent on idle
 //! accounts).
 
-use capytain_core::{AccountId, BackendEvent, MailError};
 use futures_util::StreamExt;
 use jmap_client::client::Client;
 use jmap_client::event_source::PushNotification;
 use jmap_client::DataType;
+use qsl_core::{AccountId, BackendEvent, MailError};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "capytain-sync"
-description = "Capytain sync engine: per-folder header + body sync, outbox, threading."
+name = "qsl-sync"
+description = "QSL sync engine: per-folder header + body sync, outbox, threading."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,8 +15,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-capytain-core = { workspace = true }
-capytain-storage = { workspace = true }
+qsl-core = { workspace = true }
+qsl-storage = { workspace = true }
 
 async-trait = { workspace = true }
 chrono = { workspace = true }

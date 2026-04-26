@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# Release workflow for Capytain.
+# Release workflow for QSL.
 #
 # Trigger:
 #   - Push a tag starting with `v` (e.g. `v0.1.0`, `v0.0.0-phase-0-preview`).
@@ -83,12 +83,12 @@ jobs:
           script: |
             const tag = process.env.RELEASE_TAG;
             const body = [
-              `Capytain pre-release **${tag}**.`,
+              `QSL pre-release **${tag}**.`,
               '',
               '> This is a Phase 0 preview build. Binaries are **not signed**',
               '> and **not notarized** — macOS Gatekeeper and Windows',
               '> SmartScreen will warn on first launch. Sync, compose, and',
-              '> HTML rendering are incomplete. See [`PHASE_0.md`](https://github.com/johnathonfox/capytain/blob/main/PHASE_0.md)',
+              '> HTML rendering are incomplete. See [`PHASE_0.md`](https://github.com/johnathonfox/qsl/blob/main/PHASE_0.md)',
               '> for the full status.',
               '',
               '## Downloads',
@@ -122,7 +122,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               tag_name: tag,
-              name: `Capytain ${tag}`,
+              name: `QSL ${tag}`,
               body,
               draft: true,
               prerelease: true,
@@ -196,7 +196,7 @@ jobs:
         # Dioxus 0.7's `dx build --platform web --release` writes its
         # output under `target/dx/<cargo-package-name>/release/web/public/`
         # (confirmed empirically on v0.0.0-preview.3 run:
-        # `target/dx/capytain-ui/release/web/public`). That path does
+        # `target/dx/qsl-ui/release/web/public`). That path does
         # NOT match `tauri.conf.json`'s `frontendDist = "../ui/dist"`,
         # so we explicitly stage it at `apps/desktop/ui/dist/` after
         # the build.
@@ -215,7 +215,7 @@ jobs:
           # name declared in `apps/desktop/ui/Cargo.toml`. If that name
           # is ever renamed, update both here and in the package
           # manifest — the release build depends on them matching.
-          DX_PKG: capytain-ui
+          DX_PKG: qsl-ui
         run: |
           set -eu
           dx build --platform web --release
