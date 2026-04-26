@@ -144,7 +144,7 @@ pub async fn reader_set_position(
         let y = input.y.round() as i32;
         let w = input.width.round() as i32;
         let h = input.height.round() as i32;
-        tracing::debug!(x, y, w, h, "reader_set_position");
+        tracing::info!(x, y, w, h, "reader_set_position");
         if let Err(e) = app.run_on_main_thread(move || parent.set_position(x, y, w, h)) {
             tracing::debug!(error = %e, "reader_set_position: GTK dispatch failed (app shutdown?)");
         }

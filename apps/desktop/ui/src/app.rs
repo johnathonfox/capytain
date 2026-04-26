@@ -83,14 +83,37 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
         }
         const push = function() {
             const el = document.querySelector('.reader-body-fill');
-            if (!el) return;
+            if (!el) {
+                console.log('[capytain] push: no .reader-body-fill yet');
+                return;
+            }
             const r = el.getBoundingClientRect();
-            // Skip during pre-mount / hidden states; sending zeros
-            // would race with `reader_clear` and cause flicker.
-            if (r.width <= 0 || r.height <= 0) return;
+            // `getBoundingClientRect` returns CSS pixels; the GTK
+            // overlay positions widgets in device pixels. On
+            // fractional-scaling displays (KDE Wayland especially)
+            // those two coordinate systems differ by
+            // `devicePixelRatio` — multiply now so GTK lands the
+            // surface where the user actually sees the slot.
+            const dpr = window.devicePixelRatio || 1;
+            const x = r.x * dpr;
+            const y = r.y * dpr;
+            const w = r.width * dpr;
+            const h = r.height * dpr;
+            console.log(
+                '[capytain] push css',
+                'x=' + r.x.toFixed(1),
+                'y=' + r.y.toFixed(1),
+                'w=' + r.width.toFixed(1),
+                'h=' + r.height.toFixed(1),
+                'dpr=' + dpr,
+                '→ device',
+                'x=' + x.toFixed(1),
+                'w=' + w.toFixed(1)
+            );
+            if (w <= 0 || h <= 0) return;
             window.__TAURI_INTERNALS__
                 .invoke('reader_set_position', {
-                    input: { x: r.x, y: r.y, width: r.width, height: r.height },
+                    input: { x: x, y: y, width: w, height: h },
                 })
                 .catch(function(e) { console.warn('reader_set_position:', e); });
         };
@@ -1686,11 +1709,26 @@ fn ReaderPaneV2(selection: Signal<Selection>, sync_tick: SyncTick) -> Element {
 fn ReaderV2(id: MessageId, sync_tick: SyncTick) -> Element {
     let id_for_fetch = id.clone();
     let msg = use_resource(use_reactive!(|id_for_fetch| async move {
-        invoke::<RenderedMessage>(
+        let rendered = invoke::<RenderedMessage>(
             "messages_get",
             serde_json::json!({ "input": { "id": id_for_fetch } }),
         )
-        .await
+        .await?;
+        // Hand the body straight to Servo's overlay surface. Doing
+        // it inside the resource closure means it fires once per
+        // successful message fetch — putting it in a `use_effect`
+        // outside the closure would only fire on initial mount and
+        // miss subsequent message switches.
+        let html = compose_reader_html(&rendered);
+        let _ = invoke::<()>(
+            "reader_render",
+            serde_json::json!({ "input": { "html": html } }),
+        )
+        .await;
+        // Force one tracker push so the overlay surface lands in
+        // the right slot on the same frame the new content paints.
+        push_reader_body_rect();
+        Ok::<_, String>(rendered)
     }));
 
     // Mark-as-read on selection. Fires once per `id` change. The
