@@ -139,10 +139,7 @@ pub struct DraftsDeleteInput {
 /// `drafts_delete` — discard a draft. Idempotent: deleting a
 /// non-existent id returns `Ok(())`.
 #[tauri::command]
-pub async fn drafts_delete(
-    state: State<'_, AppState>,
-    input: DraftsDeleteInput,
-) -> IpcResult<()> {
+pub async fn drafts_delete(state: State<'_, AppState>, input: DraftsDeleteInput) -> IpcResult<()> {
     let db = state.db.lock().await;
     drafts_repo::delete(&*db, &input.id).await?;
     Ok(())

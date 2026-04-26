@@ -1200,6 +1200,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "dpi",
  "futures-core",
  "serde",
  "serde_json",

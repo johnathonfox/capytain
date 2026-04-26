@@ -625,23 +625,20 @@ ul {
   padding: 24px 32px 16px 32px;
 }
 
-/* Body fills the remaining space and the iframe stretches inside. */
+/* Body fills the remaining space. Servo paints over this slot via
+ * a `gtk::Overlay` child positioned by the ResizeObserver in
+ * `app.rs`. The div is intentionally empty + transparent — the
+ * `getBoundingClientRect()` push tells Rust where Servo should
+ * land. The faint top border keeps the visual seam between header
+ * card and body when Servo's surface paints with a white background.
+ */
 .reader-body-fill {
   flex: 1 1 auto;
   min-height: 0;
   margin: 0 32px 24px 32px;
   padding-top: 16px;
   border-top: 1px solid #20242e;
-  display: flex;
-}
-
-.reader-body-fill iframe {
-  flex: 1 1 auto;
-  width: 100%;
-  height: 100%;
-  border: 0;
-  border-radius: 6px;
-  background: #ffffff;
+  background: transparent;
 }
 
 .reader-subject {

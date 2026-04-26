@@ -5,38 +5,44 @@
 // `docs/week-6-day-4-gtk-integration.md` step 2 for the workspace-
 // wide `forbid → deny` rationale.
 
-// Phase 2 Week 16 — module orphaned while the Servo install path is
-// disabled in `main.rs` setup. Kept in tree because the GTK
-// reparenting helpers will be reused once the overlay-positioning
-// fix lands (just wrapped in a `GtkOverlay` instead of attached as
-// a sibling). See `docs/KNOWN_ISSUES.md` "Servo reader pane is
-// disabled".
-#![allow(dead_code)]
-
 //! Linux GTK child-widget integration for the Servo reader pane.
 //!
 //! Tauri 2 on Linux renders its main window as a
 //! `gtk::ApplicationWindow` wrapping a `webkit2gtk::WebView`. This
-//! module reparents that hierarchy through a `gtk::Paned`, adds a
-//! sibling `gtk::DrawingArea`, and hands the DrawingArea's raw
-//! display/window handles to Servo's `WindowRenderingContext`.
+//! module reparents that hierarchy through a `gtk::Overlay`, attaches
+//! a `gtk::DrawingArea` as an overlay child, and hands the
+//! DrawingArea's raw display/window handles to Servo's
+//! `WindowRenderingContext`.
 //!
 //! The shape after `install`:
 //!
 //! ```text
 //! gtk::ApplicationWindow (Tauri-owned)
-//! └── gtk::Paned (new, horizontal)
-//!     ├── webkit2gtk::WebView (pack1: original Dioxus chrome)
-//!     └── gtk::DrawingArea   (pack2: Servo reader surface)
+//! └── gtk::Overlay (new)
+//!     ├── webkit2gtk::WebView (main child: Dioxus chrome)
+//!     └── gtk::DrawingArea   (overlay child: Servo reader surface,
+//!                              positioned via margins to overlap
+//!                              Dioxus's `.reader-body-fill` slot)
 //! ```
 //!
-//! See `docs/week-6-day-4-gtk-integration.md` for the full design
+//! Phase 2 Week 16: rebuilt from `gtk::Paned` to `gtk::Overlay`. The
+//! Paned approach permanently reserved a fixed horizontal slice for
+//! the reader, which collided with the new CSS-grid three-pane shell
+//! (the third Dioxus pane and Servo were fighting for the same
+//! ~720px). The Overlay path lets Dioxus drive Servo's allocation:
+//! the UI watches `.reader-body-fill`'s `getBoundingClientRect()` and
+//! pushes the rect to [`LinuxGtkParent::set_position`] over the
+//! `reader_set_position` Tauri command, which updates the
+//! DrawingArea's margins so Servo paints exactly over the slot.
+//!
+//! See `docs/week-6-day-4-gtk-integration.md` for the original design
 //! and the hardware-gating rationale; `docs/upstream/surfman-explicit-sync.md`
 //! for why the native NVIDIA EGL-Wayland path is broken and we rely
 //! on the Mesa llvmpipe fallback (`capytain_renderer::apply_nvidia_wayland_workaround`).
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
+use std::sync::OnceLock;
 
 use gdk::prelude::*;
 use glib::translate::ToGlibPtr;
@@ -46,34 +52,66 @@ use raw_window_handle::{
     WaylandDisplayHandle, WaylandWindowHandle, WindowHandle, XlibDisplayHandle, XlibWindowHandle,
 };
 
-/// Result of reparenting Tauri's main `ApplicationWindow` into a
-/// horizontal `Paned`. Holds both the Paned and the new DrawingArea
-/// so their lifetimes are tied to the Tauri app; dropping this
-/// struct would destroy the GDK window Servo is painting to.
+/// Process-wide handle to the installed `LinuxGtkParent`. Tauri
+/// commands reach the GTK objects through this — `LinuxGtkParent`
+/// is `!Send` (GTK widgets live on the main thread) so it can't sit
+/// in `AppState`. The reference is `&'static` because
+/// `install_servo_renderer` `Box::leak`s the parent; that matches
+/// GTK's "lives until the process exits" requirement exactly.
+static GTK_PARENT: OnceLock<&'static LinuxGtkParent> = OnceLock::new();
+
+/// Get the installed parent, if any. Commands that depend on Servo
+/// being live (position updates, surface clear) use this and silently
+/// no-op when Servo isn't installed (servo feature off, or
+/// install-time failure on this platform).
+pub fn parent() -> Option<&'static LinuxGtkParent> {
+    GTK_PARENT.get().copied()
+}
+
+/// Register the leaked parent so [`parent`] can return it. Called
+/// once during Servo install.
+pub fn register_parent(p: &'static LinuxGtkParent) {
+    let _ = GTK_PARENT.set(p);
+}
+
+/// Reparented Tauri main window. Holds both the Overlay and the new
+/// DrawingArea so their lifetimes are tied to the Tauri app —
+/// dropping this struct would destroy the GDK window Servo is
+/// painting to.
 pub struct LinuxGtkParent {
     /// Kept alive so the widget hierarchy doesn't get torn down.
-    _paned: gtk::Paned,
+    _overlay: gtk::Overlay,
     /// The child widget Servo paints into. Public so callers can
     /// wire `connect_size_allocate` for reader-pane resize events.
     pub drawing_area: gtk::DrawingArea,
 }
 
+// SAFETY: GTK widgets are not thread-safe at the type level, but the
+// `&'static LinuxGtkParent` references stored in `GTK_PARENT` are
+// only dereferenced from closures passed through
+// `tauri::AppHandle::run_on_main_thread`. That marshals the closure
+// onto GTK's main thread before it runs, so every method call on the
+// inner widgets executes on the thread that constructed them. The
+// static itself just holds the pointer; reading/writing the pointer
+// is fine across threads.
+unsafe impl Send for LinuxGtkParent {}
+unsafe impl Sync for LinuxGtkParent {}
+
 impl LinuxGtkParent {
     /// Reparent the current child of `app_window` inside a new
-    /// `Paned`, packing a fresh `DrawingArea` as the right-hand
-    /// side. Realizes the DrawingArea so its backing `gdk::Window`
+    /// `Overlay`, attaching a fresh `DrawingArea` as an overlay
+    /// child. Realizes the DrawingArea so its backing `gdk::Window`
     /// is available before `handles()` is called.
     pub fn install(
         app_window: &gtk::ApplicationWindow,
-        reader_width: i32,
+        initial_width: i32,
+        initial_height: i32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Diagnostic: log what Tauri's `gtk_window()` actually handed
         // us. If this is anything other than the top-level
         // ApplicationWindow, our reparenting walks the wrong
         // hierarchy and Servo ends up getting a handle to a surface
         // that doesn't live inside the user-visible main window.
-        // Demoted to `debug!` post-validation — it was useful for
-        // the PR #30 investigation but is noise in normal operation.
         tracing::debug!(
             widget_type = %glib::ObjectExt::type_(app_window).name(),
             is_toplevel = app_window.is_toplevel(),
@@ -81,7 +119,7 @@ impl LinuxGtkParent {
         );
 
         // Pull the existing child (Tauri's webkit2gtk container) out
-        // of the ApplicationWindow so we can wrap it in a Paned.
+        // of the ApplicationWindow so we can wrap it in an Overlay.
         let original = app_window
             .child()
             .ok_or("main window has no child widget")?;
@@ -91,35 +129,82 @@ impl LinuxGtkParent {
         );
         app_window.remove(&original);
 
-        let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
-        // pack1 = left/top (Dioxus chrome — can grow/shrink).
-        // pack2 = right/bottom (Servo reader — fixed-ish).
-        paned.pack1(&original, true, true);
+        let overlay = gtk::Overlay::new();
+        // The webview is the main child — it fills the entire
+        // overlay (and therefore the window). The DrawingArea is
+        // layered on top via `add_overlay`, positioned via margins.
+        overlay.add(&original);
 
         let drawing_area = gtk::DrawingArea::new();
-        drawing_area.set_size_request(reader_width, -1);
+        drawing_area.set_size_request(initial_width, initial_height);
 
         // `app_paintable(true)` tells GTK's default draw path to
         // leave the widget's backing surface alone so whatever
         // Servo's `WindowRenderingContext` writes to the
         // `gdk::Window` stays visible. Without this flag, GTK3
         // clears the DrawingArea to the theme background on every
-        // draw cycle and Servo's paint disappears as soon as the
-        // widget is ever repainted.
+        // draw cycle and Servo's paint disappears.
         drawing_area.set_app_paintable(true);
+        // GTK widgets focus on click only when `can_focus` is set;
+        // without this, keyboard focus stays on the webview and
+        // never reaches the Servo surface.
+        drawing_area.set_can_focus(true);
+        // Subscribe the DrawingArea to the pointer events we
+        // forward to Servo. By default GTK widgets only receive a
+        // narrow set of events (expose, configure, etc.); button-
+        // press / motion / leave have to be opted into explicitly,
+        // otherwise the X11/Wayland event mask filters them out
+        // before they reach signal handlers.
+        drawing_area.add_events(
+            gdk::EventMask::BUTTON_PRESS_MASK
+                | gdk::EventMask::BUTTON_RELEASE_MASK
+                | gdk::EventMask::POINTER_MOTION_MASK
+                | gdk::EventMask::SCROLL_MASK
+                | gdk::EventMask::LEAVE_NOTIFY_MASK
+                | gdk::EventMask::ENTER_NOTIFY_MASK,
+        );
+        // Pin the DrawingArea to the top-left of the overlay.
+        // Margins push it to the right slot; without
+        // `Align::Start`, GtkOverlay would center / fill the
+        // overlay instead of honouring our margins.
+        drawing_area.set_halign(gtk::Align::Start);
+        drawing_area.set_valign(gtk::Align::Start);
+        // Start positioned off-screen so the surface is invisible
+        // until the UI's `ResizeObserver` pushes a real rect via
+        // `set_position`. Nothing is selected at install time, so
+        // a visible Servo surface would be a flash of dead pixels.
+        drawing_area.set_margin_start(10_000);
+        drawing_area.set_margin_top(0);
 
-        paned.pack2(&drawing_area, true, false);
+        // Wire pointer events into Servo's input pipeline. GDK
+        // delivers `(x, y)` in widget-local coordinates in device
+        // pixels — the same units `WebViewPoint::Device` expects.
+        // Each handler returns `Stop` so GTK doesn't bubble the
+        // event back up to the webview underneath.
+        drawing_area.connect_button_press_event(|_w, ev| {
+            let (x, y) = ev.position();
+            capytain_renderer::forward_pointer_button_press(ev.button(), x as f32, y as f32);
+            glib::Propagation::Stop
+        });
+        drawing_area.connect_button_release_event(|_w, ev| {
+            let (x, y) = ev.position();
+            capytain_renderer::forward_pointer_button_release(ev.button(), x as f32, y as f32);
+            glib::Propagation::Stop
+        });
+        drawing_area.connect_motion_notify_event(|_w, ev| {
+            let (x, y) = ev.position();
+            capytain_renderer::forward_pointer_move(x as f32, y as f32);
+            glib::Propagation::Stop
+        });
+        drawing_area.connect_leave_notify_event(|_w, _ev| {
+            capytain_renderer::forward_pointer_left_viewport();
+            glib::Propagation::Stop
+        });
 
-        app_window.add(&paned);
+        overlay.add_overlay(&drawing_area);
+
+        app_window.add(&overlay);
         app_window.show_all();
-
-        // Explicit split so the reader pane gets a predictable
-        // width on launch. `Paned`'s default position is
-        // unspecified (depends on first-child min-request); pinning
-        // it keeps the ratio stable across theme changes.
-        let allocation = app_window.allocation();
-        let total_width = allocation.width().max(reader_width + 200);
-        paned.set_position(total_width - reader_width);
 
         // Force realization so `gdk::Window` is available. GTK 3
         // normally defers realization until the widget is drawn;
@@ -128,11 +213,10 @@ impl LinuxGtkParent {
 
         // Force the DrawingArea's `gdk::Window` to have a real
         // native backing (wl_subsurface on Wayland, separate X
-        // Window on X11). GTK3 by default implements child widget
-        // windows as client-side regions inside the parent's native
-        // surface — cheap, but surfman can't bind a GL context to a
-        // client-side region because there's no real surface to
-        // swap buffers on.
+        // Window on X11). GTK3 implements child widget windows as
+        // client-side regions by default; surfman can't bind a GL
+        // context to those — there's no real surface to swap
+        // buffers on.
         if let Some(gdk_window) = drawing_area.window() {
             gdk_window.ensure_native();
         } else {
@@ -143,14 +227,12 @@ impl LinuxGtkParent {
 
         // Pump the GTK main loop until the DrawingArea has a real
         // size allocation. `show_all` + `realize` create the
-        // `gdk::Window` but the layout pass that sizes the Paned
-        // children hasn't run yet — at install time
-        // `drawing_area.window().unwrap().width()` is `1`, which
-        // means surfman's `WindowRenderingContext` gets a 1x1
-        // surface handle and ends up creating its own top-level
-        // wl_surface to render into (visible as a separate window).
-        // Pumping events until the allocation settles gives Servo
-        // a handle bound to a correctly-sized subsurface.
+        // `gdk::Window` but the layout pass that sizes the overlay
+        // children hasn't run yet — at install time the gdk_window
+        // width is `1`, which means surfman's
+        // `WindowRenderingContext` gets a 1x1 surface handle and
+        // ends up creating its own top-level wl_surface to render
+        // into (visible as a separate window).
         let layout_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while std::time::Instant::now() < layout_deadline {
             let size = drawing_area
@@ -163,26 +245,20 @@ impl LinuxGtkParent {
             if !gtk::main_iteration_do(false) {
                 // Nothing more queued; the widget isn't going to
                 // lay itself out without a displayed compositor
-                // frame — break and let Servo see whatever size
-                // we have so the failure log below fires.
+                // frame — break and let Servo see whatever size we
+                // have so the failure log below fires.
                 break;
             }
         }
 
         if let Some(gdk_window) = drawing_area.window() {
             let (w, h) = (gdk_window.width(), gdk_window.height());
-            let parent = gdk_window.effective_parent();
             tracing::debug!(
                 drawing_area_size = ?(w, h),
                 window_type = ?gdk_window.window_type(),
-                has_parent = parent.is_some(),
                 "linux_gtk: DrawingArea gdk::Window after layout pump"
             );
             if w <= 1 || h <= 1 {
-                // Stays at `warn!` — this would mean Servo is about
-                // to get a bad handle and render to a detached
-                // surface, which is a visible user-level bug worth
-                // surfacing loudly.
                 tracing::warn!(
                     size = ?(w, h),
                     "linux_gtk: DrawingArea still 0/1 pixel at handle-extract time — Servo \
@@ -192,9 +268,38 @@ impl LinuxGtkParent {
         }
 
         Ok(Self {
-            _paned: paned,
+            _overlay: overlay,
             drawing_area,
         })
+    }
+
+    /// Move and resize the DrawingArea to overlap the reader-body
+    /// slot in window-relative coordinates. Called from the UI's
+    /// `ResizeObserver` whenever the reader column's bounding rect
+    /// changes (window resize, splitter drag, etc.). Must run on
+    /// the GTK main thread — Tauri commands invoke this through
+    /// `app_handle.run_on_main_thread`.
+    pub fn set_position(&self, x: i32, y: i32, w: i32, h: i32) {
+        // Clamp to non-negative; CSS rects can be slightly negative
+        // during transitions and GTK's setters reject some negative
+        // inputs.
+        let x = x.max(0);
+        let y = y.max(0);
+        let w = w.max(1);
+        let h = h.max(1);
+        self.drawing_area.set_margin_start(x);
+        self.drawing_area.set_margin_top(y);
+        self.drawing_area.set_size_request(w, h);
+    }
+
+    /// Move the DrawingArea entirely off-screen. Used when the user
+    /// deselects a message or opens the compose pane — the reader
+    /// pane shows a placeholder text from Dioxus, and Servo's
+    /// surface should be invisible.
+    pub fn hide(&self) {
+        self.drawing_area.set_margin_start(10_000);
+        self.drawing_area.set_margin_top(0);
+        self.drawing_area.set_size_request(1, 1);
     }
 
     /// Return the raw display + window handles for Servo's
@@ -213,11 +318,7 @@ impl LinuxGtkParent {
         // session and `GDK_BACKEND` env. `dynamic_cast` is the
         // canonical gtk-rs type check: it consumes the object and
         // returns it wrapped in the more specific type on match or
-        // the original on miss. The gdkx11 FFI takes
-        // `*mut GdkX11Display` / `*mut GdkX11Window`, so we need
-        // both typed wrappers for the X11 branch; the gdkwayland
-        // FFI takes generic pointers and gets them via glib's
-        // `ToGlibPtr` on the base `gdk::Display` / `gdk::Window`.
+        // the original on miss.
         if let Ok(x11_display) = display.clone().dynamic_cast::<gdkx11::X11Display>() {
             let x11_window = gdk_window
                 .clone()
@@ -237,8 +338,8 @@ impl HasDisplayHandle for LinuxGtkParent {
         // outlives `self`. Both the `gdk::Display` and the
         // DrawingArea's `gdk::Window` are anchored to the Tauri
         // `ApplicationWindow`, which lives for the process's
-        // lifetime. `LinuxGtkParent` is stored in `AppState` and
-        // isn't dropped until the app exits.
+        // lifetime. `LinuxGtkParent` is leaked into `GTK_PARENT`,
+        // so it isn't dropped until the app exits.
         Ok(unsafe { DisplayHandle::borrow_raw(raw) })
     }
 }
@@ -263,15 +364,15 @@ fn extract_wayland(
     // safely reinterpretable as the Wayland-specific opaque type.
     // Both returned pointers (`wl_display`, `wl_surface`) are owned
     // by GDK for the lifetime of the display / window. The
-    // `gdk::Display` lives for the process; the DrawingArea
-    // (and thus the `gdk::Window`) is leaked in
-    // `renderer_bridge::build_servo_renderer`, so the raw handles
+    // `gdk::Display` lives for the process; the DrawingArea (and
+    // thus the `gdk::Window`) is leaked in
+    // `renderer_bridge::install_servo_renderer`, so the raw handles
     // stay valid for any `borrow_raw` later.
     unsafe {
-        // Annotate the generic `to_glib_none()` return type so rustc
-        // picks the `*mut GdkDisplay` / `*mut GdkWindow` impl (each
-        // type implements `ToGlibPtr` multiple times across the
-        // backend-specific wrapper types).
+        // Annotate the generic `to_glib_none()` return type so
+        // rustc picks the `*mut GdkDisplay` / `*mut GdkWindow`
+        // impl (each type implements `ToGlibPtr` multiple times
+        // across the backend-specific wrapper types).
         let gdk_display_ptr: *mut gdk::ffi::GdkDisplay = ToGlibPtr::to_glib_none(display).0;
         let gdk_window_ptr: *mut gdk::ffi::GdkWindow = ToGlibPtr::to_glib_none(gdk_window).0;
 

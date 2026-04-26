@@ -395,7 +395,9 @@ impl MailBackend for ImapBackend {
             return Ok(Vec::new());
         }
         let before = u32::try_from(before_anchor).map_err(|_| {
-            MailError::Protocol(format!("before_anchor {before_anchor} exceeds IMAP UID range"))
+            MailError::Protocol(format!(
+                "before_anchor {before_anchor} exceeds IMAP UID range"
+            ))
         })?;
 
         let mut session = self.session.lock().await;

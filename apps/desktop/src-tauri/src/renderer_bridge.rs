@@ -1,13 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Phase 2 Week 16 — Servo install path is temporarily disabled in
-// `main.rs` setup so the Dioxus three-pane shell isn't fighting
-// Servo's reparented GTK widget for screen real estate. All the
-// helpers here remain in tree, ready to wire back up once the
-// `GtkOverlay` + `getBoundingClientRect`-driven positioning fix
-// lands. See `docs/KNOWN_ISSUES.md` "Servo reader pane is disabled".
-#![allow(dead_code)]
-
 //! Bridge between Tauri's AppHandle and `capytain_renderer`.
 //!
 //! Two pieces live here:
@@ -34,11 +26,13 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use crate::state::AppState;
 
-/// Logical size of the Servo reader window in device-independent pixels.
-/// Fixed for Day 2; the resize path (tracking the GTK/AppKit/HWND parent)
-/// lands in the Phase 1 reader-pane layout work.
-const READER_WINDOW_WIDTH: u32 = 720;
-const READER_WINDOW_HEIGHT: u32 = 560;
+/// Initial size of the Servo reader surface in device-independent
+/// pixels. The UI's `ResizeObserver` pushes real `(x, y, w, h)`
+/// rects via the `reader_set_position` Tauri command as soon as the
+/// `.reader-body-fill` element measures itself, so this is just a
+/// safe pre-layout default.
+const READER_INITIAL_WIDTH: u32 = 720;
+const READER_INITIAL_HEIGHT: u32 = 560;
 
 /// `MainThreadDispatch` backed by Tauri's cross-platform run-loop
 /// scheduler.
@@ -80,17 +74,25 @@ pub fn install_servo_renderer<R: Runtime>(
     let dispatcher: Arc<dyn MainThreadDispatch> = TauriDispatcher::new(app_handle.clone());
 
     // Construct the platform-appropriate renderer. On Linux, this
-    // reparents the Tauri main window through a `gtk::Paned` so the
-    // Servo surface becomes a sibling of the Dioxus webkit2gtk view
-    // inside the same top-level window. macOS / Windows still go
-    // through a separate OS window until their respective
-    // `NSView` / `HWND` child-surface wiring lands (week-6-day-4
-    // doc, §"Relationship to other Week 6 deferred work").
+    // reparents the Tauri main window through a `gtk::Overlay` so
+    // the Servo surface layers over the Dioxus webkit2gtk view; the
+    // UI's `ResizeObserver` keeps it positioned over the
+    // `.reader-body-fill` element. macOS / Windows still go through
+    // a separate OS window until their respective `NSView` / `HWND`
+    // child-surface wiring lands (week-6-day-4 doc, §"Relationship
+    // to other Week 6 deferred work").
     let servo_renderer = build_servo_renderer(app, &app_handle, Arc::clone(&dispatcher));
 
     let mut renderer: Box<dyn EmailRenderer> = match servo_renderer {
         Ok(r) => {
             tracing::info!("capytain-desktop: Servo renderer installed");
+            // The cursor callback is only wired on Linux; the `r`
+            // binding stays immutable on macOS / Windows so we cfg
+            // the mut rebind here rather than on the match arm.
+            #[cfg(target_os = "linux")]
+            let mut r = r;
+            #[cfg(target_os = "linux")]
+            install_cursor_callback(&mut r, &app_handle);
             Box::new(r)
         }
         Err(e) => {
@@ -99,10 +101,23 @@ pub fn install_servo_renderer<R: Runtime>(
         }
     };
 
-    // Register the link-click callback so the human validator can
-    // observe navigation events routing through the trait.
+    // Register the link-click callback so links in Servo-rendered
+    // bodies open in the OS default browser, matching the iframe
+    // path's `open_external_url` command. Reject non-http(s)/mailto
+    // schemes server-side too — Servo doesn't sandbox content the
+    // way our iframe does, so a `javascript:` or `file://` URL
+    // here would be a real privilege escalation if forwarded blindly.
     renderer.on_link_click(Box::new(|url| {
-        tracing::info!(%url, "capytain-desktop: link clicked in reader pane");
+        let scheme = url.scheme();
+        if !matches!(scheme, "http" | "https" | "mailto") {
+            tracing::warn!(%url, scheme, "capytain-desktop: rejecting non-http(s)/mailto link from reader");
+            return;
+        }
+        let url_str = url.as_str();
+        match webbrowser::open(url_str) {
+            Ok(()) => tracing::info!(%url, "capytain-desktop: opened reader link in default browser"),
+            Err(e) => tracing::warn!(%url, error = %e, "capytain-desktop: webbrowser::open failed"),
+        }
     }));
 
     // Drop the renderer into AppState. `try_state` because setup() can
@@ -146,13 +161,19 @@ fn build_servo_renderer<R: Runtime>(
     // exactly and avoids a `!Send` field in AppState.
     let parent: &'static LinuxGtkParent = Box::leak(Box::new(LinuxGtkParent::install(
         &gtk_window,
-        READER_WINDOW_WIDTH as i32,
+        READER_INITIAL_WIDTH as i32,
+        READER_INITIAL_HEIGHT as i32,
     )?));
+    // Stash the leaked reference so the `reader_set_position` /
+    // `reader_clear` IPC commands can reach it. `register_parent`
+    // is idempotent (`OnceLock::set` ignores duplicates) so calling
+    // it again on a hot-reload doesn't panic.
+    crate::linux_gtk::register_parent(parent);
 
     let renderer = ServoRenderer::new_linux(
         dispatcher,
         parent,
-        PhysicalSize::new(READER_WINDOW_WIDTH, READER_WINDOW_HEIGHT),
+        PhysicalSize::new(READER_INITIAL_WIDTH, READER_INITIAL_HEIGHT),
     )?;
 
     Ok(renderer)
@@ -168,7 +189,7 @@ fn build_servo_renderer<R: Runtime>(
     Ok(ServoRenderer::new_macos(
         dispatcher,
         &reader_window,
-        PhysicalSize::new(READER_WINDOW_WIDTH, READER_WINDOW_HEIGHT),
+        PhysicalSize::new(READER_INITIAL_WIDTH, READER_INITIAL_HEIGHT),
     )?)
 }
 
@@ -182,7 +203,7 @@ fn build_servo_renderer<R: Runtime>(
     Ok(ServoRenderer::new_windows(
         dispatcher,
         &reader_window,
-        PhysicalSize::new(READER_WINDOW_WIDTH, READER_WINDOW_HEIGHT),
+        PhysicalSize::new(READER_INITIAL_WIDTH, READER_INITIAL_HEIGHT),
     )?)
 }
 
@@ -195,6 +216,82 @@ fn build_servo_renderer<R: Runtime>(
     Err("Servo renderer is not yet implemented on this platform".into())
 }
 
+/// Wire Servo's cursor-change notifications to the Linux GTK
+/// DrawingArea so the OS pointer changes when the user hovers over
+/// links, text runs, resize handles, etc. inside the reader pane.
+///
+/// `notify_cursor_changed` fires from Servo's main-thread paint cycle;
+/// we still bounce through `run_on_main_thread` so we don't depend on
+/// that invariant — the marshalling crosses no boundary when the
+/// caller is already on the GTK thread.
+#[cfg(target_os = "linux")]
+fn install_cursor_callback<R: Runtime>(renderer: &mut ServoRenderer, app_handle: &AppHandle<R>) {
+    let app_handle = app_handle.clone();
+    renderer.on_cursor_change(Box::new(move |cursor| {
+        let css_name = cursor_to_css_name(cursor);
+        let app_handle = app_handle.clone();
+        let _ = app_handle.clone().run_on_main_thread(move || {
+            use gtk::prelude::WidgetExt;
+            let Some(parent) = crate::linux_gtk::parent() else {
+                return;
+            };
+            let Some(gdk_window) = parent.drawing_area.window() else {
+                return;
+            };
+            let display = gdk::Window::display(&gdk_window);
+            let gdk_cursor = gdk::Cursor::from_name(&display, css_name);
+            gdk_window.set_cursor(gdk_cursor.as_ref());
+        });
+    }));
+}
+
+/// Map Servo's `Cursor` enum to the CSS cursor names that GDK 3's
+/// `gdk_cursor_new_from_name` accepts (the W3C `cursor` property
+/// keywords). Anything GDK doesn't recognize falls back to the
+/// theme's default cursor — so unknown values surface as a no-op
+/// rather than a crash.
+#[cfg(target_os = "linux")]
+fn cursor_to_css_name(cursor: capytain_renderer::Cursor) -> &'static str {
+    use capytain_renderer::Cursor;
+    match cursor {
+        Cursor::None => "none",
+        Cursor::Default => "default",
+        Cursor::Pointer => "pointer",
+        Cursor::ContextMenu => "context-menu",
+        Cursor::Help => "help",
+        Cursor::Progress => "progress",
+        Cursor::Wait => "wait",
+        Cursor::Cell => "cell",
+        Cursor::Crosshair => "crosshair",
+        Cursor::Text => "text",
+        Cursor::VerticalText => "vertical-text",
+        Cursor::Alias => "alias",
+        Cursor::Copy => "copy",
+        Cursor::Move => "move",
+        Cursor::NoDrop => "no-drop",
+        Cursor::NotAllowed => "not-allowed",
+        Cursor::Grab => "grab",
+        Cursor::Grabbing => "grabbing",
+        Cursor::EResize => "e-resize",
+        Cursor::NResize => "n-resize",
+        Cursor::NeResize => "ne-resize",
+        Cursor::NwResize => "nw-resize",
+        Cursor::SResize => "s-resize",
+        Cursor::SeResize => "se-resize",
+        Cursor::SwResize => "sw-resize",
+        Cursor::WResize => "w-resize",
+        Cursor::EwResize => "ew-resize",
+        Cursor::NsResize => "ns-resize",
+        Cursor::NeswResize => "nesw-resize",
+        Cursor::NwseResize => "nwse-resize",
+        Cursor::ColResize => "col-resize",
+        Cursor::RowResize => "row-resize",
+        Cursor::AllScroll => "all-scroll",
+        Cursor::ZoomIn => "zoom-in",
+        Cursor::ZoomOut => "zoom-out",
+    }
+}
+
 /// Auxiliary OS window used on the platforms that don't yet have
 /// native child-surface wiring (macOS, Windows). Linux now uses the
 /// `linux_gtk::LinuxGtkParent` reparenting path instead.
@@ -205,8 +302,8 @@ fn build_auxiliary_window<R: Runtime>(
     let reader_window = tauri::window::WindowBuilder::new(app_handle, "servo-reader")
         .title("Capytain Reader (Servo)")
         .inner_size(
-            f64::from(READER_WINDOW_WIDTH),
-            f64::from(READER_WINDOW_HEIGHT),
+            f64::from(READER_INITIAL_WIDTH),
+            f64::from(READER_INITIAL_HEIGHT),
         )
         .resizable(true)
         .visible(true)
