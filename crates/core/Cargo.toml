@@ -14,6 +14,10 @@ publish.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true }
+# `dpi::PhysicalSize` lives in the EmailRenderer trait so the core
+# crate can express a host-widget resize without taking a runtime
+# dep on Servo or any platform-specific surface type.
+dpi = { workspace = true }
 futures-core = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

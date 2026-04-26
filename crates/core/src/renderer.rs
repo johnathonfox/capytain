@@ -71,6 +71,13 @@ pub trait EmailRenderer: Send {
     /// new one replaces the previous one.
     fn on_link_click(&mut self, cb: Box<dyn FnMut(url::Url) + Send + 'static>);
 
+    /// Resize the render surface's viewport. Called when the host widget
+    /// (Linux GTK DrawingArea, macOS NSView, Windows HWND) is resized so
+    /// the underlying webview re-lays out at the new size. Default impl
+    /// is a no-op for renderers that don't have a resizable surface
+    /// (e.g. `NullRenderer`).
+    fn resize(&mut self, _size: dpi::PhysicalSize<u32>) {}
+
     /// Clear the current render. The next call to [`EmailRenderer::render`]
     /// creates a fresh surface state — nothing persists across renders.
     fn clear(&mut self);

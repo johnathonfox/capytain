@@ -244,6 +244,23 @@ impl EmailRenderer for ServoRenderer {
         *self.link_cb.lock().expect("link_cb poisoned") = Some(cb);
     }
 
+    fn resize(&mut self, size: dpi::PhysicalSize<u32>) {
+        // Servo's WebView locks its viewport / layout size when the
+        // surface is created. The native surface (GTK DrawingArea on
+        // Linux, NSView on macOS, HWND on Windows) can be resized
+        // independently — without this call, the host can grow the
+        // widget but Servo keeps painting into the original
+        // PhysicalSize. Marshal onto the main thread because the
+        // WebView API is `!Send`.
+        self.dispatch.dispatch(Box::new(move || {
+            MAIN_THREAD_STATE.with(|cell| {
+                if let Some(state) = cell.borrow().as_ref() {
+                    state.webview.resize(size);
+                }
+            });
+        }));
+    }
+
     fn clear(&mut self) {
         let empty_url = url::Url::parse("about:blank").expect("about:blank is a valid URL");
         self.dispatch.dispatch(Box::new(move || {

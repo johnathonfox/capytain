@@ -12,6 +12,7 @@
 
 use capytain_core::RenderPolicy;
 use capytain_ipc::IpcResult;
+use dpi;
 use serde::Deserialize;
 use tauri::{AppHandle, Runtime, State};
 
@@ -130,24 +131,40 @@ pub struct ReaderSetPositionInput {
 #[tauri::command]
 pub async fn reader_set_position(
     app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
     input: ReaderSetPositionInput,
 ) -> IpcResult<()> {
     #[cfg(all(target_os = "linux", feature = "servo"))]
     {
         let Some(parent) = crate::linux_gtk::parent() else {
+            tracing::debug!("reader_set_position: GTK parent not registered yet");
             return Ok(());
         };
         let x = input.x.round() as i32;
         let y = input.y.round() as i32;
         let w = input.width.round() as i32;
         let h = input.height.round() as i32;
+        tracing::debug!(x, y, w, h, "reader_set_position");
         if let Err(e) = app.run_on_main_thread(move || parent.set_position(x, y, w, h)) {
-            tracing::debug!(error = %e, "reader_set_position: dispatch failed (app shutdown?)");
+            tracing::debug!(error = %e, "reader_set_position: GTK dispatch failed (app shutdown?)");
+        }
+
+        // Servo's WebView locks its viewport at the size passed to
+        // `new_linux`. Without this resize the host widget grows but
+        // Servo keeps painting into the original 720x560. The
+        // `EmailRenderer::resize` default impl is a no-op so this is
+        // safe even when Servo isn't installed.
+        if w > 1 && h > 1 {
+            let mut slot = state.servo_renderer.lock().await;
+            if let Some(renderer) = slot.as_mut() {
+                renderer.resize(dpi::PhysicalSize::new(w as u32, h as u32));
+            }
         }
     }
     #[cfg(not(all(target_os = "linux", feature = "servo")))]
     {
         let _ = app;
+        let _ = state;
         let _ = input;
     }
     Ok(())
