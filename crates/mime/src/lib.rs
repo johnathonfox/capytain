@@ -468,14 +468,23 @@ fn snippet_from(parsed: &Message<'_>) -> String {
         .map(|b| b.into_owned())
         .unwrap_or_default();
     let one_line: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Fast path: if the byte length is already under the cap, no
+    // truncation is needed and we don't have to walk the chars at all.
     if one_line.len() <= MAX {
-        one_line
-    } else {
-        let mut truncated = one_line;
-        truncated.truncate(MAX);
-        truncated.push('\u{2026}');
-        truncated
+        return one_line;
     }
+    // `String::truncate` panics if the cut point lands inside a
+    // multi-byte UTF-8 sequence (real Gmail content is full of emoji,
+    // accented Western chars, CJK, etc.). Cap by char count instead —
+    // 140 *characters* is also a more sensible snippet limit than 140
+    // bytes since CJK senders would otherwise see a ~46-character
+    // preview.
+    let mut chars = one_line.chars();
+    let mut truncated: String = chars.by_ref().take(MAX).collect();
+    if chars.next().is_some() {
+        truncated.push('\u{2026}');
+    }
+    truncated
 }
 
 #[cfg(test)]
@@ -911,5 +920,52 @@ body";
     #[test]
     fn extract_message_id_missing_header_is_none() {
         assert_eq!(extract_message_id(b"From: a@b\r\n\r\n").as_deref(), None);
+    }
+
+    /// Real-world Gmail bodies frequently exceed 140 bytes and contain
+    /// multi-byte UTF-8 (emoji, accented chars, CJK). The previous
+    /// snippet path called `String::truncate(140)`, which panics if
+    /// the cut point lands inside a multi-byte sequence — this test
+    /// reproduces the panic scenario by placing a non-ASCII character
+    /// astride byte 140.
+    #[test]
+    fn snippet_handles_multibyte_at_byte_boundary() {
+        // 139 bytes of ASCII, then `é` (0xC3 0xA9) — bytes 139..=140.
+        // String::truncate(140) lands inside the codepoint and panics.
+        let mut body = "a".repeat(139);
+        body.push('é');
+        body.push_str(" tail");
+        let raw = format!(
+            "From: a@b\r\nTo: c@d\r\nSubject: x\r\n\
+             MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\
+             \r\n{body}\r\n"
+        );
+        let parsed = MessageParser::default()
+            .parse(raw.as_bytes())
+            .expect("parse");
+        let s = snippet_from(&parsed);
+        // Must not panic; must end with the ellipsis since the body
+        // was longer than the cap.
+        assert!(
+            s.ends_with('\u{2026}'),
+            "expected ellipsis suffix, got {s:?}"
+        );
+        // Must still be valid UTF-8 (compiles trivially since `s` is
+        // `String`, but a smoke check that the truncation didn't
+        // produce empty / nonsense.
+        assert!(s.chars().count() > 100);
+    }
+
+    #[test]
+    fn snippet_short_body_round_trips_unchanged() {
+        let raw = "From: a@b\r\nTo: c@d\r\nSubject: x\r\n\
+                   MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\
+                   \r\nshort body with naïve emoji 🦀";
+        let parsed = MessageParser::default()
+            .parse(raw.as_bytes())
+            .expect("parse");
+        let s = snippet_from(&parsed);
+        assert_eq!(s, "short body with naïve emoji 🦀");
+        assert!(!s.ends_with('\u{2026}'));
     }
 }
