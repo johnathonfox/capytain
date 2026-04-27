@@ -13,6 +13,7 @@ use std::borrow::Cow;
 use chrono::{TimeZone, Utc};
 use mail_parser::{Address, HeaderValue, Message, MessageParser, MimeHeaders, PartType};
 
+pub mod compose;
 pub mod remote_content;
 
 // mail-parser's Address::iter() returns Box<dyn DoubleEndedIterator<...>>,
