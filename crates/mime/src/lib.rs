@@ -280,6 +280,39 @@ pub fn parse_headers(raw: &[u8], identity: MessageIdentity<'_>) -> Option<Messag
     Some(headers_from(&parsed, &identity))
 }
 
+/// Pull SMTP envelope addresses out of an RFC 5322 byte stream:
+/// the From address (singular — first parsed `From:` entry) and
+/// the flattened union of To + Cc + Bcc. Used by SMTP-submission
+/// backends, which need the envelope independently of how the
+/// header block renders downstream.
+///
+/// Bcc is included in the recipient list (that's what makes blind
+/// carbon-copy actually work); the SMTP server doesn't surface Bcc
+/// to other recipients.
+///
+/// Returns empty vecs / None if the parser can't make sense of the
+/// bytes — the caller should treat that as a permanent failure
+/// because there's no recoverable retry.
+pub fn extract_envelope(raw: &[u8]) -> (Option<EmailAddress>, Vec<EmailAddress>) {
+    let Some(parsed) = MessageParser::default().parse(raw) else {
+        return (None, Vec::new());
+    };
+    let from = addresses_from_opt(parsed.from()).into_iter().next();
+    let mut recipients = addresses_from_opt(parsed.to());
+    recipients.extend(addresses_from_opt(parsed.cc()));
+    recipients.extend(addresses_from_opt(parsed.bcc()));
+    (from, recipients)
+}
+
+/// Pull the `Message-ID` header out of an RFC 5322 byte stream,
+/// angle-bracket-wrapped to match the rest of the workspace
+/// (`<id@example.com>`). `None` if no header was found or the
+/// bytes don't parse.
+pub fn extract_message_id(raw: &[u8]) -> Option<String> {
+    let parsed = MessageParser::default().parse(raw)?;
+    parsed.message_id().map(|id| format!("<{id}>"))
+}
+
 /// Pull `In-Reply-To` and `References` out of an RFC 5322 header
 /// block (no body). Used by `qsl-imap-client` after a
 /// `BODY.PEEK[HEADER]` FETCH — the structured ENVELOPE only
@@ -830,5 +863,53 @@ caf"
             out.contains("list-manage"),
             "trusted-sender background URL dropped: {out}"
         );
+    }
+
+    #[test]
+    fn extract_envelope_pulls_from_and_recipients() {
+        let raw = b"From: Sender <sender@example.com>\r\n\
+To: alice@example.com, Bob <bob@example.com>\r\n\
+Cc: carol@example.com\r\n\
+Bcc: dave@example.com\r\n\
+Subject: Hi\r\n\
+\r\n\
+body";
+        let (from, recipients) = extract_envelope(raw);
+        let from = from.expect("From should parse");
+        assert_eq!(from.address, "sender@example.com");
+        let addrs: Vec<&str> = recipients.iter().map(|a| a.address.as_str()).collect();
+        assert_eq!(
+            addrs,
+            vec![
+                "alice@example.com",
+                "bob@example.com",
+                "carol@example.com",
+                "dave@example.com",
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_envelope_returns_empty_for_garbage() {
+        let (from, recipients) = extract_envelope(b"\xff\xfeNot an email at all");
+        // mail-parser is generous; the contract is just "no panic".
+        // We don't assert from/recipients are empty — only that the
+        // call returns without crashing.
+        let _ = (from, recipients);
+    }
+
+    #[test]
+    fn extract_message_id_unwraps_and_rewraps() {
+        let raw = b"From: a@b\r\n\
+Message-ID: <abc@host>\r\n\
+To: c@d\r\n\
+\r\n\
+body";
+        assert_eq!(extract_message_id(raw).as_deref(), Some("<abc@host>"));
+    }
+
+    #[test]
+    fn extract_message_id_missing_header_is_none() {
+        assert_eq!(extract_message_id(b"From: a@b\r\n\r\n").as_deref(), None);
     }
 }

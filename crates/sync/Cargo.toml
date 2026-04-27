@@ -19,6 +19,7 @@ qsl-core = { workspace = true }
 qsl-storage = { workspace = true }
 
 async-trait = { workspace = true }
+base64 = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

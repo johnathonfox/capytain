@@ -685,6 +685,13 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
     let mut loaded = use_signal(|| initial.draft_id.is_none());
     let mut last_change = use_signal(|| 0u64);
     let mut save_status: Signal<SaveStatus> = use_signal(|| SaveStatus::Idle);
+    let send_in_flight: Signal<bool> = use_signal(|| false);
+    // Reply context from the original draft (when opened via Reply /
+    // Reply-All / Forward). Not edited by the user but must survive
+    // every save round-trip so the eventual `messages_send` call
+    // sees the correct `In-Reply-To` / `References` in storage.
+    let mut in_reply_to = use_signal(|| None::<String>);
+    let mut references = use_signal(Vec::<String>::new);
 
     // One-shot draft hydration. `use_hook` runs at mount; the
     // dependency-free `use_future` would refire on every render.
@@ -706,6 +713,8 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
                             bcc_str.set(format_addrs(&d.bcc));
                             subject.set(d.subject);
                             body.set(d.body);
+                            in_reply_to.set(d.in_reply_to);
+                            references.set(d.references);
                             loaded.set(true);
                         }
                         Err(e) => {
@@ -729,6 +738,8 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
         let bcc_signal = bcc_str;
         let subject_signal = subject;
         let body_signal = body;
+        let in_reply_to_signal = in_reply_to;
+        let references_signal = references;
         let mut draft_signal = draft_id;
         let last_change_signal = last_change;
         let mut status_signal = save_status;
@@ -746,6 +757,8 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
             let subject_text = subject_signal.read().clone();
             let body_text = body_signal.read().clone();
             let id = draft_signal.read().clone();
+            let in_reply_to_val = in_reply_to_signal.read().clone();
+            let references_val = references_signal.read().clone();
 
             wasm_bindgen_futures::spawn_local(async move {
                 gloo_timers::future::sleep(std::time::Duration::from_secs(5)).await;
@@ -764,8 +777,8 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
                             "body": body_text,
                             "body_kind": DraftBodyKind::Plain,
                             "attachments": Vec::<()>::new(),
-                            "in_reply_to": Option::<String>::None,
-                            "references": Vec::<String>::new(),
+                            "in_reply_to": in_reply_to_val,
+                            "references": references_val,
                         }
                     }
                 });
@@ -793,6 +806,8 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
         let bcc_signal = bcc_str;
         let subject_signal = subject;
         let body_signal = body;
+        let in_reply_to_signal = in_reply_to;
+        let references_signal = references;
         let mut draft_signal = draft_id;
         let mut status_signal = save_status;
         let mut sync_tick = sync_tick;
@@ -805,6 +820,8 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
             let subject_text = subject_signal.read().clone();
             let body_text = body_signal.read().clone();
             let id = draft_signal.read().clone();
+            let in_reply_to_val = in_reply_to_signal.read().clone();
+            let references_val = references_signal.read().clone();
             status_signal.set(SaveStatus::Saving);
             wasm_bindgen_futures::spawn_local(async move {
                 let payload = serde_json::json!({
@@ -819,8 +836,8 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
                             "body": body_text,
                             "body_kind": DraftBodyKind::Plain,
                             "attachments": Vec::<()>::new(),
-                            "in_reply_to": Option::<String>::None,
-                            "references": Vec::<String>::new(),
+                            "in_reply_to": in_reply_to_val,
+                            "references": references_val,
                         }
                     }
                 });
@@ -833,6 +850,90 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
                     Err(e) => {
                         web_sys_log(&format!("drafts_save (manual): {e}"));
                         status_signal.set(SaveStatus::Error(e));
+                    }
+                }
+            });
+        }
+    };
+
+    // Send: save the draft (so the server-side row reflects current
+    // editor state), then enqueue an `OP_SUBMIT_MESSAGE` outbox row
+    // via `messages_send`. On success, close the compose pane —
+    // the drain worker takes over from there.
+    let mut send_now = {
+        let acc_signal = account_id;
+        let to_signal = to_str;
+        let cc_signal = cc_str;
+        let bcc_signal = bcc_str;
+        let subject_signal = subject;
+        let body_signal = body;
+        let in_reply_to_signal = in_reply_to;
+        let references_signal = references;
+        let mut draft_signal = draft_id;
+        let mut status_signal = save_status;
+        let mut sync_tick = sync_tick;
+        let mut compose_signal = compose;
+        let mut sending = send_in_flight;
+        move || {
+            if *sending.read() {
+                return;
+            }
+            let acc = acc_signal.read().clone();
+            let Some(acc) = acc else { return };
+            let to = parse_addrs(&to_signal.read());
+            let cc = parse_addrs(&cc_signal.read());
+            let bcc = parse_addrs(&bcc_signal.read());
+            if to.is_empty() && cc.is_empty() && bcc.is_empty() {
+                status_signal.set(SaveStatus::Error("Add at least one recipient".into()));
+                return;
+            }
+            let subject_text = subject_signal.read().clone();
+            let body_text = body_signal.read().clone();
+            let id = draft_signal.read().clone();
+            let in_reply_to_val = in_reply_to_signal.read().clone();
+            let references_val = references_signal.read().clone();
+            sending.set(true);
+            status_signal.set(SaveStatus::Saving);
+            wasm_bindgen_futures::spawn_local(async move {
+                let save_payload = serde_json::json!({
+                    "input": {
+                        "draft": {
+                            "id": id,
+                            "account_id": acc,
+                            "to": to,
+                            "cc": cc,
+                            "bcc": bcc,
+                            "subject": subject_text,
+                            "body": body_text,
+                            "body_kind": DraftBodyKind::Plain,
+                            "attachments": Vec::<()>::new(),
+                            "in_reply_to": in_reply_to_val,
+                            "references": references_val,
+                        }
+                    }
+                });
+                let saved_id = match invoke::<DraftId>("drafts_save", save_payload).await {
+                    Ok(id) => id,
+                    Err(e) => {
+                        web_sys_log(&format!("messages_send: pre-save: {e}"));
+                        status_signal.set(SaveStatus::Error(e));
+                        sending.set(false);
+                        return;
+                    }
+                };
+                draft_signal.set(Some(saved_id.clone()));
+                let send_payload = serde_json::json!({
+                    "input": { "draft_id": saved_id }
+                });
+                match invoke::<()>("messages_send", send_payload).await {
+                    Ok(()) => {
+                        sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+                        compose_signal.set(None);
+                    }
+                    Err(e) => {
+                        web_sys_log(&format!("messages_send: {e}"));
+                        status_signal.set(SaveStatus::Error(format!("Send failed: {e}")));
+                        sending.set(false);
                     }
                 }
             });
@@ -888,10 +989,17 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
                     "Discard"
                 }
                 button {
-                    class: "compose-action primary",
+                    class: "compose-action secondary",
                     r#type: "button",
                     onclick: move |_| manual_save(),
                     "Save"
+                }
+                button {
+                    class: "compose-action primary",
+                    r#type: "button",
+                    disabled: *send_in_flight.read(),
+                    onclick: move |_| send_now(),
+                    if *send_in_flight.read() { "Sending…" } else { "Send" }
                 }
             }
             if !*loaded.read() {
@@ -986,10 +1094,6 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
                                 bump();
                             }
                         }
-                    }
-                    p {
-                        class: "hint compose-footer-hint",
-                        "Sending lands in Phase 2 Week 18 (Gmail SMTP) and Week 19 (Fastmail JMAP). Drafts are saved locally for now."
                     }
                 }
             }

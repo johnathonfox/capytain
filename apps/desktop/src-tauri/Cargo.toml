@@ -37,6 +37,7 @@ qsl-mime = { workspace = true }
 qsl-storage = { workspace = true }
 qsl-sync = { workspace = true }
 qsl-telemetry = { workspace = true }
+base64 = { workspace = true }
 serde_json = { workspace = true }
 # OS-native desktop notifications. Plugin path means we don't need
 # any extra capability tokens — the plugin's default permission set
