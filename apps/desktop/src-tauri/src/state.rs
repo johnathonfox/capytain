@@ -26,9 +26,22 @@ use tokio::sync::{Mutex, Notify};
 ///
 /// Commands reach it through `tauri::State<AppState>`.
 pub struct AppState {
-    /// Writable handle to the on-disk Turso database. All repository
-    /// calls go through this.
+    /// Writable handle to the on-disk Turso database, used by the
+    /// IPC command path (every `commands/*.rs` handler). All
+    /// foreground repository calls go through this.
     pub db: Arc<Mutex<TursoConn>>,
+
+    /// Second connection to the same database file, dedicated to
+    /// the sync engine's background work (initial CONNECT/LIST
+    /// bootstrap, IMAP IDLE / JMAP push refreshes,
+    /// `messages_refresh_folder`). Without this split, the sync
+    /// engine's writes would block IPC reads on the single
+    /// `Arc<Mutex<TursoConn>>` lock — concretely, `messages_get`
+    /// would stall behind a long sync transaction and the reader
+    /// pane would freeze on "Loading…" until sync finished.
+    /// Multi-connection concurrency requires WAL mode, which
+    /// `TursoConn::open` enables.
+    pub sync_db: Arc<Mutex<TursoConn>>,
 
     /// Per-account backend cache. Populated lazily on first use and
     /// evicted when an account is removed. `Arc<dyn MailBackend>` is
@@ -69,9 +82,10 @@ impl AppState {
     /// resolved data directory. The renderer slot starts empty;
     /// `main::setup` installs the real renderer once the Tauri window
     /// exists and its raw handle can be queried.
-    pub fn new(db: TursoConn, data_dir: PathBuf) -> Self {
+    pub fn new(db: TursoConn, sync_db: TursoConn, data_dir: PathBuf) -> Self {
         Self {
             db: Arc::new(Mutex::new(db)),
+            sync_db: Arc::new(Mutex::new(sync_db)),
             backends: Mutex::new(HashMap::new()),
             data_dir,
             servo_renderer: Mutex::new(None),

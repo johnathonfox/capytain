@@ -141,7 +141,16 @@ async fn bootstrap_state() -> Result<AppState, Box<dyn std::error::Error + Send 
 
     let db_path = data_dir.join("qsl.db");
     let db = TursoConn::open(&db_path).await?;
+    // Run migrations on the IPC connection only — they're idempotent
+    // at the SQLite layer regardless, but doing it once before the
+    // sync connection opens means schema is in place by the time the
+    // sync engine touches the file.
     run_migrations(&db).await?;
+    // Second connection to the same file for the sync engine. WAL
+    // mode is enabled by `TursoConn::open`, so reads on `db` won't
+    // block while `sync_db` is mid-transaction. See `AppState::sync_db`
+    // for the full rationale.
+    let sync_db = TursoConn::open(&db_path).await?;
 
     tracing::info!(
         data_dir = %data_dir.display(),
@@ -149,7 +158,7 @@ async fn bootstrap_state() -> Result<AppState, Box<dyn std::error::Error + Send 
         "qsl desktop ready"
     );
 
-    Ok(AppState::new(db, data_dir))
+    Ok(AppState::new(db, sync_db, data_dir))
 }
 
 /// Mirror of mailcli's data-dir resolution so both binaries read and
