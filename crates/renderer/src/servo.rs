@@ -41,7 +41,8 @@ use qsl_core::{ColorScheme, EmailRenderer, RenderHandle, RenderPolicy};
 use servo::{
     DevicePoint, EventLoopWaker, InputEvent, MouseButton, MouseButtonAction, MouseButtonEvent,
     MouseLeftViewportEvent, MouseMoveEvent, Preferences, RenderingContext, Servo, ServoBuilder,
-    WebView, WebViewBuilder, WebViewPoint, WindowRenderingContext,
+    WebView, WebViewBuilder, WebViewPoint, WheelDelta, WheelEvent, WheelMode,
+    WindowRenderingContext,
 };
 
 mod corpus;
@@ -363,6 +364,30 @@ pub fn forward_pointer_move(x: f32, y: f32) {
     let event = InputEvent::MouseMove(MouseMoveEvent::new(WebViewPoint::Device(DevicePoint::new(
         x, y,
     ))));
+    forward(event);
+}
+
+/// Forward a wheel/scroll event. `(dx, dy)` are in the line-mode
+/// convention (wheel "notch" units) using Servo's sign convention:
+///
+/// - `dy > 0` ⇒ view scrolls **up** (revealing more content above).
+/// - `dy < 0` ⇒ view scrolls **down**.
+/// - `dx > 0` ⇒ view scrolls left, `dx < 0` ⇒ right.
+///
+/// `(x, y)` is the cursor position in device pixels at the time of
+/// the wheel event. The caller (the GTK signal handler) is
+/// responsible for converting GDK's "user wants to scroll" sign
+/// convention into Servo's "view moves" convention before calling.
+pub fn forward_pointer_wheel(dx: f32, dy: f32, x: f32, y: f32) {
+    let event = InputEvent::Wheel(WheelEvent::new(
+        WheelDelta {
+            x: dx as f64,
+            y: dy as f64,
+            z: 0.0,
+            mode: WheelMode::DeltaLine,
+        },
+        WebViewPoint::Device(DevicePoint::new(x, y)),
+    ));
     forward(event);
 }
 

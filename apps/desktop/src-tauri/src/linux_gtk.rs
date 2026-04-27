@@ -200,6 +200,30 @@ impl LinuxGtkParent {
             qsl_renderer::forward_pointer_left_viewport();
             glib::Propagation::Stop
         });
+        // Wheel/scroll forwarding. GDK reports either a discrete
+        // `ScrollDirection::{Up,Down,Left,Right}` (mouse wheel notch)
+        // or `ScrollDirection::Smooth` with `delta()` in scroll units
+        // (touchpad two-finger). GDK's sign convention is "user wants
+        // to move the viewport in this direction"; Servo's
+        // `WheelDelta` says "view scrolls in this direction" with the
+        // opposite sign, so we negate before forwarding.
+        drawing_area.connect_scroll_event(|_w, ev| {
+            use gdk::ScrollDirection;
+            let (x, y) = ev.position();
+            let (dx, dy) = match ev.direction() {
+                ScrollDirection::Up => (0.0_f32, 1.0_f32),
+                ScrollDirection::Down => (0.0, -1.0),
+                ScrollDirection::Left => (1.0, 0.0),
+                ScrollDirection::Right => (-1.0, 0.0),
+                ScrollDirection::Smooth => {
+                    let (sdx, sdy) = ev.delta();
+                    (-(sdx as f32), -(sdy as f32))
+                }
+                _ => (0.0, 0.0),
+            };
+            qsl_renderer::forward_pointer_wheel(dx, dy, x as f32, y as f32);
+            glib::Propagation::Stop
+        });
 
         overlay.add_overlay(&drawing_area);
 

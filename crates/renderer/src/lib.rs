@@ -36,8 +36,8 @@ mod servo;
 #[cfg(feature = "servo")]
 pub use servo::{
     apply_nvidia_wayland_workaround, forward_pointer_button_press, forward_pointer_button_release,
-    forward_pointer_left_viewport, forward_pointer_move, render_html_to_image, CorpusRenderer,
-    MainThreadDispatch, RendererError, ServoRenderer,
+    forward_pointer_left_viewport, forward_pointer_move, forward_pointer_wheel,
+    render_html_to_image, CorpusRenderer, MainThreadDispatch, RendererError, ServoRenderer,
 };
 
 // Re-export Servo's `Cursor` enum so the desktop crate can register
