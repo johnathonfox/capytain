@@ -49,10 +49,40 @@ pub struct FlowOutcome {
 /// `email_hint` is passed to Google as `login_hint=` so the account
 /// picker lands on the right mailbox. Providers that don't recognize
 /// the parameter ignore it.
+///
+/// Delegates to [`run_loopback_flow_with`] using `webbrowser::open` as
+/// the navigation step. Tests bypass the real browser by calling
+/// `run_loopback_flow_with` directly with a fake opener.
 pub async fn run_loopback_flow(
     provider: &dyn OAuthProvider,
     email_hint: Option<&str>,
 ) -> Result<FlowOutcome, AuthError> {
+    run_loopback_flow_with(provider, email_hint, |url| {
+        webbrowser::open(url)
+            .map(|_| ())
+            .map_err(|e| AuthError::Browser(format!("webbrowser::open: {e}")))
+    })
+    .await
+}
+
+/// Same as [`run_loopback_flow`] but with the browser-open step
+/// injectable. Production code uses [`run_loopback_flow`]; integration
+/// tests pass a closure that simulates the user clicking through the
+/// authorization page (typically by spawning a `reqwest::get` against
+/// the auth URL — the mock OAuth server then 302s back to the loopback
+/// redirect URI).
+///
+/// `open_browser` is called with the fully-built authorization URL.
+/// It must trigger something that eventually GETs the loopback
+/// redirect URI; the rest of the flow blocks on that.
+pub async fn run_loopback_flow_with<F>(
+    provider: &dyn OAuthProvider,
+    email_hint: Option<&str>,
+    open_browser: F,
+) -> Result<FlowOutcome, AuthError>
+where
+    F: FnOnce(&str) -> Result<(), AuthError>,
+{
     let profile = provider.profile();
     let client_id = profile.require_client_id()?;
 
@@ -75,8 +105,7 @@ pub async fn run_loopback_flow(
     info!(provider = profile.slug, "opening browser for authorization");
     debug!(%auth_url);
 
-    webbrowser::open(auth_url.as_str())
-        .map_err(|e| AuthError::Browser(format!("webbrowser::open: {e}")))?;
+    open_browser(auth_url.as_str())?;
 
     let response = loopback.await_redirect(DEFAULT_FLOW_TIMEOUT).await?;
     if response.state != state {
