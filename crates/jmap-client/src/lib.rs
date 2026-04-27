@@ -19,11 +19,14 @@
 
 pub mod push;
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use jmap_client::client::Client;
+use jmap_client::core::set::SetObject;
 use tokio::sync::Mutex;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use qsl_core::{
     AccountId, Attachment, AttachmentRef, BackendKind, EmailAddress, Folder, FolderId, FolderRole,
@@ -38,23 +41,34 @@ pub struct JmapBackend {
     client: Mutex<Client>,
     account_id: AccountId,
     session_url: String,
+    /// Identity used for `EmailSubmission/set` (`From` header validation).
+    /// Resolved once at connect-time by matching the supplied account email
+    /// against `Identity/get`.
+    identity_id: Arc<str>,
 }
 
 impl JmapBackend {
     /// Connect to a JMAP session URL with the supplied bearer access
     /// token. The session URL typically lives at
     /// `https://<host>/.well-known/jmap` or a provider-specific path.
+    ///
+    /// `email` is the account's primary address — used at connect-time to
+    /// pick the matching submission identity from `Identity/get` so
+    /// `submit_message` knows which `From` to send under.
     pub async fn connect(
         session_url: &str,
         access_token: &str,
         account_id: AccountId,
+        email: &str,
     ) -> Result<Self, MailError> {
         let client = dial_client(session_url, access_token).await?;
-        info!(session_url, "JMAP connected");
+        let identity_id = resolve_identity_id(&client, email).await?;
+        info!(session_url, %email, %identity_id, "JMAP connected");
         Ok(Self {
             client: Mutex::new(client),
             account_id,
             session_url: session_url.to_string(),
+            identity_id: Arc::from(identity_id),
         })
     }
 
@@ -63,6 +77,41 @@ impl JmapBackend {
     pub fn session_url(&self) -> &str {
         &self.session_url
     }
+}
+
+/// Fetch the full identity list and pick the one whose `email` matches the
+/// account's primary address. Falls back to the first identity (with a
+/// `warn`) if no match — matches Fastmail's typical "single primary
+/// identity" shape but logs the surprise so multi-identity setups don't
+/// silently send under the wrong From.
+async fn resolve_identity_id(client: &Client, email: &str) -> Result<String, MailError> {
+    let mut request = client.build();
+    request.get_identity();
+    let mut response = request.send_get_identity().await.map_err(map_jmap_error)?;
+    let identities = response.take_list();
+    if identities.is_empty() {
+        return Err(MailError::Auth(
+            "JMAP Identity/get returned no identities".into(),
+        ));
+    }
+    if let Some(matched) = identities.iter().find(|i| i.email() == Some(email)) {
+        return matched
+            .id()
+            .map(str::to_string)
+            .ok_or_else(|| MailError::Protocol("Identity/get matched entry has no id".into()));
+    }
+    let first = &identities[0];
+    let fallback = first
+        .id()
+        .map(str::to_string)
+        .ok_or_else(|| MailError::Protocol("Identity/get fallback entry has no id".into()))?;
+    let fallback_email = first.email().unwrap_or("(none)");
+    warn!(
+        wanted = email,
+        got = fallback_email,
+        "JMAP Identity/get: no exact email match, falling back to first identity"
+    );
+    Ok(fallback)
 }
 
 /// Open a fresh JMAP `Client` against `session_url` with a bearer
@@ -350,10 +399,77 @@ impl MailBackend for JmapBackend {
     }
 
     async fn submit_message(&self, raw_rfc822: &[u8]) -> Result<Option<MessageId>, MailError> {
-        let _ = raw_rfc822;
-        Err(MailError::Other(
-            "JMAP EmailSubmission/set arrives in Phase 2 Week 2".into(),
-        ))
+        // Pre-flight envelope check (matches the IMAP path's check at
+        // `qsl_imap_client::backend::ImapBackend::submit_message`).
+        let (from, recipients) = qsl_mime::extract_envelope(raw_rfc822);
+        if from.is_none() {
+            return Err(MailError::Parse(
+                "submit_message: outgoing bytes had no From header".into(),
+            ));
+        }
+        if recipients.is_empty() {
+            return Err(MailError::Other(
+                "submit_message: no recipients (To/Cc/Bcc all empty)".into(),
+            ));
+        }
+
+        // Look up Drafts + Sent mailbox ids per-send. JMAP requires the
+        // email to live in Drafts with `$draft` before submission;
+        // `onSuccessUpdateEmail` then atomically moves it to Sent.
+        let folders = self.list_folders().await?;
+        let (drafts_id, sent_id) = find_drafts_and_sent(&folders)?;
+
+        let client = self.client.lock().await;
+        let jmap_account = self.account_id.0.clone();
+
+        // Step 1: upload + Email/import in one helper. The blob lives
+        // in the JMAP file store; the Email object references it.
+        let email = client
+            .email_import_account(
+                &jmap_account,
+                raw_rfc822.to_vec(),
+                [drafts_id.0.as_str()],
+                Some(["$draft"]),
+                None,
+            )
+            .await
+            .map_err(map_jmap_error)?;
+        let email_id = email
+            .id()
+            .ok_or_else(|| MailError::Protocol("Email/import returned no id".into()))?
+            .to_string();
+
+        // Step 2: EmailSubmission/set with onSuccessUpdateEmail. Build
+        // the request manually — the high-level `email_submission_create`
+        // helper doesn't expose `onSuccessUpdateEmail`, which is the
+        // mechanism Fastmail uses to atomically move the email out of
+        // Drafts and into Sent on submission success.
+        let mut request = client.build();
+        let set_req = request.set_email_submission();
+        let create_id = set_req
+            .create()
+            .email_id(&email_id)
+            .identity_id(self.identity_id.as_ref())
+            .create_id()
+            .ok_or_else(|| {
+                MailError::Protocol("EmailSubmission/set: builder did not yield create_id".into())
+            })?;
+        set_req
+            .arguments()
+            .on_success_update_email(&create_id)
+            .keyword("$draft", false)
+            .mailbox_id(&drafts_id.0, false)
+            .mailbox_id(&sent_id.0, true);
+        request
+            .send_set_email_submission()
+            .await
+            .map_err(map_jmap_error)?;
+
+        debug!(%email_id, drafts = %drafts_id.0, sent = %sent_id.0, "JMAP submit_message ok");
+
+        // Canonical `MessageId` arrives via the existing JMAP EventSource
+        // push pipeline (Phase 1 Week 11) — no synthetic local id here.
+        Ok(None)
     }
 }
 
@@ -510,6 +626,56 @@ fn jmap_role_to_folder_role(role: &jmap_client::mailbox::Role) -> Option<FolderR
     }
 }
 
+/// Pull the Drafts and Sent mailbox ids out of a folder list. JMAP send
+/// requires both: the email is created in Drafts with `$draft`, then
+/// `onSuccessUpdateEmail` flips it into Sent on submission success. The
+/// look-up runs per-send (one extra JMAP round-trip via `list_folders`)
+/// rather than caching, since Fastmail mailboxes can be added/removed
+/// out-of-band and we want to use the live ids.
+fn find_drafts_and_sent(folders: &[Folder]) -> Result<(FolderId, FolderId), MailError> {
+    let mut drafts: Option<FolderId> = None;
+    let mut sent: Option<FolderId> = None;
+    for f in folders {
+        match f.role {
+            Some(FolderRole::Drafts) => drafts = Some(f.id.clone()),
+            Some(FolderRole::Sent) => sent = Some(f.id.clone()),
+            _ => {}
+        }
+    }
+    let drafts =
+        drafts.ok_or_else(|| MailError::NotFound("JMAP submit: no Drafts mailbox".into()))?;
+    let sent = sent.ok_or_else(|| MailError::NotFound("JMAP submit: no Sent mailbox".into()))?;
+    Ok((drafts, sent))
+}
+
+/// Translate `jmap_client::Error` into our coarse `MailError` categories.
+/// The outbox drain at `qsl_sync::outbox_drain::drain_one` doesn't switch
+/// on the variant for retry-vs-DLQ decisions (it just retries up to
+/// `MAX_ATTEMPTS`), so this mapping is for diagnostics. Source variants:
+/// `~/.cargo/registry/src/index.crates.io-…/jmap-client-0.4.1/src/lib.rs:422`.
+fn map_jmap_error(e: jmap_client::Error) -> MailError {
+    use jmap_client::Error::*;
+    match e {
+        Transport(re) => MailError::Network(re.to_string()),
+        Parse(je) => MailError::Protocol(format!("JMAP response parse: {je}")),
+        Internal(s) => MailError::Other(format!("JMAP internal: {s}")),
+        Problem(pd) => match pd.status {
+            Some(401) | Some(403) => MailError::Auth(format!("JMAP problem: {pd}")),
+            _ => MailError::ServerRejected(format!("JMAP problem: {pd}")),
+        },
+        Server(s) => {
+            let lower = s.to_ascii_lowercase();
+            if lower.contains("401") || lower.contains("403") || lower.contains("unauthorized") {
+                MailError::Auth(s)
+            } else {
+                MailError::ServerRejected(s)
+            }
+        }
+        Method(m) => MailError::ServerRejected(format!("JMAP method error: {m}")),
+        Set(se) => MailError::ServerRejected(format!("JMAP set error: {se}")),
+    }
+}
+
 /// True if the given account kind is backed by this adapter.
 pub fn handles(kind: &BackendKind) -> bool {
     matches!(kind, BackendKind::Jmap)
@@ -543,5 +709,76 @@ mod tests {
     fn handles_jmap_only() {
         assert!(handles(&BackendKind::Jmap));
         assert!(!handles(&BackendKind::ImapSmtp));
+    }
+
+    fn folder(id: &str, role: Option<FolderRole>) -> Folder {
+        Folder {
+            id: FolderId(id.into()),
+            account_id: AccountId("acc-1".into()),
+            name: id.into(),
+            path: id.into(),
+            role,
+            unread_count: 0,
+            total_count: 0,
+            parent: None,
+        }
+    }
+
+    #[test]
+    fn find_drafts_and_sent_picks_role_matched_folders() {
+        let folders = vec![
+            folder("inbox-1", Some(FolderRole::Inbox)),
+            folder("drafts-1", Some(FolderRole::Drafts)),
+            folder("sent-1", Some(FolderRole::Sent)),
+            folder("custom-1", None),
+        ];
+        let (drafts, sent) = find_drafts_and_sent(&folders).expect("both roles present");
+        assert_eq!(drafts.0, "drafts-1");
+        assert_eq!(sent.0, "sent-1");
+    }
+
+    #[test]
+    fn find_drafts_and_sent_errors_when_drafts_missing() {
+        let folders = vec![folder("sent-1", Some(FolderRole::Sent))];
+        let err = find_drafts_and_sent(&folders).unwrap_err();
+        assert!(
+            matches!(err, MailError::NotFound(ref s) if s.contains("Drafts")),
+            "expected NotFound containing Drafts, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn find_drafts_and_sent_errors_when_sent_missing() {
+        let folders = vec![folder("drafts-1", Some(FolderRole::Drafts))];
+        let err = find_drafts_and_sent(&folders).unwrap_err();
+        assert!(
+            matches!(err, MailError::NotFound(ref s) if s.contains("Sent")),
+            "expected NotFound containing Sent, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn map_jmap_error_parse_is_protocol() {
+        let serde_err: serde_json::Error = serde_json::from_str::<u8>("not-json").unwrap_err();
+        let mapped = map_jmap_error(jmap_client::Error::Parse(serde_err));
+        assert!(matches!(mapped, MailError::Protocol(_)), "{mapped:?}");
+    }
+
+    #[test]
+    fn map_jmap_error_server_string_with_401_is_auth() {
+        let mapped = map_jmap_error(jmap_client::Error::Server("HTTP 401 Unauthorized".into()));
+        assert!(matches!(mapped, MailError::Auth(_)), "{mapped:?}");
+    }
+
+    #[test]
+    fn map_jmap_error_server_string_without_401_is_rejected() {
+        let mapped = map_jmap_error(jmap_client::Error::Server("quota exceeded".into()));
+        assert!(matches!(mapped, MailError::ServerRejected(_)), "{mapped:?}");
+    }
+
+    #[test]
+    fn map_jmap_error_internal_is_other() {
+        let mapped = map_jmap_error(jmap_client::Error::Internal("oops".into()));
+        assert!(matches!(mapped, MailError::Other(_)), "{mapped:?}");
     }
 }
