@@ -839,6 +839,8 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
 ) -> IpcResult<()> {
     use tauri::Manager;
 
+    let t_start = std::time::Instant::now();
+
     // Tauri labels accept only `[a-zA-Z0-9_-]` per the docs. IMAP ids
     // contain `|` and `:`; map any other char to `_` for the label.
     let safe_id: String = input
@@ -873,6 +875,7 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
     // logged but doesn't abort the open: the popup falls back to
     // calling `messages_get` itself when `__QSL_READER_PRELOAD__`
     // is `null`.
+    let t_preload_start = std::time::Instant::now();
     let preload_json: String = match messages_get(
         state,
         MessagesGetInput {
@@ -891,6 +894,11 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
             "null".to_string()
         }
     };
+    tracing::info!(
+        ms = t_preload_start.elapsed().as_millis() as u64,
+        bytes = preload_json.len(),
+        "messages_open_in_window: preload fetched"
+    );
 
     // initialization_script runs once in the new webview before the
     // wasm bundle boots. Setting `__QSL_READER_ID__` and
@@ -904,6 +912,7 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
     );
 
     let title = format!("QSL — {}", input.id.0);
+    let t_window_start = std::time::Instant::now();
     let window =
         tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("index.html".into()))
             .title(title)
@@ -916,6 +925,10 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
                     format!("create reader window: {e}"),
                 )
             })?;
+    tracing::info!(
+        ms = t_window_start.elapsed().as_millis() as u64,
+        "messages_open_in_window: WebviewWindow built"
+    );
 
     {
         let app_for_close = app.clone();
@@ -945,6 +958,7 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
     // succeeds without racing the install.
     #[cfg(feature = "servo")]
     {
+        let t_install_start = std::time::Instant::now();
         let install_app = app.clone();
         let install_label = label.clone();
         let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
@@ -973,8 +987,17 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
                 tracing::warn!(window = %label, error = %e, "messages_open_in_window: install reply lost");
             }
         }
+        tracing::info!(
+            ms = t_install_start.elapsed().as_millis() as u64,
+            "messages_open_in_window: Servo install completed"
+        );
     }
 
-    tracing::info!(window = %label, id = %input.id.0, "messages_open_in_window");
+    tracing::info!(
+        window = %label,
+        id = %input.id.0,
+        total_ms = t_start.elapsed().as_millis() as u64,
+        "messages_open_in_window"
+    );
     Ok(())
 }

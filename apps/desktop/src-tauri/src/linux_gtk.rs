@@ -138,6 +138,7 @@ impl LinuxGtkParent {
         initial_width: i32,
         initial_height: i32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let t_install_start = std::time::Instant::now();
         // Diagnostic: log what Tauri's `gtk_window()` actually handed
         // us. If this is anything other than the top-level
         // ApplicationWindow, our reparenting walks the wrong
@@ -245,6 +246,8 @@ impl LinuxGtkParent {
         // `WindowRenderingContext` gets a 1x1 surface handle and
         // ends up creating its own top-level wl_surface to render
         // into (visible as a separate window).
+        let t_layout_start = std::time::Instant::now();
+        let mut layout_iters = 0u32;
         let layout_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while std::time::Instant::now() < layout_deadline {
             let size = drawing_area
@@ -254,6 +257,7 @@ impl LinuxGtkParent {
             if size.0 > 1 && size.1 > 1 {
                 break;
             }
+            layout_iters += 1;
             if !gtk::main_iteration_do(false) {
                 // Nothing more queued; the widget isn't going to
                 // lay itself out without a displayed compositor
@@ -262,6 +266,11 @@ impl LinuxGtkParent {
                 break;
             }
         }
+        tracing::info!(
+            layout_pump_ms = t_layout_start.elapsed().as_millis() as u64,
+            iters = layout_iters,
+            "linux_gtk: install layout pump finished"
+        );
 
         if let Some(gdk_window) = drawing_area.window() {
             let (w, h) = (gdk_window.width(), gdk_window.height());
@@ -279,11 +288,16 @@ impl LinuxGtkParent {
             }
         }
 
-        Ok(Self {
+        let parent = Self {
             _overlay: overlay,
             drawing_area,
             webview_id: AtomicU64::new(0),
-        })
+        };
+        tracing::info!(
+            total_ms = t_install_start.elapsed().as_millis() as u64,
+            "linux_gtk: install complete"
+        );
+        Ok(parent)
     }
 
     /// Record the `webview_id` for this parent's renderer. Called by
