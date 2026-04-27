@@ -52,7 +52,7 @@ async-imap = { version = "0.11", default-features = false, features = ["runtime-
 qsl-ipc = { path = "crates/ipc", version = "=0.0.0" }
 qsl-mime = { path = "crates/mime", version = "=0.0.0" }
 qsl-renderer = { path = "crates/renderer", version = "=0.0.0", default-features = false }
-dioxus = { version = "0.7" }
+dioxus = { version = "=0.7.6" }
 jmap-client = { version = "0.4", default-features = false, features = ["async"] }
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "async-secret-service", "crypto-rust", "tokio"] }
 mail-parser = "0.11"
