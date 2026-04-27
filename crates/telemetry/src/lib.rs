@@ -37,11 +37,17 @@ pub type InitError = Box<dyn Error + Send + Sync + 'static>;
 ///
 /// - All `qsl_*` crates at `info`
 /// - Third-party crates at `warn`
+/// - Servo's noisier modules pinned at `error` so reader-pane HTML
+///   data: URLs and per-frame style log lines don't drown the rest.
+///   `script::dom::window` in particular dumps the full data: URL the
+///   reader navigates to at INFO level on every render — a single
+///   gmail thread blew a launch log past 700 MB.
 pub const DEFAULT_FILTER: &str = "warn,qsl_core=info,qsl_storage=info,\
     qsl_imap_client=info,qsl_smtp_client=info,qsl_jmap_client=info,\
     qsl_mime=info,qsl_sync=info,qsl_search=info,qsl_auth=info,\
     qsl_ipc=info,qsl_telemetry=info,qsl_desktop=info,qsl_ui=info,\
-    mailcli=info";
+    mailcli=info,\
+    script::dom=error,style=error,script::script_module=error";
 
 /// Initialize the global tracing subscriber.
 ///

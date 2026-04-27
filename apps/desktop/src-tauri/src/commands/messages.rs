@@ -174,6 +174,7 @@ pub async fn messages_get(
     state: State<'_, AppState>,
     input: MessagesGetInput,
 ) -> IpcResult<RenderedMessage> {
+    tracing::debug!(id = %input.id.0, "messages_get");
     let db = state.db.lock().await;
     let headers = messages_repo::get(&*db, &input.id).await?;
     let body_path = messages_repo::body_path(&*db, &input.id).await?;
