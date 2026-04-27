@@ -3,12 +3,33 @@
 //! Small UI-side formatting helpers. The Dioxus components stay
 //! readable when rendering logic is named and tested here rather
 //! than inlined into `rsx!`.
-//!
-//! Phase 2 Week 16 ships only [`format_relative_date`]; the module
-//! is the natural home for any future "this string came from raw
-//! data" helpers (e.g. byte-count formatting for attachment sizes).
 
 use chrono::{DateTime, Datelike, Local, Utc};
+
+/// Map a raw IMAP / JMAP folder name to its human-friendly display
+/// form for the sidebar and message-list header.
+///
+/// IMAP servers use `INBOX` as the canonical inbox identifier (RFC
+/// 3501 §5.1). Older servers also use `Junk` / `Junk E-mail` for
+/// what users now expect to see as `Spam`. Everything else passes
+/// through unchanged: Gmail, iCloud, Fastmail, etc. all return
+/// already-presentable leaf names like `Sent Mail`, `Drafts`,
+/// `All Mail`, so this helper deliberately doesn't try to second-
+/// guess them.
+///
+/// Backlog item 3 — see `docs/QSL_BACKLOG_FIXES.md`.
+pub fn display_name_for_folder(name: &str) -> &str {
+    if name.eq_ignore_ascii_case("INBOX") {
+        "Inbox"
+    } else if name.eq_ignore_ascii_case("Junk")
+        || name.eq_ignore_ascii_case("Junk E-mail")
+        || name.eq_ignore_ascii_case("Junk Email")
+    {
+        "Spam"
+    } else {
+        name
+    }
+}
 
 /// Format a [`DateTime<Utc>`] for the message-list date column,
 /// switching display style by recency relative to `now`:
@@ -95,5 +116,31 @@ mod tests {
         let now = at(2026, 4, 25, 14, 0);
         let when = at(2024, 12, 8, 9, 0);
         assert_eq!(format_relative_date(when, now), "2024-12-08");
+    }
+
+    #[test]
+    fn display_name_uppercases_inbox() {
+        assert_eq!(display_name_for_folder("INBOX"), "Inbox");
+        assert_eq!(display_name_for_folder("inbox"), "Inbox");
+        assert_eq!(display_name_for_folder("Inbox"), "Inbox");
+    }
+
+    #[test]
+    fn display_name_remaps_junk_variants_to_spam() {
+        assert_eq!(display_name_for_folder("Junk"), "Spam");
+        assert_eq!(display_name_for_folder("Junk E-mail"), "Spam");
+        assert_eq!(display_name_for_folder("Junk Email"), "Spam");
+        assert_eq!(display_name_for_folder("JUNK"), "Spam");
+    }
+
+    #[test]
+    fn display_name_passes_through_other_names() {
+        // Gmail-style leaf names are already presentable.
+        assert_eq!(display_name_for_folder("Sent Mail"), "Sent Mail");
+        assert_eq!(display_name_for_folder("All Mail"), "All Mail");
+        assert_eq!(display_name_for_folder("Drafts"), "Drafts");
+        assert_eq!(display_name_for_folder("Newsletters"), "Newsletters");
+        // Unknown / user-defined names too.
+        assert_eq!(display_name_for_folder("Receipts/2026"), "Receipts/2026");
     }
 }

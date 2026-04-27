@@ -1242,7 +1242,10 @@ fn SidebarMailboxRow(
             div {
                 class: "sidebar-row-left",
                 MailboxRoleIcon { role: role.clone() }
-                span { class: "sidebar-row-name", "{folder.name}" }
+                span {
+                    class: "sidebar-row-name",
+                    "{crate::format::display_name_for_folder(&folder.name)}"
+                }
             }
             if unread > 0 {
                 span {
@@ -1283,7 +1286,10 @@ fn SidebarLabelRow(folder: Folder, account_id: AccountId, selection: Signal<Sele
                     class: "sidebar-label-dot",
                     style: "background: {color};",
                 }
-                span { class: "sidebar-row-name", "{folder.name}" }
+                span {
+                    class: "sidebar-row-name",
+                    "{crate::format::display_name_for_folder(&folder.name)}"
+                }
             }
             if unread > 0 {
                 span {
@@ -1705,12 +1711,12 @@ fn MessageRowV2(msg: MessageHeaders, selection: Signal<Selection>) -> Element {
 /// holds the folder id; the sidebar already has the name in scope but
 /// we'd need to either lift it up or refetch. For now, render the
 /// last segment of the folder id (which is the canonical name on
-/// IMAP) so the header shows "INBOX" / "Sent" / etc.
+/// IMAP) and run it through the shared display-name mapper so
+/// "INBOX" shows as "Inbox" — matching the sidebar.
 fn folder_title_from_selection(folder: &FolderId, _selection: &Signal<Selection>) -> String {
     let raw = &folder.0;
-    raw.rsplit_once(':')
-        .map(|(_, name)| name.to_string())
-        .unwrap_or_else(|| raw.clone())
+    let leaf = raw.rsplit_once(':').map(|(_, name)| name).unwrap_or(raw);
+    crate::format::display_name_for_folder(leaf).to_string()
 }
 
 // ---------- Reader pane ----------
