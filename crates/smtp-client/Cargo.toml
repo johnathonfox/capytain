@@ -11,5 +11,13 @@ repository.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+[dependencies]
+async-trait = { workspace = true }
+lettre = { workspace = true }
+qsl-core = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
 [lints]
 workspace = true

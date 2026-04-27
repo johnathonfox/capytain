@@ -55,6 +55,14 @@ qsl-renderer = { path = "crates/renderer", version = "=0.0.0", default-features 
 dioxus = { version = "=0.7.6" }
 jmap-client = { version = "0.4", default-features = false, features = ["async"] }
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "async-secret-service", "crypto-rust", "tokio"] }
+# `lettre` powers SMTP submission for Gmail (Phase 2 Week 18). We pin
+# `default-features = false` to drop `native-tls` + `hostname` in
+# favor of an explicit rustls + ring stack so the desktop binary's
+# `rustls::crypto::ring::default_provider().install_default()` call
+# at startup matches everything in the dep graph (see
+# docs/week-6-day-2-notes.md and `qsl_desktop::main`). `pool` is
+# enabled for the default short-lived-but-not-single-shot ergonomics.
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls-tls", "pool"] }
 mail-builder = "0.4"
 mail-parser = "0.11"
 rand = "0.9"
