@@ -8017,6 +8017,7 @@ name = "qsl-desktop"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "directories",
  "dpi",
@@ -8059,6 +8060,7 @@ dependencies = [
  "imap-proto",
  "qsl-core",
  "qsl-mime",
+ "qsl-smtp-client",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -8161,6 +8163,7 @@ name = "qsl-sync"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "qsl-core",
  "qsl-storage",

@@ -45,23 +45,45 @@ pub struct ImapBackend {
     /// `X-GM-LABELS` so per-message Gmail labels round-trip into
     /// `MessageHeaders.labels`.
     gmail_ext: bool,
+    /// Account email — needed at SMTP submission time for the SASL
+    /// `authentication-identity` and the envelope `MAIL FROM:`.
+    /// Stored on the backend so the [`MailBackend::submit_message`]
+    /// impl can reach it without a fresh round-trip through the
+    /// account repo.
+    email: Arc<str>,
+    /// OAuth2 access token captured at connect time. SMTP uses the
+    /// same XOAUTH2 stack as IMAP, so the same token works for the
+    /// submission burst as long as it hasn't expired in the interim.
+    /// If lettre returns an auth error, the outbox drain will retry
+    /// against a freshly-built backend whose token has just been
+    /// refreshed.
+    access_token: Arc<str>,
 }
 
 impl ImapBackend {
     /// Wrap an already-authenticated [`Session`]. Used by tests that
     /// supply a pre-scripted stream; the production `connect_tls`
     /// constructor is the normal entry point.
+    ///
+    /// `email` and `access_token` are the SASL identity + bearer used
+    /// at the IMAP login that produced this session — passed through
+    /// so the SMTP submission path can reuse them. Tests that don't
+    /// exercise submission can pass empty strings.
     pub(crate) fn from_session(
         session: Session<StreamT>,
         account: AccountId,
         host: impl Into<Arc<str>>,
         gmail_ext: bool,
+        email: impl Into<Arc<str>>,
+        access_token: impl Into<Arc<str>>,
     ) -> Self {
         Self {
             session: Mutex::new(session),
             account,
             host: host.into(),
             gmail_ext,
+            email: email.into(),
+            access_token: access_token.into(),
         }
     }
 
@@ -78,7 +100,14 @@ impl ImapBackend {
         let DialedSession { session, gmail_ext } =
             dial_session(host, port, email, access_token).await?;
         info!(host, email, gmail_ext, "IMAP connected and authenticated");
-        Ok(Self::from_session(session, account, host, gmail_ext))
+        Ok(Self::from_session(
+            session,
+            account,
+            host,
+            gmail_ext,
+            email,
+            access_token,
+        ))
     }
 
     /// The host this backend connected to — exposed for logs/diagnostics.
@@ -751,10 +780,99 @@ impl MailBackend for ImapBackend {
     }
 
     async fn submit_message(&self, raw_rfc822: &[u8]) -> Result<Option<MessageId>, MailError> {
-        let _ = raw_rfc822;
-        Err(MailError::Other(
-            "IMAP submission arrives in Phase 0 Week 2 (Phase 2) via qsl-smtp-client".into(),
-        ))
+        let route = SmtpRoute::for_imap_host(&self.host).ok_or_else(|| {
+            MailError::Other(format!(
+                "no SMTP route hardcoded for IMAP host {}",
+                self.host
+            ))
+        })?;
+
+        let (from, recipients) = qsl_mime::extract_envelope(raw_rfc822);
+        let from = from.ok_or_else(|| {
+            MailError::Parse("submit_message: outgoing bytes had no From header".into())
+        })?;
+        if recipients.is_empty() {
+            return Err(MailError::Other(
+                "submit_message: no recipients (To/Cc/Bcc all empty)".into(),
+            ));
+        }
+        let recipient_addrs: Vec<String> = recipients.into_iter().map(|a| a.address).collect();
+
+        qsl_smtp_client::submit(qsl_smtp_client::Submission {
+            host: route.host,
+            port: route.port,
+            tls: route.tls,
+            username: &self.email,
+            oauth_token: &self.access_token,
+            from: &from.address,
+            to: &recipient_addrs,
+            raw_bytes: raw_rfc822,
+        })
+        .await
+        .map_err(map_smtp_error)?;
+
+        if let Err(e) = self.append_to_sent(raw_rfc822, route.sent_mailbox).await {
+            // Submission succeeded; the APPEND is a best-effort
+            // mirror so the user sees their message in Sent before
+            // the next sync round-trips it. Logging-without-failing
+            // matches the IMAP submission norm — Gmail also
+            // auto-files outgoing mail in [Gmail]/Sent Mail when
+            // submitted on the same authenticated identity.
+            warn!(
+                "submit_message: SMTP submission succeeded but APPEND to {} failed: {e}",
+                route.sent_mailbox
+            );
+        }
+        Ok(None)
+    }
+}
+
+/// SMTP routing for one IMAP host. Hardcoded per-provider until we
+/// grow a real autoconfig story (Outlook, Yahoo, custom domains).
+struct SmtpRoute {
+    host: &'static str,
+    port: u16,
+    tls: qsl_smtp_client::TlsMode,
+    /// IMAP mailbox name to APPEND a copy into post-submission. Gmail
+    /// auto-files into `[Gmail]/Sent Mail` on its own when the SASL
+    /// identity matches, so APPEND is a fast-path to surface the
+    /// message before the next sync — the exact mailbox name is
+    /// provider-specific.
+    sent_mailbox: &'static str,
+}
+
+impl SmtpRoute {
+    fn for_imap_host(imap_host: &str) -> Option<Self> {
+        match imap_host {
+            "imap.gmail.com" => Some(Self {
+                host: qsl_smtp_client::gmail::HOST,
+                port: qsl_smtp_client::gmail::PORT_STARTTLS,
+                tls: qsl_smtp_client::gmail::TLS,
+                sent_mailbox: "[Gmail]/Sent Mail",
+            }),
+            _ => None,
+        }
+    }
+}
+
+fn map_smtp_error(e: qsl_smtp_client::SmtpError) -> MailError {
+    use qsl_smtp_client::SmtpError;
+    match e {
+        SmtpError::InvalidInput(m) => MailError::Other(format!("smtp invalid input: {m}")),
+        SmtpError::Transport(m) => MailError::Network(m),
+        SmtpError::Auth(m) => MailError::Auth(m),
+        SmtpError::Rejected(m) => MailError::Other(format!("smtp rejected: {m}")),
+    }
+}
+
+impl ImapBackend {
+    async fn append_to_sent(&self, raw_rfc822: &[u8], mailbox: &str) -> Result<(), MailError> {
+        let mut session = self.session.lock().await;
+        session
+            .append(mailbox, Some("(\\Seen)"), None, raw_rfc822)
+            .await
+            .map_err(|e| MailError::Protocol(format!("APPEND {mailbox}: {e}")))?;
+        Ok(())
     }
 }
 

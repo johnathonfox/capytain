@@ -117,6 +117,7 @@ fn main() {
             commands::messages::messages_get,
             commands::messages::messages_load_older,
             commands::messages::messages_refresh_folder,
+            commands::messages::messages_send,
             commands::drafts::drafts_save,
             commands::drafts::drafts_load,
             commands::drafts::drafts_list,
