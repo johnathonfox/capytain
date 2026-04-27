@@ -1992,29 +1992,50 @@ fn ReaderPaneV2(
 
 #[component]
 fn ReaderV2(id: MessageId, sync_tick: SyncTick, compose: Signal<Option<ComposeState>>) -> Element {
+    // `force_trusted` is the one-shot "Load images" override. Resets
+    // to false when the user navigates to a different message — see
+    // the use_effect below — so a previously-loaded message doesn't
+    // leak its trust state into the next one.
+    let mut force_trusted: Signal<bool> = use_signal(|| false);
+    {
+        let id_for_reset = id.clone();
+        use_effect(use_reactive!(|id_for_reset| {
+            let _ = id_for_reset;
+            force_trusted.set(false);
+        }));
+    }
+
     let id_for_fetch = id.clone();
-    let msg = use_resource(use_reactive!(|id_for_fetch| async move {
-        let rendered = invoke::<RenderedMessage>(
-            "messages_get",
-            serde_json::json!({ "input": { "id": id_for_fetch } }),
-        )
-        .await?;
-        // Hand the body straight to Servo's overlay surface. Doing
-        // it inside the resource closure means it fires once per
-        // successful message fetch — putting it in a `use_effect`
-        // outside the closure would only fire on initial mount and
-        // miss subsequent message switches.
-        let html = compose_reader_html(&rendered);
-        let _ = invoke::<()>(
-            "reader_render",
-            serde_json::json!({ "input": { "html": html } }),
-        )
-        .await;
-        // Force one tracker push so the overlay surface lands in
-        // the right slot on the same frame the new content paints.
-        push_reader_body_rect();
-        Ok::<_, String>(rendered)
-    }));
+    let force_trusted_val = *force_trusted.read();
+    let msg = use_resource(use_reactive!(
+        |id_for_fetch, force_trusted_val| async move {
+            let rendered = invoke::<RenderedMessage>(
+                "messages_get",
+                serde_json::json!({
+                    "input": {
+                        "id": id_for_fetch,
+                        "force_trusted": force_trusted_val,
+                    }
+                }),
+            )
+            .await?;
+            // Hand the body straight to Servo's overlay surface. Doing
+            // it inside the resource closure means it fires once per
+            // successful message fetch — putting it in a `use_effect`
+            // outside the closure would only fire on initial mount and
+            // miss subsequent message switches.
+            let html = compose_reader_html(&rendered);
+            let _ = invoke::<()>(
+                "reader_render",
+                serde_json::json!({ "input": { "html": html } }),
+            )
+            .await;
+            // Force one tracker push so the overlay surface lands in
+            // the right slot on the same frame the new content paints.
+            push_reader_body_rect();
+            Ok::<_, String>(rendered)
+        }
+    ));
 
     // Mark-as-read on selection. Fires once per `id` change. The
     // command also queues an outbox entry for the server flag write,
@@ -2154,6 +2175,18 @@ fn ReaderV2(id: MessageId, sync_tick: SyncTick, compose: Signal<Option<ComposeSt
                         if !rendered.attachments.is_empty() {
                             ReaderAttachments { attachments: rendered.attachments.clone() }
                         }
+                        if rendered.remote_content_blocked {
+                            RemoteContentBanner {
+                                account_id: rendered.headers.account_id.clone(),
+                                sender_addr: rendered
+                                    .headers
+                                    .from
+                                    .first()
+                                    .map(|a| a.address.clone())
+                                    .unwrap_or_default(),
+                                force_trusted,
+                            }
+                        }
                     }
                     // Body slot — transparent placeholder. The
                     // ResizeObserver wired in App() watches this
@@ -2188,6 +2221,101 @@ fn ReaderRecipientRow(label: String, addrs: Vec<EmailAddress>) -> Element {
                     let display = if name.is_empty() { addr } else { name };
                     rsx! {
                         span { class: "reader-chip", title: "{title}", "{display}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Banner that appears above the reader body when the sanitizer
+/// blocked remote content for this message. "Load images" flips
+/// `force_trusted` for the current render only; "Always load from
+/// this sender" persists an `remote_content_opt_ins` row via
+/// `messages_trust_sender`, then re-fetches so subsequent loads
+/// pick up the trust state.
+#[component]
+fn RemoteContentBanner(
+    account_id: AccountId,
+    sender_addr: String,
+    force_trusted: Signal<bool>,
+) -> Element {
+    let mut trusting: Signal<bool> = use_signal(|| false);
+    let sender_label = if sender_addr.is_empty() {
+        "this sender".to_string()
+    } else {
+        sender_addr.clone()
+    };
+
+    let load_once = {
+        let mut force_trusted = force_trusted;
+        move |_| force_trusted.set(true)
+    };
+
+    let trust_sender = {
+        let account_id = account_id.clone();
+        let sender_addr = sender_addr.clone();
+        let mut force_trusted = force_trusted;
+        move |_| {
+            if sender_addr.is_empty() || *trusting.read() {
+                return;
+            }
+            trusting.set(true);
+            let account_id = account_id.clone();
+            let sender_addr = sender_addr.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                match invoke::<()>(
+                    "messages_trust_sender",
+                    serde_json::json!({
+                        "input": {
+                            "account_id": account_id,
+                            "email_address": sender_addr,
+                        }
+                    }),
+                )
+                .await
+                {
+                    Ok(()) => {
+                        // Trigger a re-render through the same signal
+                        // the per-render override uses; the resource
+                        // closure re-fires and the next `messages_get`
+                        // sees the new opt-in row.
+                        force_trusted.set(true);
+                    }
+                    Err(e) => {
+                        web_sys_log(&format!("messages_trust_sender: {e}"));
+                    }
+                }
+                trusting.set(false);
+            });
+        }
+    };
+
+    rsx! {
+        div {
+            class: "reader-remote-banner",
+            span {
+                class: "reader-remote-banner-text",
+                "Images blocked for privacy."
+            }
+            div {
+                class: "reader-remote-banner-actions",
+                button {
+                    class: "reader-remote-banner-button",
+                    r#type: "button",
+                    onclick: load_once,
+                    "Load images"
+                }
+                button {
+                    class: "reader-remote-banner-button",
+                    r#type: "button",
+                    disabled: sender_addr.is_empty() || *trusting.read(),
+                    onclick: trust_sender,
+                    title: "{sender_label}",
+                    if *trusting.read() {
+                        "Saving…"
+                    } else {
+                        "Always load from this sender"
                     }
                 }
             }

@@ -51,12 +51,12 @@ Pre-MCP cleanup pass. Each item is independently mergeable. Order is roughly pri
 
 ## 4. Remote image gating (privacy/tracking)
 
-**Status: Partial.** Sanitizer-side blocking is now complete:
+**Status: Done (UI banner + opt-in shipped; dimension-preserving placeholders remain optional).** Sanitizer-side blocking is now complete:
 - `<img src>`, `srcset`, `poster`, `background` (Phase 1 Week 8)
 - Inline `style="background-image: url(...)"` and `style="background: url(...) ..."` (this pass)
 - `<link rel="stylesheet" href="...">` stripped by the sanitizer
 
-`RenderedMessage.remote_content_blocked` is plumbed end-to-end and a per-sender allowlist exists in `remote_content_opt_ins`. The UI banner ("Images blocked. [Load images] [Always load from this sender]") and dimension-preserving placeholder boxes are deferred to a follow-up — tracked in `docs/KNOWN_ISSUES.md`.
+`RenderedMessage.remote_content_blocked` is plumbed end-to-end and a per-sender allowlist exists in `remote_content_opt_ins`. The reader-pane banner ("Images blocked. [Load images] [Always load from this sender]") shipped in the follow-up: `messages_get` now takes `force_trusted: bool` for one-shot loads, and `messages_trust_sender` persists the opt-in. **Still optional:** dimension-preserving placeholder boxes for blocked `<img>` tags so layout doesn't reflow when images load. Tracked in `docs/KNOWN_ISSUES.md`.
 
 **Original symptom:** HTML emails with `<img src="https://...">` load remote images on render. Visible in the Allstate email — both the hero image and the family photo are remote URLs that fetch on open. This means senders can track open events and confirm the email address is active.
 
