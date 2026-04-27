@@ -258,7 +258,10 @@ impl LinuxGtkParent {
         // surface.
         let t_layout_start = std::time::Instant::now();
         let mut layout_iters = 0u32;
-        let layout_deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        let deadline_ms: u64 = 100;
+        tracing::info!(deadline_ms, "linux_gtk: starting layout pump (canary)");
+        let layout_deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(deadline_ms);
         while std::time::Instant::now() < layout_deadline {
             let size = drawing_area
                 .window()
