@@ -333,10 +333,14 @@ async fn open_backend(account: &Account) -> Result<Box<dyn MailBackend>, Mailcli
                     )))
                 }
             };
-            let backend =
-                JmapBackend::connect(session_url, token_set.access.expose(), account.id.clone())
-                    .await
-                    .map_err(MailcliError::Mail)?;
+            let backend = JmapBackend::connect(
+                session_url,
+                token_set.access.expose(),
+                account.id.clone(),
+                &account.email_address,
+            )
+            .await
+            .map_err(MailcliError::Mail)?;
             Ok(Box::new(backend))
         }
         _ => Err(MailcliError::Usage(format!(

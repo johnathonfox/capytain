@@ -8090,6 +8090,8 @@ dependencies = [
  "futures-util",
  "jmap-client",
  "qsl-core",
+ "qsl-mime",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
