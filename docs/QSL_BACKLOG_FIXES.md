@@ -2,25 +2,23 @@
 
 Pre-MCP cleanup pass. Each item is independently mergeable. Order is roughly priority-by-impact, but feel free to batch.
 
+## Status legend
+
+- **Open** — not started.
+- **Partial** — some pieces shipped, gap remains; details under each item.
+- **Done** — verified shipped; nothing to do.
+
 ## 1. Fix charset handling in HTML body rendering
 
-**Symptom:** Visible mojibake in rendered HTML emails. Examples from the Allstate marketing email:
-- "Good HandsÃ®" (should be "Good Hands®")
-- "AllstateÂ® policy" (should be "Allstate® policy")
+**Status: Done.** Root cause was *not* in `mail-parser` — the parser already honors declared charsets via its built-in charset table. The actual bug was in `crates/renderer/src/servo.rs::percent_encode`: it called `out.push(b as char)` on each byte of `&str::bytes()`, which treats every UTF-8 continuation byte (≥ 0x80) as a Latin-1 codepoint and re-encodes it. A single `®` (UTF-8 0xC2 0xAE) became the two Latin-1 chars `Â®`, which then re-encoded back to UTF-8 as 0xC3 0x82 0xC2 0xAE — Servo decoded those four bytes as UTF-8 and rendered `Â®`. Fix: percent-encode all bytes ≥ 0x80 too.
 
-**Cause:** UTF-8 bytes being interpreted as Latin-1 (or Windows-1252). The message declares its charset in `Content-Type: text/html; charset=UTF-8` but the renderer is decoding as Latin-1.
+**Symptom (resolved):** "Good HandsÃ®" / "AllstateÂ® policy" in the Allstate marketing email.
 
-**Fix:**
-- Parse the `Content-Type` header from the MIME part, extract the `charset` parameter
-- Decode body bytes using the declared charset; fall back to UTF-8, then Windows-1252 (in that order — never Latin-1, which doesn't have the curly quotes/em dashes most mail uses)
-- For multipart messages, charset is per-part; don't assume it's consistent across parts
-- Test against: emails declaring UTF-8, emails declaring Windows-1252, emails declaring no charset, emails with `charset=us-ascii` that actually contain UTF-8 (common in spam)
-
-**Verification:** Allstate email renders "Good Hands®" not "Good HandsÃ®". Find an email with em dashes or smart quotes and confirm they render correctly.
-
-**Why this is #1:** Every HTML email in the inbox is affected. Also, the MCP server's `get_message` tool will return the same garbled text to agents if this isn't fixed first — agents will see "AllstateÂ® policy" and either ignore it or hallucinate corrections.
+**Verification:** Two unit tests added (`crates/renderer/src/servo.rs::tests::percent_encode_escapes_non_ascii_bytes` and `data_url_round_trips_utf8_through_percent_decode`), plus two defensive tests in `crates/mime/src/lib.rs` that lock in `mail-parser`'s charset behavior so MCP `get_message` doesn't regress.
 
 ## 2. Right-edge sliver (overflow bug)
+
+**Status: Open.** No `overflow: hidden` on `.reader-pane` in `tailwind.css`; no other obvious culprit found in the survey.
 
 **Symptom:** Faint vertical band visible past the reader pane border, all the way down the window. Visible in every screenshot so far. May be a scrollbar gutter, a 1px overflow, or a sibling element peeking through.
 
@@ -35,6 +33,8 @@ Pre-MCP cleanup pass. Each item is independently mergeable. Order is roughly pri
 **Verification:** Resize the window across widths from 800px to 1920px; no sliver visible at any width.
 
 ## 3. Sentence case folder names
+
+**Status: Open.** UI renders the raw IMAP `Folder.name` directly. No display-name mapper exists today.
 
 **Symptom:** Sidebar and message-list header show "INBOX" in all caps. Other folder names are sentence case ("Sent Mail", "Drafts", "All Mail", "Spam", "Trash") — only "INBOX" is the outlier.
 
@@ -78,6 +78,8 @@ Pre-MCP cleanup pass. Each item is independently mergeable. Order is roughly pri
 
 ## 5. HTML body sanitization (security)
 
+**Status: Done.** Phase 1 Week 7 (PR #37) wired ammonia through `qsl_mime::sanitize_email_html` with the strict allowlist below. Tests cover script-tag stripping, iframe/object/embed stripping, event-handler attribute stripping, `javascript:` URI stripping, form/input stripping, style-tag stripping (inline `style` preserved), tracking-pixel stripping, and benign-image-src preservation. `messages_get` calls it on every body fetch.
+
 **Symptom:** No visible bug in current screenshots, but worth confirming. HTML email is hostile by default — script tags, event handlers, remote stylesheets, iframe content.
 
 **Fix:** Run all HTML email bodies through `ammonia` (Rust HTML sanitizer) before rendering. Strict allowlist:
@@ -92,7 +94,7 @@ Pre-MCP cleanup pass. Each item is independently mergeable. Order is roughly pri
 
 ## 6. "INBOX" vs "Inbox" in message-list header
 
-Already covered by #3 if you handle it at the display-name layer. Listing separately in case the message-list header is reading from a different source than the sidebar — they should both pull from the same display-name resolver.
+**Status: Folded into #3.** The sidebar and the message-list header already pull from the same `Folder` struct; once the display-name mapper from #3 lands and is applied at both call sites (`SidebarMailboxRow` + `folder_title_from_selection`), this is fixed in the same change.
 
 ## 7. Verify unread count accuracy
 
@@ -104,6 +106,8 @@ Already covered by #3 if you handle it at the display-name layer. Listing separa
 
 ## 8. Compose button state
 
+**Status: Done (working as designed).** Compose button opens a full compose pane with to/cc/bcc/subject/body fields, auto-saves to the local drafts table every 5s, and offers Close / Discard / Save buttons. **There is no Send button** — sending is intentionally deferred to Phase 2 Week 18 (Gmail SMTP) / Week 19 (Fastmail JMAP), and the pane footer states this explicitly: "Sending lands in Phase 2 Week 18 (Gmail SMTP) and Week 19 (Fastmail JMAP). Drafts are saved locally for now." The button doesn't dangle; the user gets a working drafts experience and a clear "send isn't here yet" signal.
+
 **Symptom:** Prominent "Compose" button in sidebar. Presumably non-functional or partially functional given the 0.0.1 state.
 
 **Fix options (pick one):**
@@ -114,6 +118,8 @@ Already covered by #3 if you handle it at the display-name layer. Listing separa
 Don't ship a button that does nothing on click — it erodes trust in the rest of the UI.
 
 ## 9. Threading
+
+**Status: Done.** Phase 1 Week 13 (PR #54) shipped the threading pipeline: `thread_id` column on messages, `X-GM-THRID` fetch on Gmail, In-Reply-To / References / subject+30d fallback on non-Gmail, full assembly pipeline. The MCP spec's `get_thread` tool maps onto the same data model.
 
 **Lower priority — flagging for awareness, not necessarily this pass.**
 
@@ -129,20 +135,26 @@ If not this pass: ship the rest, leave threading for after MCP. The MCP spec alr
 
 ## 10. Load-more-on-scroll (low priority)
 
-The "Load 50 older messages" button is functional but the modern pattern is auto-load when scrolling near the bottom. Five-line change with `IntersectionObserver`-equivalent (or scroll position detection if Servo doesn't support `IntersectionObserver` reliably — check before assuming). Defer until other items are done.
+**Status: Done.** Shipped 2026-04-26 in PR #60 (commit `d4fc1d2`). Replaced the "Load 50 older messages" button with an `onscroll` handler on `.msglist-scroll` that fires `messages_load_older` whenever the user gets within 200px of the bottom, gated by `loading_older` so a fast scroll only triggers one batch.
 
 ## Suggested order
 
-1. Charset fix (highest impact, lowest risk)
-2. Right-edge sliver (annoying, probably small)
-3. Sentence case + display-name resolver (sets up MCP work)
-4. Sanitization (`ammonia`) + remote image gating (do these together, both touch the HTML rendering boundary)
-5. Unread count consistency
-6. Compose button state decision
-7. Threading (only if time)
-8. Load-more-on-scroll (only if time)
+Updated to reflect status. Strikethrough = nothing to do.
 
-Stop here. Move to MCP server per `QSL_MCP_SERVER_SPEC.md`.
+1. ~~Charset fix~~ — Done (root cause was the renderer's `percent_encode`, not `mail-parser`)
+2. **Right-edge sliver** (annoying, probably small) — Open
+3. **Sentence case + display-name resolver** (sets up MCP work) — Open. Also closes #6.
+4. **Remote image gating: sanitizer half** (CSS `background-image` filter only; UI banner deferred) — Partial
+5. ~~Sanitization (`ammonia`)~~ — Done
+6. ~~"INBOX" vs "Inbox" header~~ — Folded into #3
+7. **Unread count consistency** (audit + likely add `sync_tick` to a `use_reactive!` dep) — Open
+8. ~~Compose button state decision~~ — Done (working as designed; pane footer states the Phase 2 deferral)
+9. ~~Threading~~ — Done (Phase 1 Week 13)
+10. ~~Load-more-on-scroll~~ — Done (PR #60, 2026-04-26)
+
+**Active work this pass:** items 1, 2, 3, 4 (sanitizer half), 7. Five commits. After this pass, MCP server per `QSL_MCP_SERVER_SPEC.md`.
+
+**Deferred to a follow-up PR:** the UI banner + Load-images / Allow-from-sender buttons for #4. Tracked in `docs/KNOWN_ISSUES.md`.
 
 ## Prompt for Claude Code
 

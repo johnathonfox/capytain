@@ -510,6 +510,70 @@ Just checking in.\r\n";
     }
 
     #[test]
+    fn body_decodes_declared_windows_1252_charset() {
+        // Defensive regression: the user's real-world mojibake report
+        // (`Â®` / `Ã®` for `®`) was pinned to the renderer's data-URL
+        // encoder, not to mail-parser. Lock in the assumption that
+        // mail-parser honors the declared charset so MCP `get_message`
+        // (and the desktop reader pane) both receive correctly-decoded
+        // strings. If mail-parser ever regresses, this fails loudly.
+        let mut raw = b"From: sender@example.com\r\n\
+To: me@example.com\r\n\
+Subject: Test\r\n\
+Date: Fri, 18 Apr 2026 10:00:00 +0000\r\n\
+Message-ID: <cp1252@example.com>\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: text/plain; charset=windows-1252\r\n\
+Content-Transfer-Encoding: 8bit\r\n\
+\r\n\
+Good Hands"
+            .to_vec();
+        // Windows-1252 0xAE → ®.
+        raw.push(0xAE);
+        raw.extend_from_slice(b"\r\n");
+
+        let msg_id = MessageId("m1".into());
+        let acct = AccountId("a1".into());
+        let folder = FolderId("INBOX".into());
+        let flags = MessageFlags::default();
+        let body = parse_rfc822(&raw, ident(&msg_id, &acct, &folder, &flags)).unwrap();
+        let text = body.body_text.expect("text body present");
+        assert!(
+            text.contains("Good Hands®"),
+            "windows-1252 0xAE was not decoded to ®; got {text:?}"
+        );
+    }
+
+    #[test]
+    fn body_decodes_declared_iso_8859_1_charset() {
+        let mut raw = b"From: sender@example.com\r\n\
+To: me@example.com\r\n\
+Subject: Test\r\n\
+Date: Fri, 18 Apr 2026 10:00:00 +0000\r\n\
+Message-ID: <iso@example.com>\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: text/plain; charset=iso-8859-1\r\n\
+Content-Transfer-Encoding: 8bit\r\n\
+\r\n\
+caf"
+        .to_vec();
+        // ISO-8859-1 0xE9 → é.
+        raw.push(0xE9);
+        raw.extend_from_slice(b"\r\n");
+
+        let msg_id = MessageId("m1".into());
+        let acct = AccountId("a1".into());
+        let folder = FolderId("INBOX".into());
+        let flags = MessageFlags::default();
+        let body = parse_rfc822(&raw, ident(&msg_id, &acct, &folder, &flags)).unwrap();
+        let text = body.body_text.expect("text body present");
+        assert!(
+            text.contains("café"),
+            "iso-8859-1 0xE9 was not decoded to é; got {text:?}"
+        );
+    }
+
+    #[test]
     fn parse_headers_matches_body_headers() {
         let msg_id = MessageId("m1".into());
         let acct = AccountId("a1".into());
