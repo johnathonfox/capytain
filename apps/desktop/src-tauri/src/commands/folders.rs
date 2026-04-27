@@ -47,6 +47,21 @@ pub async fn folders_list(
             .await
             .unwrap_or(0);
     }
-    tracing::debug!(account = %input.account.0, count = folders.len(), "folders_list");
+    // PR-R1 diagnostic: log every folder's id + role so we can see
+    // exactly what crosses the IPC boundary. The screenshot
+    // 2026-04-27 showed only INBOX + All Mail in MAILBOXES even
+    // though the DB has 7 [Gmail]/* folders with valid roles. This
+    // line will tell us whether roles are dropping at the IPC
+    // boundary (serde issue) or surviving fine (UI splitter issue).
+    // Remove once the regression is root-caused and fixed.
+    for f in folders.iter() {
+        tracing::info!(
+            id = %f.id.0,
+            name = %f.name,
+            role = ?f.role,
+            "folders_list: row"
+        );
+    }
+    tracing::info!(account = %input.account.0, count = folders.len(), "folders_list");
     Ok(folders)
 }

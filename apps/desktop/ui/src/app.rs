@@ -1374,7 +1374,22 @@ fn SidebarAccountBlock(
             None => rsx! {},
             Some(Err(e)) => rsx! { p { class: "sidebar-account-email", "{e}" } },
             Some(Ok(list)) => {
+                // PR-R1 diagnostic: log the role column for every
+                // folder that arrives at the wasm boundary plus the
+                // count after split. Pair with the Rust-side tracing
+                // in `folders_list` to nail down whether roles drop
+                // on the wire, or whether the splitter misbehaves.
+                let _diag: Vec<String> = list
+                    .iter()
+                    .map(|f| format!("{}={:?}", f.id.0, f.role))
+                    .collect();
+                web_sys_log(&format!("PR-R1 folders_list arrived: [{}]", _diag.join(", ")));
                 let (mailboxes, labels) = split_mailboxes_labels(list.clone());
+                web_sys_log(&format!(
+                    "PR-R1 split: mailboxes={} labels={}",
+                    mailboxes.len(),
+                    labels.len()
+                ));
                 rsx! {
                     p { class: "sidebar-group-label", "Mailboxes" }
                     for f in mailboxes.into_iter() {
