@@ -855,6 +855,46 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
         });
     }
 
+    // Servo install must happen on the GTK main thread —
+    // `gtk::Overlay::new()` panics with "GTK may only be used from
+    // the main thread" anywhere else. We're currently on a tokio
+    // worker (every `#[tauri::command] async fn` is), so dispatch
+    // the install via `run_on_main_thread` and await the result so
+    // the renderer is in the per-window registry before this
+    // command returns. The popup's first `reader_render` then
+    // succeeds without racing the install.
+    #[cfg(feature = "servo")]
+    {
+        let install_app = app.clone();
+        let install_label = label.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        app.run_on_main_thread(move || {
+            let result = (|| -> Result<(), String> {
+                let webview = install_app
+                    .get_webview_window(&install_label)
+                    .ok_or_else(|| "popup window vanished before install".to_string())?;
+                crate::renderer_bridge::install_servo_renderer_for_window(&install_app, &webview)
+                    .map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(result);
+        })
+        .map_err(|e| {
+            qsl_ipc::IpcError::new(
+                qsl_ipc::IpcErrorKind::Internal,
+                format!("dispatch popup Servo install: {e}"),
+            )
+        })?;
+        match rx.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(window = %label, error = %e, "messages_open_in_window: Servo install failed");
+            }
+            Err(e) => {
+                tracing::warn!(window = %label, error = %e, "messages_open_in_window: install reply lost");
+            }
+        }
+    }
+
     tracing::info!(window = %label, id = %input.id.0, "messages_open_in_window");
     Ok(())
 }

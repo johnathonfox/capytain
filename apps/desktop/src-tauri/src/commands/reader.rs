@@ -47,35 +47,12 @@ pub async fn reader_render(
     let label = window.label().to_string();
     tracing::debug!(window = %label, bytes = input.html.len(), "reader_render");
 
-    // Lazy-install Servo for popup windows on first render. The main
-    // window is installed at setup time; a popup's first render is
-    // its signal that a renderer is now needed for that label.
-    #[cfg(feature = "servo")]
-    {
-        let needs_install = {
-            let slot = state.servo_renderers.lock().await;
-            !slot.contains_key(&label)
-        };
-        if needs_install {
-            let app_handle = window.app_handle().clone();
-            // The Tauri-injected `tauri::Window` argument doesn't
-            // expose the WebviewWindow directly, but the app handle
-            // can look it up by label.
-            if let Some(webview_window) = app_handle.get_webview_window(&label) {
-                if let Err(e) = crate::renderer_bridge::install_servo_renderer_for_window(
-                    &app_handle,
-                    &webview_window,
-                ) {
-                    tracing::warn!(window = %label, error = %e, "reader_render: lazy Servo install failed");
-                    return Ok(());
-                }
-            } else {
-                tracing::warn!(window = %label, "reader_render: caller window not found in app");
-                return Ok(());
-            }
-        }
-    }
-
+    // Both Servo install paths (main-window setup + popup
+    // `messages_open_in_window`) run on the GTK main thread. If a
+    // render lookup misses here, it means the install hasn't landed
+    // yet — log and drop. We do NOT lazy-install here: this command
+    // runs on a tokio worker, and `gtk::Overlay::new()` panics with
+    // "GTK may only be used from the main thread" off-main.
     let mut guard = state.servo_renderers.lock().await;
     if let Some(renderer) = guard.get_mut(&label) {
         let _handle = renderer.render(&input.html, RenderPolicy::strict());
