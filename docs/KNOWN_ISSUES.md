@@ -64,21 +64,8 @@ No action required until someone's sitting in front of the app and paying attent
 
 ---
 
-## Remote-content gating: no UI banner / "Load images" toggle
+## Remote-content gating: dimension-preserving placeholders (optional)
 
-**State:** Sanitizer-side blocking is complete (`<img src>`, `srcset`, `poster`, `background`, and inline `style="background-image: url(...)"` all run through `qsl-mime::remote_content::is_blocked`). `RenderedMessage.remote_content_blocked` is plumbed end-to-end and a per-sender allowlist exists in `remote_content_opt_ins`. What's missing is the user-facing UI.
+**State:** Sanitizer-side blocking + reader-pane UI banner ("Load images" / "Always load from this sender") landed in the backlog item 4 follow-up. `messages_get` accepts `force_trusted: bool` for one-shot loads; `messages_trust_sender` persists the opt-in row.
 
-**What's missing:**
-
-- Per-message banner ("Images blocked. [Load images] [Always load from this sender]") at the top of the reader pane when `remote_content_blocked == true`.
-- "Load images" → re-render the message bypassing the URL filter, just for this open.
-- "Always load from this sender" → write a row to `remote_content_opt_ins` and re-render.
-- Optional: replace blocked `<img>` tags with placeholder boxes the same dimensions so the layout doesn't reflow when images load (read `width`/`height` attrs, fall back to a fixed placeholder).
-
-**Acceptance criteria:**
-
-1. Banner appears when `remote_content_blocked` is true, hidden otherwise.
-2. Both buttons round-trip through the existing `messages_get` / `sanitize_email_html_trusted` path; no new IPC commands needed.
-3. UI tested manually against the Allstate / Mailchimp / SendGrid open-tracking pixels.
-
-Tracked as backlog item 4's deferred half — see `docs/QSL_BACKLOG_FIXES.md`.
+**What's still optional:** the dimension-preserving placeholder boxes — when an `<img>` is blocked the slot collapses to zero, so the layout reflows when "Load images" is clicked. A nicer experience would replace the blocked `<img>` with a same-dimension placeholder so the layout is stable. Low priority; requires reaching past `ammonia::Builder::attribute_filter` into element-level rewriting. See `docs/QSL_BACKLOG_FIXES.md` item 4 for the full original spec.
