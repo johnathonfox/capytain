@@ -61,3 +61,24 @@ No action required until someone's sitting in front of the app and paying attent
 **Acceptance criteria:**
 
 - Branch protection rule on `main` requires the four current checks: `Check (ubuntu-latest)`, `Check (windows-latest)`, `cargo-deny`, `reuse lint`. No required reviews (solo-maintainer project). Force-pushes and deletions blocked. `enforce_admins: false` so the maintainer can still force-merge in genuine emergencies.
+
+---
+
+## Remote-content gating: no UI banner / "Load images" toggle
+
+**State:** Sanitizer-side blocking is complete (`<img src>`, `srcset`, `poster`, `background`, and inline `style="background-image: url(...)"` all run through `qsl-mime::remote_content::is_blocked`). `RenderedMessage.remote_content_blocked` is plumbed end-to-end and a per-sender allowlist exists in `remote_content_opt_ins`. What's missing is the user-facing UI.
+
+**What's missing:**
+
+- Per-message banner ("Images blocked. [Load images] [Always load from this sender]") at the top of the reader pane when `remote_content_blocked == true`.
+- "Load images" → re-render the message bypassing the URL filter, just for this open.
+- "Always load from this sender" → write a row to `remote_content_opt_ins` and re-render.
+- Optional: replace blocked `<img>` tags with placeholder boxes the same dimensions so the layout doesn't reflow when images load (read `width`/`height` attrs, fall back to a fixed placeholder).
+
+**Acceptance criteria:**
+
+1. Banner appears when `remote_content_blocked` is true, hidden otherwise.
+2. Both buttons round-trip through the existing `messages_get` / `sanitize_email_html_trusted` path; no new IPC commands needed.
+3. UI tested manually against the Allstate / Mailchimp / SendGrid open-tracking pixels.
+
+Tracked as backlog item 4's deferred half — see `docs/QSL_BACKLOG_FIXES.md`.

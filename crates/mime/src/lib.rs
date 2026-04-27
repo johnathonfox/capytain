@@ -117,11 +117,134 @@ fn sanitize(raw_html: &str, block_remote: bool) -> String {
                 {
                     None
                 }
+                "style" if block_remote => {
+                    // CSS `background-image: url(...)` and friends are
+                    // a second remote-content vector that the
+                    // attribute-name match above misses. Drop blocked
+                    // declarations from the inline style; keep the
+                    // rest. See `filter_inline_style` for the parser.
+                    Some(Cow::Owned(filter_inline_style(value, engine)))
+                }
                 _ => Some(Cow::Borrowed(value)),
             }
         })
         .clean(raw_html)
         .to_string()
+}
+
+/// Walk a CSS inline-style declaration list, drop any declaration
+/// whose `url(...)` argument is blocked by `engine`, and re-emit the
+/// rest. Not a full CSS parser — handles the `prop: url(arg) [other]`
+/// shape that marketing emails actually ship and falls back to
+/// keeping a declaration when the URL token can't be cleanly
+/// extracted (so a malformed declaration with a tracking pixel stays
+/// blocked at the higher-level `<img src>` filter).
+///
+/// Why drop the whole declaration rather than just the `url(...)`
+/// token: the alternatives (rewriting to `none`, leaving an empty
+/// `url()`) tend to fight the email's existing fallback chain,
+/// whereas dropping the property entirely lets any earlier
+/// declaration in the cascade or the user-agent default take over.
+fn filter_inline_style(style: &str, engine: &adblock::Engine) -> String {
+    // Fast path: scan once for blocked URLs. If nothing matches,
+    // return the input verbatim — this preserves exact whitespace +
+    // trailing-semicolon shape, which keeps the common no-tracker
+    // case (most inline styles) byte-identical to the input and
+    // avoids spurious diffs in existing sanitizer tests.
+    let mut any_blocked = false;
+    let kept: Vec<&str> = style
+        .split(';')
+        .filter_map(|decl| {
+            let trimmed = decl.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            for url in css_url_tokens(trimmed) {
+                if remote_content::is_blocked(engine, url, "image") {
+                    any_blocked = true;
+                    return None;
+                }
+            }
+            Some(trimmed)
+        })
+        .collect();
+    if !any_blocked {
+        return style.to_string();
+    }
+    // Slow path: rebuild from the kept declarations.
+    let mut out = String::with_capacity(style.len());
+    let mut first = true;
+    for decl in kept {
+        if !first {
+            out.push_str("; ");
+        }
+        first = false;
+        out.push_str(decl);
+    }
+    // Preserve a trailing semicolon when the input had one — keeps
+    // emitted styles consistent with the canonical CSS shorthand
+    // shape downstream tooling expects.
+    if !out.is_empty() && style.trim_end().ends_with(';') {
+        out.push(';');
+    }
+    out
+}
+
+/// Yield each `url(...)` argument inside a CSS declaration. Strips
+/// surrounding whitespace and matched single / double quotes.
+/// Returns an empty iterator when no `url(` token is present.
+fn css_url_tokens(decl: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let bytes = decl.as_bytes();
+    let mut i = 0;
+    while i + 4 <= bytes.len() {
+        if !decl[i..].starts_with("url(") {
+            i += 1;
+            continue;
+        }
+        i += 4;
+        // Skip leading whitespace inside the parens.
+        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            i += 1;
+        }
+        // Optional surrounding quote.
+        let quote = match bytes.get(i) {
+            Some(&b'"') => {
+                i += 1;
+                Some(b'"')
+            }
+            Some(&b'\'') => {
+                i += 1;
+                Some(b'\'')
+            }
+            _ => None,
+        };
+        let start = i;
+        let end = match quote {
+            Some(q) => bytes[i..].iter().position(|&b| b == q).map(|off| i + off),
+            None => bytes[i..]
+                .iter()
+                .position(|&b| b == b')')
+                .map(|off| i + off),
+        };
+        let Some(end) = end else { return out };
+        let slice = decl[start..end].trim_end();
+        if !slice.is_empty() {
+            out.push(slice);
+        }
+        // Advance past the closing quote (if any) and the closing `)`.
+        i = end + 1;
+        if quote.is_some() {
+            // Skip whitespace and the closing ')'.
+            while i < bytes.len() && bytes[i] != b')' {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// Decode a single RFC-2047 encoded-word header value
@@ -564,5 +687,83 @@ Just checking in.\r\n";
         assert!(out.contains("<table"), "<table> lost: {out}");
         // Inline styles preserved.
         assert!(out.contains(r#"style="color:#222;""#));
+    }
+
+    // ---------------------------------------------------------------
+    // Inline-style remote-content gating (backlog item 4).
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn sanitize_strips_blocked_background_image_url() {
+        // Mailchimp pixel hidden inside an inline style.
+        let probe = r#"<div style="background-image: url(https://acme.list-manage.com/track/open.php?u=abc&id=xyz); color: #c00;">x</div>"#;
+        let out = sanitize_email_html(probe);
+        assert!(
+            !out.contains("list-manage"),
+            "background-image URL survived: {out}"
+        );
+        assert!(
+            out.contains("color: #c00"),
+            "sibling declaration dropped along with the blocked one: {out}"
+        );
+    }
+
+    #[test]
+    fn sanitize_strips_blocked_background_shorthand_url() {
+        // `background:` shorthand also carries url(...) values.
+        let probe = r#"<td style="background: url(https://www.google-analytics.com/collect?tid=UA-1) no-repeat;">x</td>"#;
+        let out = sanitize_email_html(probe);
+        assert!(
+            !out.contains("google-analytics"),
+            "shorthand background URL survived: {out}"
+        );
+    }
+
+    #[test]
+    fn sanitize_keeps_benign_background_image_url() {
+        let probe =
+            r#"<div style="background-image: url(https://example.com/hero.png);">hero</div>"#;
+        let out = sanitize_email_html(probe);
+        assert!(
+            out.contains("hero.png"),
+            "benign background URL erroneously dropped: {out}"
+        );
+    }
+
+    #[test]
+    fn sanitize_handles_quoted_url_arg() {
+        // Quoted URL forms must also be parsed — single, double, none.
+        for probe in [
+            r#"<div style='background-image: url("https://acme.list-manage.com/x.gif")'>x</div>"#,
+            r#"<div style="background-image: url('https://acme.list-manage.com/x.gif')">x</div>"#,
+            r#"<div style="background-image: url(https://acme.list-manage.com/x.gif)">x</div>"#,
+        ] {
+            let out = sanitize_email_html(probe);
+            assert!(
+                !out.contains("list-manage"),
+                "tracker pixel survived in {probe:?} → {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_inline_style_with_no_url_passes_through() {
+        let probe = r#"<p style="color: #222; padding: 8px 16px; font-weight: 600;">hello</p>"#;
+        let out = sanitize_email_html(probe);
+        assert!(out.contains("color: #222"), "color lost: {out}");
+        assert!(out.contains("padding: 8px 16px"), "padding lost: {out}");
+        assert!(out.contains("font-weight: 600"), "font-weight lost: {out}");
+    }
+
+    #[test]
+    fn sanitize_trusted_keeps_blocked_background_image() {
+        // Trusted variant skips remote-content checks for inline
+        // styles too, matching the per-attribute behavior.
+        let probe = r#"<div style="background-image: url(https://acme.list-manage.com/track/open.php?u=abc&id=xyz);">x</div>"#;
+        let out = sanitize_email_html_trusted(probe);
+        assert!(
+            out.contains("list-manage"),
+            "trusted-sender background URL dropped: {out}"
+        );
     }
 }
