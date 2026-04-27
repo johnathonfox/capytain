@@ -21,8 +21,8 @@ use qsl_ipc::{MessageId, RenderedMessage};
 use serde::Serialize;
 
 use crate::app::{
-    compose_reader_html, invoke, push_reader_body_rect, start_reader_body_tracker, web_sys_log,
-    TAILWIND_CSS,
+    compose_reader_html, invoke, push_reader_body_rect, reader_window_preload,
+    start_reader_body_tracker, web_sys_log, TAILWIND_CSS,
 };
 
 #[derive(Serialize)]
@@ -35,19 +35,46 @@ struct GetInner<'a> {
     id: &'a MessageId,
 }
 
+/// Read `window.__QSL_READER_PRELOAD__` into a `RenderedMessage`. The
+/// Tauri `messages_open_in_window` command pre-fetches the message and
+/// JSON-encodes it into that global before the wasm bundle boots, so
+/// the popup can mount instantly. Returns `None` when the global is
+/// missing (preload disabled, host fetch failed) or unparseable.
+fn take_reader_preload() -> Option<RenderedMessage> {
+    let json = reader_window_preload().as_string()?;
+    match serde_json::from_str::<RenderedMessage>(&json) {
+        Ok(msg) => Some(msg),
+        Err(e) => {
+            web_sys_log(&format!("ReaderOnlyApp: preload parse failed: {e}"));
+            None
+        }
+    }
+}
+
 #[component]
 pub fn ReaderOnlyApp(message_id: MessageId) -> Element {
     let id_for_resource = message_id.clone();
+    // `use_hook` runs the closure exactly once when the component
+    // first mounts — perfect for draining `__QSL_READER_PRELOAD__`,
+    // which is a one-shot global. If the preload is present we
+    // bypass the IPC entirely; otherwise `use_resource` issues
+    // `messages_get` like before.
+    let preload: Option<RenderedMessage> = use_hook(take_reader_preload);
     let rendered = use_resource(move || {
         let id = id_for_resource.clone();
+        let preload = preload.clone();
         async move {
-            invoke::<RenderedMessage>(
-                "messages_get",
-                MessagesGetArgs {
-                    input: GetInner { id: &id },
-                },
-            )
-            .await
+            if let Some(msg) = preload {
+                Ok(msg)
+            } else {
+                invoke::<RenderedMessage>(
+                    "messages_get",
+                    MessagesGetArgs {
+                        input: GetInner { id: &id },
+                    },
+                )
+                .await
+            }
         }
     });
 

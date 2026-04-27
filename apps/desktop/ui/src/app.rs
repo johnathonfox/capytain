@@ -161,6 +161,17 @@ pub(crate) const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
         return window.__QSL_READER_ID__ || null;
     }
 
+    // Returns the JSON-serialized RenderedMessage the Tauri command
+    // pre-fetched for this popup, or null when the preload isn't
+    // available (older host, fetch failed, etc.). Stringifying on
+    // the JS side means the wasm code can deserialize through the
+    // same serde path it uses for IPC results.
+    export function readerWindowPreload() {
+        return window.__QSL_READER_PRELOAD__
+            ? JSON.stringify(window.__QSL_READER_PRELOAD__)
+            : null;
+    }
+
     // Force one push on demand. Useful right after the user clicks
     // a different message — Dioxus may have re-laid-out the body
     // slot and we want Servo's surface re-positioned in the same
@@ -190,6 +201,14 @@ extern "C" {
     /// isn't set, i.e. this is the main three-pane window.
     #[wasm_bindgen(js_name = readerWindowMessageId)]
     pub(crate) fn reader_window_message_id() -> JsValue;
+
+    /// Returns the JSON-stringified `RenderedMessage` the Tauri host
+    /// pre-fetched into `window.__QSL_READER_PRELOAD__`, or
+    /// `JsValue::null` when no preload is available. The reader-only
+    /// component uses this to render the popup body without a
+    /// follow-up `messages_get` IPC round-trip.
+    #[wasm_bindgen(js_name = readerWindowPreload)]
+    pub(crate) fn reader_window_preload() -> JsValue;
 }
 
 /// Thin wrapper around the Tauri `invoke` bridge. Serializes `args` to

@@ -834,6 +834,7 @@ pub struct MessagesOpenInWindowInput {
 #[tauri::command]
 pub async fn messages_open_in_window<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
     input: MessagesOpenInWindowInput,
 ) -> IpcResult<()> {
     use tauri::Manager;
@@ -861,13 +862,45 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
         return Ok(());
     }
 
+    // Pre-fetch the message before opening the popup so the Dioxus
+    // bundle inside the popup can mount with the body already in
+    // hand. Without this, the popup boots, runs `use_resource` to
+    // call `messages_get`, waits for the round-trip, and only then
+    // composes HTML — adding ~hundreds of ms of perceived latency
+    // on top of the wasm boot. We embed the JSON serialization of
+    // `RenderedMessage` as `window.__QSL_READER_PRELOAD__` and the
+    // popup's reader-only app uses it directly. A fetch failure is
+    // logged but doesn't abort the open: the popup falls back to
+    // calling `messages_get` itself when `__QSL_READER_PRELOAD__`
+    // is `null`.
+    let preload_json: String = match messages_get(
+        state,
+        MessagesGetInput {
+            id: input.id.clone(),
+            force_trusted: false,
+        },
+    )
+    .await
+    {
+        Ok(rendered) => serde_json::to_string(&rendered).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "messages_open_in_window: serialize preload failed");
+            "null".to_string()
+        }),
+        Err(e) => {
+            tracing::warn!(error = %e, "messages_open_in_window: preload fetch failed");
+            "null".to_string()
+        }
+    };
+
     // initialization_script runs once in the new webview before the
-    // wasm bundle boots. Setting __QSL_READER_ID__ here lets the
-    // Dioxus root component branch on it without a follow-up IPC
-    // round-trip at boot.
+    // wasm bundle boots. Setting `__QSL_READER_ID__` and
+    // `__QSL_READER_PRELOAD__` here lets the Dioxus root component
+    // branch on the id and skip a follow-up IPC round-trip when the
+    // preload is present.
     let init_script = format!(
-        "window.__QSL_READER_ID__ = {};",
-        serde_json::to_string(&input.id.0).expect("serializing message id")
+        "window.__QSL_READER_ID__ = {};\nwindow.__QSL_READER_PRELOAD__ = {};",
+        serde_json::to_string(&input.id.0).expect("serializing message id"),
+        preload_json,
     );
 
     let title = format!("QSL — {}", input.id.0);
