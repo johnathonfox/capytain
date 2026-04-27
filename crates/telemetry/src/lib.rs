@@ -32,22 +32,27 @@ use tracing_subscriber::{fmt, EnvFilter};
 /// typically just log the display form and exit.
 pub type InitError = Box<dyn Error + Send + Sync + 'static>;
 
-/// Default filter directive used when neither an explicit filter nor
+/// Per-crate level baseline used when neither an explicit filter nor
 /// `RUST_LOG` is provided.
 ///
 /// - All `qsl_*` crates at `info`
 /// - Third-party crates at `warn`
-/// - Servo's noisier modules pinned at `error` so reader-pane HTML
-///   data: URLs and per-frame style log lines don't drown the rest.
-///   `script::dom::window` in particular dumps the full data: URL the
-///   reader navigates to at INFO level on every render — a single
-///   gmail thread blew a launch log past 700 MB.
 pub const DEFAULT_FILTER: &str = "warn,qsl_core=info,qsl_storage=info,\
     qsl_imap_client=info,qsl_smtp_client=info,qsl_jmap_client=info,\
     qsl_mime=info,qsl_sync=info,qsl_search=info,qsl_auth=info,\
     qsl_ipc=info,qsl_telemetry=info,qsl_desktop=info,qsl_ui=info,\
-    mailcli=info,\
-    script::dom=error,style=error,script::script_module=error";
+    mailcli=info";
+
+/// Servo modules that are loud-by-design when the desktop reader pane
+/// renders HTML. We always force these to `error`, regardless of
+/// whether the user set an explicit filter or `RUST_LOG`, because
+/// they're a property of how we embed Servo (data: URL navigation,
+/// per-frame style and module diagnostics) rather than a logging
+/// preference. `script::dom::window` in particular dumps the full
+/// data: URL the reader navigates to at INFO level on every render —
+/// a single gmail thread blew a launch log past 700 MB before this
+/// override existed.
+const SERVO_SUPPRESSIONS: &str = ",script::dom=error,style=error,script::script_module=error";
 
 /// Initialize the global tracing subscriber.
 ///
@@ -64,12 +69,15 @@ pub fn init(filter: Option<&str>) -> Result<(), InitError> {
 }
 
 fn resolve_filter(explicit: Option<&str>) -> EnvFilter {
-    if let Some(directives) = explicit {
-        if let Ok(f) = EnvFilter::try_new(directives) {
-            return f;
-        }
-    }
-    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER))
+    let base: String = if let Some(directives) = explicit {
+        directives.to_string()
+    } else if let Ok(rust_log) = std::env::var("RUST_LOG") {
+        rust_log
+    } else {
+        DEFAULT_FILTER.to_string()
+    };
+    let combined = format!("{base}{SERVO_SUPPRESSIONS}");
+    EnvFilter::try_new(&combined).unwrap_or_else(|_| EnvFilter::new("warn"))
 }
 
 #[cfg(test)]

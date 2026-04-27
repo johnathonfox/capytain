@@ -62,6 +62,17 @@ wf/open?upn=$image
 ||braze.com^$image
 ||braze.eu^$image
 ||appboy.com^$image
+! Iterable open-tracking. Iterable hosts `sp.email.<brand>.com/q/<token>~~`
+! for opens and `links.email.<brand>.com/s/eo/<token>` for redirect-tracked
+! links. Both surface as 1×1 hidden `<img>` pixels in the body. Block
+! both substrings on image loads only — `links.email.*` URLs are also
+! used for legitimate user-initiated link clicks, which are unaffected
+! by an `$image`-qualified rule.
+sp.email.$image
+links.email.$image
+! Iterable's CDN also hosts content (logos, banners) under
+! `library.iterable.com` — those are intentional images, not pixels,
+! so we don't block that domain.
 ! Google Analytics / Tag Manager / DoubleClick
 ||google-analytics.com^
 ||googletagmanager.com^
@@ -185,6 +196,49 @@ mod tests {
         assert!(is_blocked(
             engine,
             "https://example.iad-01.braze.com/api/v3/messaging/log_open?id=abc",
+            "image",
+        ));
+    }
+
+    #[test]
+    fn iterable_open_pixel_blocked() {
+        let engine = default_engine();
+        // sp.email.<brand>.com/q/<token>~~ is Iterable's open-tracking signature.
+        assert!(is_blocked(
+            engine,
+            "http://sp.email.crunchbase.com/q/abc~~/AARGbBA~/xyz~~",
+            "image",
+        ));
+    }
+
+    #[test]
+    fn iterable_link_pixel_blocked_as_image_only() {
+        let engine = default_engine();
+        // Iterable also embeds `links.email.<brand>.com/s/eo/<token>` as
+        // a 1×1 hidden image — block on image type.
+        assert!(is_blocked(
+            engine,
+            "https://links.email.crunchbase.com/s/eo/abc-token",
+            "image",
+        ));
+        // The same domain serves real link redirects users click; those
+        // are not loaded as images, so they pass through (the `$image`
+        // qualifier on the rule excludes them).
+        assert!(!is_blocked(
+            engine,
+            "https://links.email.crunchbase.com/s/c/abc-token",
+            "main_frame",
+        ));
+    }
+
+    #[test]
+    fn iterable_content_cdn_is_not_blocked() {
+        let engine = default_engine();
+        // Iterable hosts content images (logos, banners) on a separate
+        // `library.iterable.com` host — those should render normally.
+        assert!(!is_blocked(
+            engine,
+            "https://library.iterable.com/2088/9267/banner.png",
             "image",
         ));
     }
