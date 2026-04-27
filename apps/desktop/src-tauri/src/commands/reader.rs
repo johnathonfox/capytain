@@ -13,7 +13,7 @@
 use qsl_core::RenderPolicy;
 use qsl_ipc::IpcResult;
 use serde::Deserialize;
-use tauri::{AppHandle, Runtime, State};
+use tauri::{Manager, State};
 
 use crate::state::AppState;
 
@@ -39,26 +39,26 @@ pub struct ReaderRenderInput {
 /// That makes this command safe to invoke from any Tauri async
 /// worker thread — which is where `#[tauri::command] async fn` runs.
 #[tauri::command]
-pub async fn reader_render<R: Runtime>(
-    _app: AppHandle<R>,
+pub async fn reader_render(
+    window: tauri::Window,
     state: State<'_, AppState>,
     input: ReaderRenderInput,
 ) -> IpcResult<()> {
-    tracing::info!(bytes = input.html.len(), "reader_render");
+    let label = window.label().to_string();
+    tracing::debug!(window = %label, bytes = input.html.len(), "reader_render");
 
-    // `servo_renderer` is an `Option` on `AppState` because `new_linux`
-    // can fail (e.g. running under a `RawWindowHandle` variant we don't
-    // support); the desktop app degrades gracefully rather than
-    // aborting startup.
-    let mut guard = state.servo_renderer.lock().await;
-    if let Some(renderer) = guard.as_mut() {
+    // Both Servo install paths (main-window setup + popup
+    // `messages_open_in_window`) run on the GTK main thread. If a
+    // render lookup misses here, it means the install hasn't landed
+    // yet — log and drop. We do NOT lazy-install here: this command
+    // runs on a tokio worker, and `gtk::Overlay::new()` panics with
+    // "GTK may only be used from the main thread" off-main.
+    let mut guard = state.servo_renderers.lock().await;
+    if let Some(renderer) = guard.get_mut(&label) {
         let _handle = renderer.render(&input.html, RenderPolicy::strict());
     } else {
-        tracing::warn!(
-            "reader_render: ServoRenderer not available on this platform/build — skipping"
-        );
+        tracing::warn!(window = %label, "reader_render: no renderer installed for this window");
     }
-
     Ok(())
 }
 
@@ -135,21 +135,23 @@ pub struct ReaderSetPositionInput {
 /// on platform.
 #[tauri::command]
 pub async fn reader_set_position(
-    app: tauri::AppHandle,
+    window: tauri::Window,
     state: tauri::State<'_, AppState>,
     input: ReaderSetPositionInput,
 ) -> IpcResult<()> {
+    let label = window.label().to_string();
     #[cfg(all(target_os = "linux", feature = "servo"))]
     {
-        let Some(parent) = crate::linux_gtk::parent() else {
-            tracing::debug!("reader_set_position: GTK parent not registered yet");
+        let Some(parent) = crate::linux_gtk::parent(&label) else {
+            tracing::debug!(window = %label, "reader_set_position: GTK parent not registered yet");
             return Ok(());
         };
         let x = input.x.round() as i32;
         let y = input.y.round() as i32;
         let w = input.width.round() as i32;
         let h = input.height.round() as i32;
-        tracing::info!(x, y, w, h, "reader_set_position");
+        tracing::debug!(window = %label, x, y, w, h, "reader_set_position");
+        let app = window.app_handle().clone();
         if let Err(e) = app.run_on_main_thread(move || parent.set_position(x, y, w, h)) {
             tracing::debug!(error = %e, "reader_set_position: GTK dispatch failed (app shutdown?)");
         }
@@ -160,15 +162,16 @@ pub async fn reader_set_position(
         // `EmailRenderer::resize` default impl is a no-op so this is
         // safe even when Servo isn't installed.
         if w > 1 && h > 1 {
-            let mut slot = state.servo_renderer.lock().await;
-            if let Some(renderer) = slot.as_mut() {
+            let mut slot = state.servo_renderers.lock().await;
+            if let Some(renderer) = slot.get_mut(&label) {
                 renderer.resize(::dpi::PhysicalSize::new(w as u32, h as u32));
             }
         }
     }
     #[cfg(not(all(target_os = "linux", feature = "servo")))]
     {
-        let _ = app;
+        let _ = window;
+        let _ = label;
         let _ = state;
         let _ = input;
     }
@@ -183,19 +186,22 @@ pub async fn reader_set_position(
 /// rather than freezing the previous render in place. Same
 /// no-op-on-other-platforms shape as `reader_set_position`.
 #[tauri::command]
-pub async fn reader_clear(app: tauri::AppHandle) -> IpcResult<()> {
+pub async fn reader_clear(window: tauri::Window) -> IpcResult<()> {
+    let label = window.label().to_string();
     #[cfg(all(target_os = "linux", feature = "servo"))]
     {
-        let Some(parent) = crate::linux_gtk::parent() else {
+        let Some(parent) = crate::linux_gtk::parent(&label) else {
             return Ok(());
         };
+        let app = window.app_handle().clone();
         if let Err(e) = app.run_on_main_thread(move || parent.hide()) {
             tracing::debug!(error = %e, "reader_clear: dispatch failed (app shutdown?)");
         }
     }
     #[cfg(not(all(target_os = "linux", feature = "servo")))]
     {
-        let _ = app;
+        let _ = window;
+        let _ = label;
     }
     Ok(())
 }

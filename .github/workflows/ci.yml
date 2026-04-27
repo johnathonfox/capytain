@@ -22,23 +22,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Linux and Windows both build the full workspace with Servo
-        # enabled. macOS is deliberately left out: the macOS renderer
-        # (`crates/renderer/src/servo/macos.rs`) is marked UNVERIFIED
-        # — written without Mac hardware in Phase 0 Week 6 Day 2 — so
-        # publishing green CI ticks for macOS would be noise. The
-        # macOS job rejoins after a hardware-backed session validates
-        # `new_macos`.
-        #
-        # Windows graduated from "workspace minus Servo consumers +
-        # optional compile probe" (Day 3) to a first-class full-
-        # workspace build once PR #20's optional probe came back green,
-        # confirming Servo 0.1.0 compiles on stock `windows-latest`
-        # without any extra native-dep installation. Runtime validation
-        # on Windows still needs a hardware-backed session; the CI
-        # here covers compile + clippy + unit tests of the Servo-
-        # enabled tree.
-        os: [ubuntu-latest, windows-latest]
+        # Linux is the only CI target right now. macOS was always
+        # excluded — the macOS renderer (`crates/renderer/src/servo/macos.rs`)
+        # is marked UNVERIFIED and publishing green CI ticks for an
+        # untested path is noise. Windows was a first-class build until
+        # the popup-reader work landed (PR #76); the new
+        # `messages_open_in_window` flow uses Tauri 2 APIs that need
+        # interactive validation on Windows hardware before CI can
+        # rely on it again. Re-add `windows-latest` to this list and
+        # the matching `required_status_checks` entry on the
+        # `main`-branch ruleset (id 15578570) once the Windows path is
+        # verified end-to-end.
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -49,12 +44,7 @@ jobs:
       # Tauri 2 needs webkit2gtk + friends on Linux; Servo 0.1.0
       # additionally needs cmake, clang, fontconfig / freetype /
       # harfbuzz, gstreamer, and libssl (see docs/servo-composition.md
-      # §7). macOS (WKWebView) and Windows (WebView2 Evergreen Runtime)
-      # ship what Tauri needs out of the box for the system webview;
-      # Servo 0.1.0 additionally turns out to compile on stock
-      # `windows-latest` without any extra installs (confirmed by the
-      # optional compile probe in PR #20), so no Windows install step
-      # is needed here.
+      # §7).
       - name: Install Tauri + Servo Linux dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -91,16 +81,14 @@ jobs:
       - name: Check qsl-renderer with servo feature explicitly
         run: cargo check -p qsl-renderer --features servo
 
-      # --- No-Servo fallback verification (Linux only; Windows full
-      # workspace above already covers it) ---
+      # --- No-Servo fallback verification ---
       #
       # The `servo` feature is off on `qsl-renderer` by default;
       # downstream crates that depend on it via `qsl-core` only
       # (the trait + NullRenderer path) must keep compiling when
       # Servo is excluded. Rerun Clippy with `--no-default-features`
-      # on Linux to guard that path.
-      - name: Clippy qsl-renderer without servo (Linux)
-        if: matrix.os == 'ubuntu-latest'
+      # to guard that path.
+      - name: Clippy qsl-renderer without servo
         run: cargo clippy -p qsl-renderer --no-default-features --all-targets
 
   deny:

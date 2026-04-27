@@ -40,9 +40,11 @@
 //! for why the native NVIDIA EGL-Wayland path is broken and we rely
 //! on the Mesa llvmpipe fallback (`qsl_renderer::apply_nvidia_wayland_workaround`).
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use gdk::prelude::*;
 use glib::translate::ToGlibPtr;
@@ -52,26 +54,49 @@ use raw_window_handle::{
     WaylandDisplayHandle, WaylandWindowHandle, WindowHandle, XlibDisplayHandle, XlibWindowHandle,
 };
 
-/// Process-wide handle to the installed `LinuxGtkParent`. Tauri
-/// commands reach the GTK objects through this — `LinuxGtkParent`
-/// is `!Send` (GTK widgets live on the main thread) so it can't sit
-/// in `AppState`. The reference is `&'static` because
-/// `install_servo_renderer` `Box::leak`s the parent; that matches
-/// GTK's "lives until the process exits" requirement exactly.
-static GTK_PARENT: OnceLock<&'static LinuxGtkParent> = OnceLock::new();
+/// Per-window registry of leaked `LinuxGtkParent`s, keyed by Tauri
+/// window label (`"main"`, `"reader-<msg_id>"`, …). Each registered
+/// entry was installed by `install_servo_renderer_for_window` and
+/// stays alive for the lifetime of the process — see the `Box::leak`
+/// rationale on `LinuxGtkParent::install`. `Mutex` rather than
+/// `RwLock` because contention is nil and the Mutex API is simpler.
+static GTK_PARENTS: Mutex<Option<HashMap<String, &'static LinuxGtkParent>>> = Mutex::new(None);
 
-/// Get the installed parent, if any. Commands that depend on Servo
-/// being live (position updates, surface clear) use this and silently
-/// no-op when Servo isn't installed (servo feature off, or
-/// install-time failure on this platform).
-pub fn parent() -> Option<&'static LinuxGtkParent> {
-    GTK_PARENT.get().copied()
+fn with_registry<R>(f: impl FnOnce(&mut HashMap<String, &'static LinuxGtkParent>) -> R) -> R {
+    let mut guard = GTK_PARENTS.lock().expect("GTK_PARENTS mutex poisoned");
+    let map = guard.get_or_insert_with(HashMap::new);
+    f(map)
 }
 
-/// Register the leaked parent so [`parent`] can return it. Called
-/// once during Servo install.
-pub fn register_parent(p: &'static LinuxGtkParent) {
-    let _ = GTK_PARENT.set(p);
+/// Get the registered parent for a window label, if any. Commands
+/// that depend on Servo being live for that window (position updates,
+/// surface clear) use this and silently no-op when Servo isn't
+/// installed for the calling window.
+pub fn parent(label: &str) -> Option<&'static LinuxGtkParent> {
+    with_registry(|m| m.get(label).copied())
+}
+
+/// Register the leaked parent under a window label. Overwrites any
+/// prior entry for the same label (idempotent on re-install paths).
+pub fn register_parent(label: &str, p: &'static LinuxGtkParent) {
+    with_registry(|m| {
+        m.insert(label.to_string(), p);
+    });
+}
+
+/// Drop the registry entry for a label. The pointed-at
+/// `LinuxGtkParent` is `Box::leak`'d and stays in memory; this just
+/// removes the lookup so future `reader_*` IPC calls for that label
+/// no-op. Used by the popup-window close handler.
+pub fn remove_parent(label: &str) {
+    with_registry(|m| {
+        m.remove(label);
+    });
+}
+
+#[cfg(test)]
+fn clear_registry_for_test() {
+    with_registry(|m| m.clear());
 }
 
 /// Reparented Tauri main window. Holds both the Overlay and the new
@@ -84,6 +109,12 @@ pub struct LinuxGtkParent {
     /// The child widget Servo paints into. Public so callers can
     /// wire `connect_size_allocate` for reader-pane resize events.
     pub drawing_area: gtk::DrawingArea,
+    /// Identifier of the `WebView` registered in `qsl_renderer`'s
+    /// per-thread `WEBVIEWS` map for this parent. Set by
+    /// [`Self::set_webview_id`] right after the renderer is built.
+    /// Stays at `0` until then; signal handlers treat `0` as a
+    /// "no webview yet" no-op.
+    webview_id: AtomicU64,
 }
 
 // SAFETY: GTK widgets are not thread-safe at the type level, but the
@@ -107,6 +138,7 @@ impl LinuxGtkParent {
         initial_width: i32,
         initial_height: i32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let t_install_start = std::time::Instant::now();
         // Diagnostic: log what Tauri's `gtk_window()` actually handed
         // us. If this is anything other than the top-level
         // ApplicationWindow, our reparenting walks the wrong
@@ -176,54 +208,11 @@ impl LinuxGtkParent {
         drawing_area.set_margin_start(10_000);
         drawing_area.set_margin_top(0);
 
-        // Wire pointer events into Servo's input pipeline. GDK
-        // delivers `(x, y)` in widget-local coordinates in device
-        // pixels — the same units `WebViewPoint::Device` expects.
-        // Each handler returns `Stop` so GTK doesn't bubble the
-        // event back up to the webview underneath.
-        drawing_area.connect_button_press_event(|_w, ev| {
-            let (x, y) = ev.position();
-            qsl_renderer::forward_pointer_button_press(ev.button(), x as f32, y as f32);
-            glib::Propagation::Stop
-        });
-        drawing_area.connect_button_release_event(|_w, ev| {
-            let (x, y) = ev.position();
-            qsl_renderer::forward_pointer_button_release(ev.button(), x as f32, y as f32);
-            glib::Propagation::Stop
-        });
-        drawing_area.connect_motion_notify_event(|_w, ev| {
-            let (x, y) = ev.position();
-            qsl_renderer::forward_pointer_move(x as f32, y as f32);
-            glib::Propagation::Stop
-        });
-        drawing_area.connect_leave_notify_event(|_w, _ev| {
-            qsl_renderer::forward_pointer_left_viewport();
-            glib::Propagation::Stop
-        });
-        // Wheel/scroll forwarding. GDK reports either a discrete
-        // `ScrollDirection::{Up,Down,Left,Right}` (mouse wheel notch)
-        // or `ScrollDirection::Smooth` with `delta()` in scroll units
-        // (touchpad two-finger). GDK's sign convention is "user wants
-        // to move the viewport in this direction"; Servo's
-        // `WheelDelta` says "view scrolls in this direction" with the
-        // opposite sign, so we negate before forwarding.
-        drawing_area.connect_scroll_event(|_w, ev| {
-            use gdk::ScrollDirection;
-            let (x, y) = ev.position();
-            let (dx, dy) = match ev.direction() {
-                ScrollDirection::Up => (0.0_f32, 1.0_f32),
-                ScrollDirection::Down => (0.0, -1.0),
-                ScrollDirection::Left => (1.0, 0.0),
-                ScrollDirection::Right => (-1.0, 0.0),
-                ScrollDirection::Smooth => {
-                    let (sdx, sdy) = ev.delta();
-                    (-(sdx as f32), -(sdy as f32))
-                }
-                _ => (0.0, 0.0),
-            };
-            qsl_renderer::forward_pointer_wheel(dx, dy, x as f32, y as f32);
-            glib::Propagation::Stop
-        });
+        // Pointer signal handlers are wired in
+        // [`Self::wire_input_forwarding`] after the renderer assigns a
+        // webview_id. Wiring them here would mean the closures had no
+        // way to identify which `WebView` to forward to, since the
+        // renderer is constructed strictly after this function returns.
 
         overlay.add_overlay(&drawing_area);
 
@@ -257,7 +246,19 @@ impl LinuxGtkParent {
         // `WindowRenderingContext` gets a 1x1 surface handle and
         // ends up creating its own top-level wl_surface to render
         // into (visible as a separate window).
-        let layout_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        //
+        // 100ms is six compositor frames at 60Hz — enough for any
+        // realistic surface to settle. The previous 2-second cap was
+        // a "worst case" guess that ate ~500ms per popup open
+        // (measured: 22 iters × ~22ms each). If the deadline
+        // expires the install proceeds with whatever size GDK has;
+        // `reader_set_position` from Dioxus's ResizeObserver
+        // typically lands within ~200ms after boot and pushes the
+        // real rect, after which `WebView::resize` corrects Servo's
+        // surface.
+        let t_layout_start = std::time::Instant::now();
+        let mut layout_iters = 0u32;
+        let layout_deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
         while std::time::Instant::now() < layout_deadline {
             let size = drawing_area
                 .window()
@@ -266,6 +267,7 @@ impl LinuxGtkParent {
             if size.0 > 1 && size.1 > 1 {
                 break;
             }
+            layout_iters += 1;
             if !gtk::main_iteration_do(false) {
                 // Nothing more queued; the widget isn't going to
                 // lay itself out without a displayed compositor
@@ -274,6 +276,11 @@ impl LinuxGtkParent {
                 break;
             }
         }
+        tracing::info!(
+            layout_pump_ms = t_layout_start.elapsed().as_millis() as u64,
+            iters = layout_iters,
+            "linux_gtk: install layout pump finished"
+        );
 
         if let Some(gdk_window) = drawing_area.window() {
             let (w, h) = (gdk_window.width(), gdk_window.height());
@@ -291,10 +298,97 @@ impl LinuxGtkParent {
             }
         }
 
-        Ok(Self {
+        let parent = Self {
             _overlay: overlay,
             drawing_area,
-        })
+            webview_id: AtomicU64::new(0),
+        };
+        tracing::info!(
+            total_ms = t_install_start.elapsed().as_millis() as u64,
+            "linux_gtk: install complete"
+        );
+        Ok(parent)
+    }
+
+    /// Record the `webview_id` for this parent's renderer. Called by
+    /// the renderer-bridge code immediately after `ServoRenderer::new_linux`
+    /// returns. Once set, GTK signal handlers wired by
+    /// [`Self::wire_input_forwarding`] forward pointer events to that
+    /// id; before this is called signal handlers no-op via the
+    /// `webview_id == 0` early-return inside `qsl_renderer::forward`.
+    pub fn set_webview_id(&self, id: u64) {
+        self.webview_id.store(id, Ordering::Relaxed);
+    }
+
+    /// Wire GTK pointer signal handlers to forward into Servo. Must
+    /// be called once after the parent has been leaked into
+    /// `'static` storage and registered against a `webview_id`. The
+    /// closures capture `&'static LinuxGtkParent` so they can re-read
+    /// the id atomically on every event — letting them survive the
+    /// brief gap between widget construction and renderer install
+    /// without dispatching to a stale id.
+    pub fn wire_input_forwarding(parent: &'static LinuxGtkParent) {
+        // Wire pointer events into Servo's input pipeline. GDK
+        // delivers `(x, y)` in widget-local coordinates in device
+        // pixels — the same units `WebViewPoint::Device` expects.
+        // Each handler returns `Stop` so GTK doesn't bubble the
+        // event back up to the webview underneath.
+        parent
+            .drawing_area
+            .connect_button_press_event(move |_w, ev| {
+                let id = parent.webview_id.load(Ordering::Relaxed);
+                let (x, y) = ev.position();
+                qsl_renderer::forward_pointer_button_press(id, ev.button(), x as f32, y as f32);
+                glib::Propagation::Stop
+            });
+        parent
+            .drawing_area
+            .connect_button_release_event(move |_w, ev| {
+                let id = parent.webview_id.load(Ordering::Relaxed);
+                let (x, y) = ev.position();
+                qsl_renderer::forward_pointer_button_release(id, ev.button(), x as f32, y as f32);
+                glib::Propagation::Stop
+            });
+        parent
+            .drawing_area
+            .connect_motion_notify_event(move |_w, ev| {
+                let id = parent.webview_id.load(Ordering::Relaxed);
+                let (x, y) = ev.position();
+                qsl_renderer::forward_pointer_move(id, x as f32, y as f32);
+                glib::Propagation::Stop
+            });
+        parent
+            .drawing_area
+            .connect_leave_notify_event(move |_w, _ev| {
+                let id = parent.webview_id.load(Ordering::Relaxed);
+                qsl_renderer::forward_pointer_left_viewport(id);
+                glib::Propagation::Stop
+            });
+        // Wheel/scroll forwarding. GDK reports either a discrete
+        // `ScrollDirection::{Up,Down,Left,Right}` (mouse wheel notch)
+        // or `ScrollDirection::Smooth` with `delta()` in scroll units
+        // (touchpad two-finger). GDK's sign convention is "user wants
+        // to move the viewport in this direction"; Servo's
+        // `WheelDelta` says "view scrolls in this direction" with the
+        // opposite sign, so we negate before forwarding.
+        parent.drawing_area.connect_scroll_event(move |_w, ev| {
+            use gdk::ScrollDirection;
+            let id = parent.webview_id.load(Ordering::Relaxed);
+            let (x, y) = ev.position();
+            let (dx, dy) = match ev.direction() {
+                ScrollDirection::Up => (0.0_f32, 1.0_f32),
+                ScrollDirection::Down => (0.0, -1.0),
+                ScrollDirection::Left => (1.0, 0.0),
+                ScrollDirection::Right => (-1.0, 0.0),
+                ScrollDirection::Smooth => {
+                    let (sdx, sdy) = ev.delta();
+                    (-(sdx as f32), -(sdy as f32))
+                }
+                _ => (0.0, 0.0),
+            };
+            qsl_renderer::forward_pointer_wheel(id, dx, dy, x as f32, y as f32);
+            glib::Propagation::Stop
+        });
     }
 
     /// Move and resize the DrawingArea to overlap the reader-body
@@ -445,5 +539,39 @@ fn extract_x11(
             RawDisplayHandle::Xlib(display_handle),
             RawWindowHandle::Xlib(window_handle),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // We can't construct a real LinuxGtkParent in a unit test (GTK
+    // needs a display + main loop running), so we exercise the
+    // registry's address-keyed bookkeeping with a sentinel pointer
+    // we never dereference.
+    fn fresh_sentinel() -> &'static LinuxGtkParent {
+        // SAFETY: the registry only stores and returns the pointer.
+        // No code path in these tests dereferences it.
+        unsafe { &*std::ptr::NonNull::<LinuxGtkParent>::dangling().as_ptr() }
+    }
+
+    #[test]
+    fn parent_registry_round_trip() {
+        clear_registry_for_test();
+        let p = fresh_sentinel();
+        register_parent("main", p);
+        assert!(parent("main").is_some());
+        assert!(parent("missing").is_none());
+        remove_parent("main");
+        assert!(parent("main").is_none());
+    }
+
+    #[test]
+    fn registry_overwrites_same_label() {
+        clear_registry_for_test();
+        register_parent("main", fresh_sentinel());
+        register_parent("main", fresh_sentinel());
+        assert!(parent("main").is_some());
     }
 }

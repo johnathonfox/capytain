@@ -93,7 +93,7 @@ impl ServoRenderer {
         let link_cb: Arc<Mutex<LinkCb>> = Arc::new(Mutex::new(None));
         let cursor_cb: Arc<Mutex<CursorCb>> = Arc::new(Mutex::new(None));
 
-        Self::install_state_on_main_thread(
+        let webview_id = Self::install_state_on_main_thread(
             rendering_context,
             Arc::clone(&dispatch),
             Arc::clone(&link_cb),
@@ -105,6 +105,7 @@ impl ServoRenderer {
             link_cb,
             cursor_cb,
             next_handle: AtomicU64::new(0),
+            webview_id,
         })
     }
 }

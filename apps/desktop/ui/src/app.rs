@@ -33,7 +33,7 @@ use wasm_bindgen::prelude::*;
 /// `<link>` tag but doesn't actually copy the file in dx 0.7, so
 /// without `asset!` the stylesheet 404s and the UI renders
 /// unstyled. Linked in `App()` via `document::Stylesheet`.
-const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
+pub(crate) const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 
 // ---------- Tauri bridge ----------
 
@@ -152,6 +152,26 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
         };
     }
 
+    // Returns the popup-window message id, or null when this isn't
+    // a popup. The Tauri `messages_open_in_window` command sets
+    // `window.__QSL_READER_ID__` via initialization_script before
+    // the wasm bundle boots — the Dioxus root reads it and mounts
+    // the reader-only component instead of the three-pane shell.
+    export function readerWindowMessageId() {
+        return window.__QSL_READER_ID__ || null;
+    }
+
+    // Returns the JSON-serialized RenderedMessage the Tauri command
+    // pre-fetched for this popup, or null when the preload isn't
+    // available (older host, fetch failed, etc.). Stringifying on
+    // the JS side means the wasm code can deserialize through the
+    // same serde path it uses for IPC results.
+    export function readerWindowPreload() {
+        return window.__QSL_READER_PRELOAD__
+            ? JSON.stringify(window.__QSL_READER_PRELOAD__)
+            : null;
+    }
+
     // Force one push on demand. Useful right after the user clicks
     // a different message — Dioxus may have re-laid-out the body
     // slot and we want Servo's surface re-positioned in the same
@@ -170,10 +190,25 @@ extern "C" {
     async fn tauri_listen(event: &str, handler: &js_sys::Function) -> Result<JsValue, JsValue>;
 
     #[wasm_bindgen(js_name = startReaderBodyTracker)]
-    fn start_reader_body_tracker();
+    pub(crate) fn start_reader_body_tracker();
 
     #[wasm_bindgen(js_name = pushReaderBodyRect)]
-    fn push_reader_body_rect();
+    pub(crate) fn push_reader_body_rect();
+
+    /// Returns the message id this popup window is for, set by the
+    /// Tauri `WebviewWindowBuilder::initialization_script` in
+    /// `messages_open_in_window`. `JsValue::null` when the global
+    /// isn't set, i.e. this is the main three-pane window.
+    #[wasm_bindgen(js_name = readerWindowMessageId)]
+    pub(crate) fn reader_window_message_id() -> JsValue;
+
+    /// Returns the JSON-stringified `RenderedMessage` the Tauri host
+    /// pre-fetched into `window.__QSL_READER_PRELOAD__`, or
+    /// `JsValue::null` when no preload is available. The reader-only
+    /// component uses this to render the popup body without a
+    /// follow-up `messages_get` IPC round-trip.
+    #[wasm_bindgen(js_name = readerWindowPreload)]
+    pub(crate) fn reader_window_preload() -> JsValue;
 }
 
 /// Thin wrapper around the Tauri `invoke` bridge. Serializes `args` to
@@ -237,6 +272,24 @@ pub type FolderTokens = Signal<HashMap<FolderId, u64>>;
 
 #[component]
 pub fn App() -> Element {
+    // Popup mode detection: the Tauri popup window's
+    // `initialization_script` injects `window.__QSL_READER_ID__`
+    // before the wasm bundle boots. When that's set, mount the
+    // standalone reader instead of the three-pane shell.
+    let popup_id_js: JsValue = reader_window_message_id();
+    if !popup_id_js.is_null() && !popup_id_js.is_undefined() {
+        if let Some(id_str) = popup_id_js.as_string() {
+            return rsx! {
+                crate::reader_only::ReaderOnlyApp {
+                    message_id: MessageId(id_str)
+                }
+            };
+        }
+    }
+    full_app_shell()
+}
+
+fn full_app_shell() -> Element {
     let selection = use_signal(Selection::default);
     let mut sync_tick: SyncTick = use_signal(|| 0u64);
     let mut folder_tokens: FolderTokens = use_signal(HashMap::new);
@@ -508,7 +561,7 @@ fn StatusBar(status: Signal<SyncStatus>) -> Element {
 }
 
 /// Tiny `console.log` shim — saves pulling `web-sys` for one call.
-fn web_sys_log(msg: &str) {
+pub(crate) fn web_sys_log(msg: &str) {
     #[wasm_bindgen]
     extern "C" {
         #[wasm_bindgen(js_namespace = console)]
@@ -537,7 +590,7 @@ fn web_sys_log(msg: &str) {
 /// Headers (subject, from, date) are always escaped via
 /// `minimal_escape`; they never go through the ammonia pipeline
 /// because they're always plain text at source.
-fn compose_reader_html(rendered: &RenderedMessage) -> String {
+pub(crate) fn compose_reader_html(rendered: &RenderedMessage) -> String {
     let body_section = render_body_section(rendered);
 
     // Headers (subject / from / date / recipients) are rendered by
@@ -1836,6 +1889,22 @@ fn MessageRowV2(msg: MessageHeaders, selection: Signal<Selection>) -> Element {
         (false, false) => "msg-row",
     };
 
+    let id_for_popup = msg.id.clone();
+    let ondoubleclick = move |evt: Event<MouseData>| {
+        evt.stop_propagation();
+        let id = id_for_popup.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = invoke::<()>(
+                "messages_open_in_window",
+                serde_json::json!({ "input": { "id": id } }),
+            )
+            .await
+            {
+                web_sys_log(&format!("messages_open_in_window: {e}"));
+            }
+        });
+    };
+
     rsx! {
         div {
             class: row_class,
@@ -1843,6 +1912,7 @@ fn MessageRowV2(msg: MessageHeaders, selection: Signal<Selection>) -> Element {
                 let mid = msg.id.clone();
                 move |_| selection.write().message = Some(mid.clone())
             },
+            ondoubleclick: ondoubleclick,
             div { class: "msg-row-avatar", "{avatar_initials}" }
             div {
                 class: "msg-row-line1",
