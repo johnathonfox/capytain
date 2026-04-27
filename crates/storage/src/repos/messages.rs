@@ -6,7 +6,7 @@
 
 use chrono::{TimeZone, Utc};
 
-use capytain_core::{
+use qsl_core::{
     AccountId, FolderId, MessageFlags, MessageHeaders, MessageId, StorageError, ThreadId,
 };
 

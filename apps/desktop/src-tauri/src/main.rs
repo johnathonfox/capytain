@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! Capytain desktop shell entry point.
+//! QSL desktop shell entry point.
 //!
 //! Boots Tauri 2, opens the Turso-backed DB, installs [`AppState`] on the
-//! Tauri manager, and registers every `capytain-*` command. The Dioxus
+//! Tauri manager, and registers every `qsl-*` command. The Dioxus
 //! UI rides in Tauri's webview and calls these commands over the
 //! standard `invoke` bridge.
 //!
@@ -32,8 +32,8 @@ mod sync_engine;
 
 use std::path::PathBuf;
 
-use capytain_storage::{run_migrations, TursoConn};
 use directories::ProjectDirs;
+use qsl_storage::{run_migrations, TursoConn};
 use tauri::Manager;
 
 use crate::state::AppState;
@@ -44,8 +44,8 @@ fn main() {
     // filters. `init` returns an error if it has already been called in
     // this process (e.g. a hot-reloaded test harness); we log and
     // continue rather than panic.
-    if let Err(e) = capytain_telemetry::init(None) {
-        eprintln!("capytain-telemetry: {e}");
+    if let Err(e) = qsl_telemetry::init(None) {
+        eprintln!("qsl-telemetry: {e}");
     }
 
     // Install a rustls `CryptoProvider` before any TLS traffic starts.
@@ -71,7 +71,7 @@ fn main() {
     // Mesa's llvmpipe EGL before Tauri / GTK / Servo touch GL. No-op
     // on non-Linux. See docs/upstream/surfman-explicit-sync.md.
     #[cfg(feature = "servo")]
-    capytain_renderer::apply_nvidia_wayland_workaround();
+    qsl_renderer::apply_nvidia_wayland_workaround();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -127,7 +127,7 @@ fn main() {
             commands::reader::open_external_url,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Capytain");
+        .expect("error while running QSL");
 }
 
 /// Resolve the OS data directory, open the Turso database, run pending
@@ -139,14 +139,14 @@ async fn bootstrap_state() -> Result<AppState, Box<dyn std::error::Error + Send 
     let data_dir = resolve_data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
 
-    let db_path = data_dir.join("capytain.db");
+    let db_path = data_dir.join("qsl.db");
     let db = TursoConn::open(&db_path).await?;
     run_migrations(&db).await?;
 
     tracing::info!(
         data_dir = %data_dir.display(),
         db = %db_path.display(),
-        "capytain desktop ready"
+        "qsl desktop ready"
     );
 
     Ok(AppState::new(db, data_dir))
@@ -155,7 +155,7 @@ async fn bootstrap_state() -> Result<AppState, Box<dyn std::error::Error + Send 
 /// Mirror of mailcli's data-dir resolution so both binaries read and
 /// write the same Turso file by default.
 fn resolve_data_dir() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
-    let dirs = ProjectDirs::from("app", "capytain", "capytain")
-        .ok_or("could not resolve OS data directory")?;
+    let dirs =
+        ProjectDirs::from("app", "qsl", "qsl").ok_or("could not resolve OS data directory")?;
     Ok(dirs.data_dir().to_path_buf())
 }

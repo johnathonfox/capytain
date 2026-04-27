@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Servo-backed implementation of [`capytain_core::EmailRenderer`].
+//! Servo-backed implementation of [`qsl_core::EmailRenderer`].
 //!
 //! # Status
 //!
@@ -17,9 +17,9 @@
 //! # Feature flags
 //!
 //! - `servo` (default on): compile the real Servo-backed renderer. When
-//!   off, this crate re-exports [`capytain_core::NullRenderer`] so
-//!   downstream crates that consume `capytain-renderer` still have a
-//!   working [`EmailRenderer`](capytain_core::EmailRenderer) without
+//!   off, this crate re-exports [`qsl_core::NullRenderer`] so
+//!   downstream crates that consume `qsl-renderer` still have a
+//!   working [`EmailRenderer`](qsl_core::EmailRenderer) without
 //!   needing the Servo native toolchain installed.
 
 #![cfg_attr(not(feature = "servo"), allow(dead_code))]
@@ -36,8 +36,8 @@ mod servo;
 #[cfg(feature = "servo")]
 pub use servo::{
     apply_nvidia_wayland_workaround, forward_pointer_button_press, forward_pointer_button_release,
-    forward_pointer_left_viewport, forward_pointer_move, render_html_to_image, CorpusRenderer,
-    MainThreadDispatch, RendererError, ServoRenderer,
+    forward_pointer_left_viewport, forward_pointer_move, forward_pointer_wheel,
+    render_html_to_image, CorpusRenderer, MainThreadDispatch, RendererError, ServoRenderer,
 };
 
 // Re-export Servo's `Cursor` enum so the desktop crate can register
@@ -47,7 +47,7 @@ pub use servo::{
 pub use ::servo::Cursor;
 
 // When the `servo` feature is off, we re-export the null renderer so
-// downstream crates can depend on `capytain-renderer` and still have a
+// downstream crates can depend on `qsl-renderer` and still have a
 // working `EmailRenderer` implementation for compile checks and tests.
 #[cfg(not(feature = "servo"))]
-pub use capytain_core::NullRenderer;
+pub use qsl_core::NullRenderer;

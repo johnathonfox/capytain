@@ -10,7 +10,7 @@
 //! Before that runs, we invoke `dx build --platform web` on
 //! `apps/desktop/ui/` so `frontendDist: "../ui/dist"` in
 //! `tauri.conf.json` resolves to real assets. Without this,
-//! `cargo run -p capytain-desktop` shows webkit2gtk's "Connection
+//! `cargo run -p qsl-desktop` shows webkit2gtk's "Connection
 //! refused" error page (because `devUrl: http://localhost:1420`
 //! falls back to frontendDist when no dev server is running, and
 //! frontendDist is empty).
@@ -52,10 +52,10 @@ fn build_dioxus_ui() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
-    // `CAPYTAIN_SKIP_UI_BUILD=1` lets CI skip the Dioxus step entirely
+    // `QSL_SKIP_UI_BUILD=1` lets CI skip the Dioxus step entirely
     // (CI only runs check / clippy / test, doesn't launch the binary).
-    if std::env::var_os("CAPYTAIN_SKIP_UI_BUILD").is_some() {
-        println!("cargo:warning=capytain-desktop: UI build skipped (CAPYTAIN_SKIP_UI_BUILD set)");
+    if std::env::var_os("QSL_SKIP_UI_BUILD").is_some() {
+        println!("cargo:warning=qsl-desktop: UI build skipped (QSL_SKIP_UI_BUILD set)");
         ensure_dist_exists(&ui_dir);
         return;
     }
@@ -64,31 +64,29 @@ fn build_dioxus_ui() {
         Ok(()) => {
             // Copy the dx output into `apps/desktop/ui/dist/` so
             // Tauri's `frontendDist: "../ui/dist"` resolves. dx
-            // writes to `target/dx/capytain-ui/<profile>/web/public`
+            // writes to `target/dx/qsl-ui/<profile>/web/public`
             // which isn't a stable config-known path.
             let dx_out = workspace_root
                 .join("target")
                 .join("dx")
-                .join("capytain-ui")
+                .join("qsl-ui")
                 .join("debug") // `cargo run` is debug; release handling lands with the prod-bundle PR
                 .join("web")
                 .join("public");
             let dist = ui_dir.join("dist");
             if let Err(e) = sync_dir(&dx_out, &dist) {
-                println!(
-                    "cargo:warning=capytain-desktop: could not sync dx output to ui/dist: {e}"
-                );
+                println!("cargo:warning=qsl-desktop: could not sync dx output to ui/dist: {e}");
                 ensure_dist_exists(&ui_dir);
             } else {
                 println!(
-                    "cargo:warning=capytain-desktop: dioxus UI built -> {}",
+                    "cargo:warning=qsl-desktop: dioxus UI built -> {}",
                     dist.display()
                 );
             }
         }
         Err(e) => {
             println!(
-                "cargo:warning=capytain-desktop: dioxus UI build skipped ({e}). \
+                "cargo:warning=qsl-desktop: dioxus UI build skipped ({e}). \
                  Install with `cargo install dioxus-cli --locked` to enable."
             );
             ensure_dist_exists(&ui_dir);
@@ -160,7 +158,7 @@ fn ensure_dist_exists(ui_dir: &Path) {
     let dist = ui_dir.join("dist");
     if !dist.exists() {
         if let Err(e) = std::fs::create_dir_all(&dist) {
-            println!("cargo:warning=capytain-desktop: could not create empty {dist:?}: {e}");
+            println!("cargo:warning=qsl-desktop: could not create empty {dist:?}: {e}");
         }
     }
 }

@@ -1,4 +1,4 @@
-# Capytain
+# QSL
 
 > A modern, Rust-native, privacy-respecting desktop email client.
 
@@ -8,7 +8,7 @@
 
 ## What this is
 
-Capytain is a cross-platform desktop email client for macOS, Windows, and Linux, written end-to-end in Rust. It connects directly to your mail provider — no intermediary servers, no telemetry, no ad networks — and is built on a deliberately experimental pure-Rust stack: [Tauri](https://tauri.app/) + [Dioxus](https://dioxuslabs.com/) for the app, [Servo](https://servo.org/) for rendering HTML email, [Turso](https://turso.tech/) for storage, [adblock-rust](https://github.com/brave/adblock-rust) for tracker blocking.
+QSL is a cross-platform desktop email client for macOS, Windows, and Linux, written end-to-end in Rust. It connects directly to your mail provider — no intermediary servers, no telemetry, no ad networks — and is built on a deliberately experimental pure-Rust stack: [Tauri](https://tauri.app/) + [Dioxus](https://dioxuslabs.com/) for the app, [Servo](https://servo.org/) for rendering HTML email, [Turso](https://turso.tech/) for storage, [adblock-rust](https://github.com/brave/adblock-rust) for tracker blocking.
 
 The goal is a mail client that respects the user by default and demonstrates that a fully Rust-native desktop stack is viable for a real-world, consumer-facing application.
 
@@ -21,7 +21,7 @@ Every modern desktop client makes at least one of the following compromises:
 - Uses the system webview uniformly, causing emails to render differently across platforms.
 - Depends on C/C++ libraries for the most security-sensitive parts of the pipeline (HTML parsing, image decoding).
 
-Capytain makes the opposite bet on each: pure-Rust end to end, no intermediary servers, consistent rendering via Servo, memory-safe by default.
+QSL makes the opposite bet on each: pure-Rust end to end, no intermediary servers, consistent rendering via Servo, memory-safe by default.
 
 ## Design principles
 
@@ -57,7 +57,7 @@ Capytain makes the opposite bet on each: pure-Rust end to end, no intermediary s
 
 - Rust toolchain (version pinned in `rust-toolchain.toml`; install via [rustup](https://rustup.rs/))
 - Node.js 20+ (only for the Tauri CLI tooling)
-- `dioxus-cli` for the UI build: `cargo install dioxus-cli --locked`. `apps/desktop/src-tauri/build.rs` invokes `dx build --platform web` so `cargo run -p capytain-desktop` produces a working UI bundle. Set `CAPYTAIN_SKIP_UI_BUILD=1` to skip this step (CI already does).
+- `dioxus-cli` for the UI build: `cargo install dioxus-cli --locked`. `apps/desktop/src-tauri/build.rs` invokes `dx build --platform web` so `cargo run -p qsl-desktop` produces a working UI bundle. Set `QSL_SKIP_UI_BUILD=1` to skip this step (CI already does).
 - Platform build deps:
   - **macOS:** Xcode command-line tools
   - **Windows:** Visual Studio 2022 with "Desktop development with C++"
@@ -65,7 +65,7 @@ Capytain makes the opposite bet on each: pure-Rust end to end, no intermediary s
 
 ### Linux environment overrides
 
-`capytain-desktop` sets four environment variables at startup (only if they are not already set) before any GL or GTK code touches the display. Each one addresses a separate Linux-specific issue on the current `gtk-rs 0.18` / `surfman 0.11` / GTK 3 Wayland stack:
+`qsl-desktop` sets four environment variables at startup (only if they are not already set) before any GL or GTK code touches the display. Each one addresses a separate Linux-specific issue on the current `gtk-rs 0.18` / `surfman 0.11` / GTK 3 Wayland stack:
 
 ```
 MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
@@ -85,8 +85,8 @@ Non-Linux platforms are unaffected; the whole block is a no-op on macOS and Wind
 ### Building from source
 
 ```sh
-git clone https://github.com/johnathonfox/capytain.git
-cd capytain
+git clone https://github.com/johnathonfox/qsl.git
+cd qsl
 cargo check --workspace          # verifies the whole workspace compiles
 cargo test --workspace           # runs all tests
 cargo run -p mailcli -- --help   # the headless protocol CLI
@@ -98,7 +98,7 @@ A full quickstart — including platform build deps, contributor tooling, and th
 
 ### Running the headless protocol CLI
 
-`mailcli` is Capytain's headless protocol CLI, used during Phase 0 as a forcing function for crate boundaries. Once the Phase 0 weeks 3–4 subcommands ship, it'll look like:
+`mailcli` is QSL's headless protocol CLI, used during Phase 0 as a forcing function for crate boundaries. Once the Phase 0 weeks 3–4 subcommands ship, it'll look like:
 
 ```sh
 cargo run -p mailcli -- auth add gmail your@gmail.com     # Phase 0 Week 3
@@ -150,7 +150,7 @@ Apache License 2.0. See [`LICENSE`](./LICENSE) for the full text and [`NOTICE`](
 
 ## Trademarks
 
-Capytain is not a registered trademark and the project asserts no trademark rights. If you hold an existing trademark and our name conflicts with yours, open an issue and we will rename. No letters or lawyers required.
+QSL is not a registered trademark and the project asserts no trademark rights. If you hold an existing trademark and our name conflicts with yours, open an issue and we will rename. No letters or lawyers required.
 
 ## Acknowledgments
 

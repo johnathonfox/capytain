@@ -2,7 +2,7 @@
 
 //! Turso-backed implementation of [`DbConn`].
 //!
-//! This module is the one place in `capytain-storage` that knows about
+//! This module is the one place in `qsl-storage` that knows about
 //! `turso::*` types. Everything above it sees only the trait surface in
 //! [`crate::conn`].
 //!
@@ -18,7 +18,7 @@
 use async_trait::async_trait;
 use turso::params::params_from_iter;
 
-use capytain_core::StorageError;
+use qsl_core::StorageError;
 
 use crate::conn::{DbConn, OwnedValue, Params, Row, Tx, Value};
 
@@ -181,7 +181,7 @@ impl Drop for TursoTx<'_> {
         // bug surfaces in tests.
         if !self.finished {
             tracing::warn!(
-                target: "capytain_storage::tx",
+                target: "qsl_storage::tx",
                 "TursoTx dropped without commit() or rollback(); the underlying \
                  connection still has a BEGIN in flight. This is a storage-layer bug."
             );

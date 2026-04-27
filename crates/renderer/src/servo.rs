@@ -13,7 +13,7 @@
 //! │   • Arc<Mutex<LinkCb>>        │ thread│    • Rc<Servo>             │
 //! │   • AtomicU64 handle counter  │       │    • WebView               │
 //! │                               │       │    • Rc<WindowRenderingCtx>│
-//! │                               │       │    • Rc<CapytainDelegate>  │
+//! │                               │       │    • Rc<QslDelegate>  │
 //! └───────────────────────────────┘       └────────────────────────────┘
 //! ```
 //!
@@ -37,11 +37,12 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use capytain_core::{ColorScheme, EmailRenderer, RenderHandle, RenderPolicy};
+use qsl_core::{ColorScheme, EmailRenderer, RenderHandle, RenderPolicy};
 use servo::{
     DevicePoint, EventLoopWaker, InputEvent, MouseButton, MouseButtonAction, MouseButtonEvent,
     MouseLeftViewportEvent, MouseMoveEvent, Preferences, RenderingContext, Servo, ServoBuilder,
-    WebView, WebViewBuilder, WebViewPoint, WindowRenderingContext,
+    WebView, WebViewBuilder, WebViewPoint, WheelDelta, WheelEvent, WheelMode,
+    WindowRenderingContext,
 };
 
 mod corpus;
@@ -54,7 +55,7 @@ mod macos;
 mod windows;
 
 pub use corpus::{render_html_to_image, CorpusRenderer};
-use delegate::{CapytainDelegate, CursorCb, LinkCb};
+use delegate::{CursorCb, LinkCb, QslDelegate};
 
 /// On Linux, force Mesa's llvmpipe software EGL before any GL code
 /// runs. Bypasses the `wp_linux_drm_syncobj_surface_v1` protocol error
@@ -202,7 +203,7 @@ impl ServoRenderer {
                 .build(),
         );
 
-        let delegate = Rc::new(CapytainDelegate::new(
+        let delegate = Rc::new(QslDelegate::new(
             Rc::clone(&rendering_context),
             Arc::clone(&link_cb),
             Arc::clone(&cursor_cb),
@@ -320,7 +321,7 @@ struct MainThreadState {
     servo: Rc<Servo>,
     webview: WebView,
     rendering_context: Rc<WindowRenderingContext>,
-    _delegate: Rc<CapytainDelegate>,
+    _delegate: Rc<QslDelegate>,
 }
 
 // ---------------------------------------------------------------------------
@@ -363,6 +364,30 @@ pub fn forward_pointer_move(x: f32, y: f32) {
     let event = InputEvent::MouseMove(MouseMoveEvent::new(WebViewPoint::Device(DevicePoint::new(
         x, y,
     ))));
+    forward(event);
+}
+
+/// Forward a wheel/scroll event. `(dx, dy)` are in the line-mode
+/// convention (wheel "notch" units) using Servo's sign convention:
+///
+/// - `dy > 0` ⇒ view scrolls **up** (revealing more content above).
+/// - `dy < 0` ⇒ view scrolls **down**.
+/// - `dx > 0` ⇒ view scrolls left, `dx < 0` ⇒ right.
+///
+/// `(x, y)` is the cursor position in device pixels at the time of
+/// the wheel event. The caller (the GTK signal handler) is
+/// responsible for converting GDK's "user wants to scroll" sign
+/// convention into Servo's "view moves" convention before calling.
+pub fn forward_pointer_wheel(dx: f32, dy: f32, x: f32, y: f32) {
+    let event = InputEvent::Wheel(WheelEvent::new(
+        WheelDelta {
+            x: dx as f64,
+            y: dy as f64,
+            z: 0.0,
+            mode: WheelMode::DeltaLine,
+        },
+        WebViewPoint::Device(DevicePoint::new(x, y)),
+    ));
     forward(event);
 }
 
@@ -464,7 +489,7 @@ fn apply_reader_pane_preferences(prefs: &mut Preferences) {
     prefs.dom_servoparser_async_html_tokenizer_enabled = false;
 
     // Expose the rendered reader pane to AccessKit — accessibility is
-    // a first-class concern for Capytain (PRINCIPLES.md §accessibility).
+    // a first-class concern for QSL (PRINCIPLES.md §accessibility).
     prefs.accessibility_enabled = true;
 }
 
@@ -484,7 +509,7 @@ fn make_data_url(
 ) -> Result<url::Url, url::ParseError> {
     let scheme_str = match color_scheme {
         ColorScheme::Dark => "dark",
-        // `ColorScheme` is `#[non_exhaustive]` (capytain-core), so a
+        // `ColorScheme` is `#[non_exhaustive]` (qsl-core), so a
         // wildcard is required; every other variant — Light today,
         // future additions — maps to the default light rendering.
         _ => "light",

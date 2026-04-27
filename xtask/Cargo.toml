@@ -2,7 +2,7 @@
 
 [package]
 name = "xtask"
-description = "Capytain build, release, and maintenance scripts. Invoke via `cargo xtask`."
+description = "QSL build, release, and maintenance scripts. Invoke via `cargo xtask`."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

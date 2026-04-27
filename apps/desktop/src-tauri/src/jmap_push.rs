@@ -8,8 +8,8 @@
 //! 1. Calls [`backend_factory::fresh_jmap_params`] to refresh the
 //!    account's OAuth access token.
 //! 2. Dials a fresh side `Client` via
-//!    [`capytain_jmap_client::dial_client`].
-//! 3. Hands the client to [`capytain_jmap_client::watch_account`],
+//!    [`qsl_jmap_client::dial_client`].
+//! 3. Hands the client to [`qsl_jmap_client::watch_account`],
 //!    which reads the EventSource stream and emits
 //!    [`BackendEvent::AccountChanged`] over `tx` on every push.
 //!
@@ -20,8 +20,8 @@
 
 use std::time::Duration;
 
-use capytain_core::{AccountId, BackendEvent};
-use capytain_jmap_client::{dial_client, watch_account};
+use qsl_core::{AccountId, BackendEvent};
+use qsl_jmap_client::{dial_client, watch_account};
 use tauri::{AppHandle, Manager};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -69,7 +69,7 @@ async fn watch_one_session(
     app: &AppHandle,
     account_id: &AccountId,
     tx: &mpsc::Sender<BackendEvent>,
-) -> Result<(), capytain_core::MailError> {
+) -> Result<(), qsl_core::MailError> {
     let state: tauri::State<'_, AppState> = app.state();
     let params = backend_factory::fresh_jmap_params(&state, account_id).await?;
     let client = dial_client(&params.session_url, &params.access_token).await?;

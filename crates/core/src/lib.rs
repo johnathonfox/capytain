@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Capytain core: domain types, error enums, and protocol-agnostic traits.
+//! QSL core: domain types, error enums, and protocol-agnostic traits.
 //!
 //! No I/O happens here. Types defined in this crate are shared across every
 //! other crate in the workspace. See `TRAITS.md` for the full type catalogue.
@@ -15,7 +15,7 @@
 //!   `MessageBody`, `Attachment`.
 //! - [`sync_state`] — [`SyncState`] (opaque per-folder sync cursor).
 //! - [`renderer`] — [`EmailRenderer`] trait and [`NullRenderer`] test double.
-//!   The Servo-backed implementation lives in `capytain-renderer`.
+//!   The Servo-backed implementation lives in `qsl-renderer`.
 
 pub mod account;
 pub mod draft;

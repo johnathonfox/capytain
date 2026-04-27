@@ -78,8 +78,8 @@ pub enum BackendEvent {
 
 /// The one protocol-agnostic mail abstraction.
 ///
-/// Implementations live in `capytain-imap-client` and
-/// `capytain-jmap-client`. The sync engine (`capytain-sync`) and the CLI
+/// Implementations live in `qsl-imap-client` and
+/// `qsl-jmap-client`. The sync engine (`qsl-sync`) and the CLI
 /// (`mailcli`) depend only on this trait.
 #[async_trait]
 pub trait MailBackend: Send + Sync {
@@ -132,9 +132,9 @@ pub trait MailBackend: Send + Sync {
 
     /// Fetch the **raw** RFC 822 bytes for a single message.
     ///
-    /// `capytain-sync`'s body-fetching pass calls this and writes the
+    /// `qsl-sync`'s body-fetching pass calls this and writes the
     /// returned bytes straight to the `BlobStore`; `messages_get`
-    /// re-parses the bytes off disk via `capytain_mime::parse_rfc822`.
+    /// re-parses the bytes off disk via `qsl_mime::parse_rfc822`.
     /// Returning `Vec<u8>` rather than `MessageBody` avoids a parse +
     /// re-serialize roundtrip and keeps `BlobStore` the single source
     /// of truth for the bytes that get rendered.
@@ -190,7 +190,7 @@ pub trait MailBackend: Send + Sync {
     }
 }
 
-/// Trivial empty stream — kept local to this module so `capytain-core`
+/// Trivial empty stream — kept local to this module so `qsl-core`
 /// doesn't pull in `futures-util` just for one utility constructor.
 struct EmptyStream;
 

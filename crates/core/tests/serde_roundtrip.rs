@@ -15,7 +15,7 @@ use chrono::{TimeZone, Utc};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use capytain_core::{
+use qsl_core::{
     Account, AccountId, Attachment, AttachmentRef, BackendKind, DraftId, EmailAddress, Folder,
     FolderId, FolderRole, MessageBody, MessageFlags, MessageHeaders, MessageId, SyncState,
     ThreadId,

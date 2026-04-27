@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "capytain-telemetry"
-description = "Shared tracing initialization for Capytain binaries."
+name = "qsl-telemetry"
+description = "Shared tracing initialization for QSL binaries."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -7,7 +7,7 @@
 //! `AuthError` that never leaks credentials or backend-specific detail
 //! the UI has no business seeing.
 
-use capytain_core::{AccountId, MailError, StorageError};
+use qsl_core::{AccountId, MailError, StorageError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -83,11 +83,11 @@ impl From<StorageError> for IpcError {
     }
 }
 
-// `From<capytain_auth::AuthError>` deliberately lives in `capytain-auth`
+// `From<qsl_auth::AuthError>` deliberately lives in `qsl-auth`
 // instead of here: the UI crate compiles to wasm32 and can't pull in
-// tokio / mio / keyring transitively through `capytain-auth`. Desktop
+// tokio / mio / keyring transitively through `qsl-auth`. Desktop
 // command handlers that surface auth errors use the impl on the
-// `capytain-auth` side to convert.
+// `qsl-auth` side to convert.
 
 #[cfg(test)]
 mod tests {

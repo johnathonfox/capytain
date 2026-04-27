@@ -9,7 +9,7 @@
 
 use chrono::{TimeZone, Utc};
 
-use capytain_core::{
+use qsl_core::{
     AccountId, Draft, DraftAttachment, DraftBodyKind, DraftId, EmailAddress, StorageError,
 };
 

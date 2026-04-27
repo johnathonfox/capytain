@@ -3,7 +3,7 @@
 //! Folder — a container of messages within an account.
 //!
 //! IMAP calls these "mailboxes"; JMAP calls them "mailboxes" too. Gmail
-//! surfaces labels as pseudo-folders. Capytain normalizes all three under
+//! surfaces labels as pseudo-folders. QSL normalizes all three under
 //! the `Folder` name.
 
 use serde::{Deserialize, Serialize};

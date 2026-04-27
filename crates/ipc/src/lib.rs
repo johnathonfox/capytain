@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Capytain IPC types.
+//! QSL IPC types.
 //!
 //! Serializable command inputs, outputs, and events exchanged between
 //! the Tauri shell (`apps/desktop/src-tauri/`) and the Dioxus UI
@@ -21,8 +21,8 @@ pub mod error;
 pub use error::{IpcError, IpcErrorKind, IpcResult};
 
 // Re-export the domain types the UI speaks in. These already derive
-// serde in `capytain-core`, so they cross the IPC boundary as-is.
-pub use capytain_core::{
+// serde in `qsl-core`, so they cross the IPC boundary as-is.
+pub use qsl_core::{
     Account, AccountId, Attachment, AttachmentRef, BackendKind, Draft, DraftAttachment,
     DraftBodyKind, DraftId, EmailAddress, Folder, FolderId, FolderRole, MessageBody, MessageFlags,
     MessageHeaders, MessageId, SyncState, ThreadId,
@@ -42,7 +42,7 @@ pub enum OAuthProvider {
 }
 
 impl OAuthProvider {
-    /// Slug matching `capytain_auth::lookup` and `mailcli auth add`.
+    /// Slug matching `qsl_auth::lookup` and `mailcli auth add`.
     pub fn slug(&self) -> &'static str {
         match self {
             OAuthProvider::Gmail => "gmail",

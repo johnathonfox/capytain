@@ -3,8 +3,8 @@
 //! Tauri command handlers.
 //!
 //! One module per domain area of `COMMANDS.md`. Each command is a thin
-//! adapter: parse input, delegate to `capytain-core` / `capytain-storage`
-//! / `capytain-*-client`, map errors through `IpcError`, return
+//! adapter: parse input, delegate to `qsl-core` / `qsl-storage`
+//! / `qsl-*-client`, map errors through `IpcError`, return
 //! `IpcResult<T>`.
 //!
 //! # Phase 0 Week 5 part 1 scope
@@ -20,7 +20,7 @@ pub mod folders;
 pub mod messages;
 pub mod reader;
 
-use capytain_ipc::IpcResult;
+use qsl_ipc::IpcResult;
 use tauri::State;
 
 use crate::state::AppState;

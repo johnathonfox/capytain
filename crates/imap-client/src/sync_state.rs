@@ -7,7 +7,7 @@
 //! for IMAP: it serializes the RFC 7162 tuple
 //! `(uidvalidity, highestmodseq, uidnext)` to JSON and parses it back.
 
-use capytain_core::{MailError, MessageId, SyncState};
+use qsl_core::{MailError, MessageId, SyncState};
 use serde::{Deserialize, Serialize};
 
 /// Serializable IMAP-specific backend state.
@@ -49,7 +49,7 @@ impl BackendState {
     }
 }
 
-/// Identity of an IMAP message, packed into Capytain's opaque
+/// Identity of an IMAP message, packed into QSL's opaque
 /// [`MessageId`] wrapper.
 ///
 /// `MessageId`s are strings to the core. We use a `|`-delimited shape so
@@ -104,7 +104,7 @@ impl MessageRef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capytain_core::FolderId;
+    use qsl_core::FolderId;
 
     #[test]
     fn round_trip() {
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn message_ref_rejects_non_imap() {
-        let err = MessageRef::decode(&capytain_core::MessageId("M0000001".into())).unwrap_err();
+        let err = MessageRef::decode(&qsl_core::MessageId("M0000001".into())).unwrap_err();
         assert!(err.to_string().contains("not an IMAP message id"));
     }
 }

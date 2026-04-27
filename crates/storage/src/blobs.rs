@@ -24,7 +24,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use capytain_core::{AccountId, FolderId, MessageId, StorageError};
+use qsl_core::{AccountId, FolderId, MessageId, StorageError};
 
 /// The zstd compression level used by default.
 ///
@@ -271,7 +271,7 @@ mod tests {
         let store = BlobStore::new(tmp.path());
         let (a, f, m) = ids();
         let err = store.get(&a, &f, &m).await.unwrap_err();
-        assert!(matches!(err, capytain_core::StorageError::NotFound));
+        assert!(matches!(err, qsl_core::StorageError::NotFound));
     }
 
     #[test]
@@ -351,7 +351,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("capytain-blobs-{}-{}", std::process::id(), n));
+        let dir = std::env::temp_dir().join(format!("qsl-blobs-{}-{}", std::process::id(), n));
         std::fs::create_dir_all(&dir).unwrap();
         OwnedTempDir(dir)
     }

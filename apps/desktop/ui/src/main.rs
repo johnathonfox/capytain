@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Capytain desktop UI entry point.
+//! QSL desktop UI entry point.
 //!
 //! Compiled to WASM by `dx build --platform web`, bundled into
 //! `apps/desktop/ui/dist/`, and served by the Tauri shell. On non-wasm
@@ -10,7 +10,7 @@
 //!
 //! # Phase 0 Week 5 part 1 scope
 //!
-//! Proof of life only: render "Hello from Capytain" and invoke the
+//! Proof of life only: render "Hello from QSL" and invoke the
 //! `accounts_list` Tauri command. Layout, sidebar, and message list
 //! components land in Week 5 part 2 once the IPC surface is wider.
 

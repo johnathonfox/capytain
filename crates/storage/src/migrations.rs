@@ -15,7 +15,7 @@
 //! `mailcli` / desktop binaries can't drift out of sync with their
 //! migrations.
 
-use capytain_core::StorageError;
+use qsl_core::StorageError;
 use tracing::{debug, info};
 
 use crate::conn::{DbConn, Params, Value};

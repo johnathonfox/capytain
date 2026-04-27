@@ -1,10 +1,10 @@
 -- SPDX-License-Identifier: Apache-2.0
 --
--- Capytain schema v3. Phase 1 Week 13: threading.
+-- QSL schema v3. Phase 1 Week 13: threading.
 --
 -- The `threads` table itself shipped in 0001 (per `DESIGN.md` §4.4),
 -- but message-level `In-Reply-To` and `References` weren't persisted.
--- The thread-assembly pipeline (see `capytain-sync::threading`) needs
+-- The thread-assembly pipeline (see `qsl-sync::threading`) needs
 -- both to walk the chain when an incoming message has no Message-ID
 -- match against an existing thread's root.
 --

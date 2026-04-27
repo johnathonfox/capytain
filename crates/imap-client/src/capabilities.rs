@@ -15,7 +15,7 @@
 //! Any server missing CONDSTORE or IDLE is still rejected outright;
 //! there's no viable fallback for either.
 
-use capytain_core::MailError;
+use qsl_core::MailError;
 
 /// Capabilities every supported IMAP server MUST advertise. Missing
 /// any one of these is a hard connect-time failure.

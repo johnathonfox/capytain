@@ -2,7 +2,7 @@
 
 [package]
 name = "mailcli"
-description = "Capytain headless protocol CLI used during Phase 0 as a forcing function for crate boundaries."
+description = "QSL headless protocol CLI used during Phase 0 as a forcing function for crate boundaries."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,17 +16,17 @@ name = "mailcli"
 path = "src/main.rs"
 
 [dependencies]
-capytain-auth = { workspace = true }
-capytain-core = { workspace = true }
-capytain-imap-client = { workspace = true }
-capytain-jmap-client = { workspace = true }
-capytain-storage = { workspace = true }
-capytain-sync = { workspace = true }
-capytain-telemetry = { workspace = true }
+qsl-auth = { workspace = true }
+qsl-core = { workspace = true }
+qsl-imap-client = { workspace = true }
+qsl-jmap-client = { workspace = true }
+qsl-storage = { workspace = true }
+qsl-sync = { workspace = true }
+qsl-telemetry = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 directories = { workspace = true }
-# Same rustls story as `capytain-desktop/src-tauri` (see its Cargo.toml
+# Same rustls story as `qsl-desktop/src-tauri` (see its Cargo.toml
 # comment): both `ring` and `aws-lc-rs` end up in the graph
 # transitively, so rustls refuses to auto-pick a `CryptoProvider` and
 # panics on the first HTTPS call. Install `ring` explicitly at startup.

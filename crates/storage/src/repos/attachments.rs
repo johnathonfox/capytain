@@ -3,7 +3,7 @@
 //! Attachment metadata persistence. The bytes themselves are fetched on
 //! demand and never stored by this repo.
 
-use capytain_core::{Attachment, AttachmentRef, MessageId, StorageError};
+use qsl_core::{Attachment, AttachmentRef, MessageId, StorageError};
 
 use crate::conn::{DbConn, Params, Row, Value};
 

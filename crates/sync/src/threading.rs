@@ -31,8 +31,8 @@
 use chrono::{Duration, Utc};
 use tracing::{debug, instrument};
 
-use capytain_core::{MessageHeaders, StorageError};
-use capytain_storage::{
+use qsl_core::{MessageHeaders, StorageError};
+use qsl_storage::{
     repos::{messages as messages_repo, threads as threads_repo},
     DbConn,
 };
@@ -84,7 +84,7 @@ pub async fn attach_to_thread(
 async fn resolve_existing_thread(
     conn: &dyn DbConn,
     headers: &MessageHeaders,
-) -> Result<Option<capytain_core::ThreadId>, StorageError> {
+) -> Result<Option<qsl_core::ThreadId>, StorageError> {
     // Step 1: In-Reply-To.
     if let Some(in_reply_to) = headers.in_reply_to.as_deref() {
         if let Some(t) = thread_of_message(conn, headers, in_reply_to).await? {
@@ -119,7 +119,7 @@ async fn thread_of_message(
     conn: &dyn DbConn,
     headers: &MessageHeaders,
     rfc822_message_id: &str,
-) -> Result<Option<capytain_core::ThreadId>, StorageError> {
+) -> Result<Option<qsl_core::ThreadId>, StorageError> {
     let row =
         messages_repo::find_by_rfc822_id(conn, &headers.account_id, rfc822_message_id).await?;
     Ok(row.and_then(|m| m.thread_id))
@@ -156,8 +156,16 @@ pub fn normalize_subject(raw: &str) -> String {
 fn strip_one_prefix(s: &str) -> &str {
     for prefix in ["re:", "fw:", "fwd:"] {
         let plen = prefix.len();
-        if s.len() >= plen && s[..plen].eq_ignore_ascii_case(prefix) {
-            return &s[plen..];
+        // `s.get(..plen)` returns `None` either when `plen` falls
+        // past the end OR when it lands inside a multibyte char
+        // (e.g. subject starts with `’`). Both cases mean "no
+        // prefix matched" — falling through to the next iteration
+        // is correct; a length-only guard followed by `s[..plen]`
+        // would panic on the second case.
+        if let Some(head) = s.get(..plen) {
+            if head.eq_ignore_ascii_case(prefix) {
+                return &s[plen..];
+            }
         }
     }
     s
@@ -181,6 +189,20 @@ mod tests {
     fn normalize_subject_collapses_whitespace() {
         assert_eq!(normalize_subject("  hello   world  "), "hello world");
         assert_eq!(normalize_subject("hello\tworld"), "hello world");
+    }
+
+    #[test]
+    fn normalize_subject_handles_leading_multibyte_char() {
+        // Real-world Robinhood subject crashed `s[..3]` because byte
+        // index 3 lands inside `’` (U+2019, 3 bytes). Regression for
+        // the panic surfaced post-OAuth on a fresh sync.
+        assert_eq!(
+            normalize_subject("We’ve updated our Robinhood Crypto Customer Agreement"),
+            "we’ve updated our robinhood crypto customer agreement",
+        );
+        // Non-ASCII char that happens to coincide with a `re:` prefix
+        // length — confirm we don't false-strip.
+        assert_eq!(normalize_subject("✅ done"), "✅ done");
     }
 
     #[test]

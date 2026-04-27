@@ -2,7 +2,7 @@
 
 //! Folder persistence.
 
-use capytain_core::{AccountId, Folder, FolderId, FolderRole, StorageError};
+use qsl_core::{AccountId, Folder, FolderId, FolderRole, StorageError};
 
 use crate::conn::{DbConn, Params, Row, Value};
 

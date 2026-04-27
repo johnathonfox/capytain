@@ -1,6 +1,6 @@
 -- SPDX-License-Identifier: Apache-2.0
 --
--- Capytain schema v2. Phase 1 Week 8: per-sender remote-content opt-in.
+-- QSL schema v2. Phase 1 Week 8: per-sender remote-content opt-in.
 --
 -- One row per `(account_id, email_address)` pair the user has explicitly
 -- chosen to trust for remote content (images, stylesheets, fonts that

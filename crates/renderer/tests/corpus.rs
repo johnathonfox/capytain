@@ -26,13 +26,13 @@
 //!
 //! # Regenerating references
 //!
-//! Set `CAPYTAIN_CORPUS_REGEN=1` and run the test on a stable
+//! Set `QSL_CORPUS_REGEN=1` and run the test on a stable
 //! environment. The harness will (re)write `.sha256` + `.png` pairs
 //! under `tests/corpus/reference/`. Commit the result along with a
 //! note about why they moved.
 //!
 //! ```bash
-//! CAPYTAIN_CORPUS_REGEN=1 cargo test -p capytain-renderer \
+//! QSL_CORPUS_REGEN=1 cargo test -p qsl-renderer \
 //!     --features servo --test corpus -- --nocapture
 //! ```
 //!
@@ -46,7 +46,7 @@
 //! `crates/renderer/src/servo/windows.rs`).
 //!
 //! On Linux the test runs reliably once
-//! [`capytain_renderer::apply_nvidia_wayland_workaround`] has set the
+//! [`qsl_renderer::apply_nvidia_wayland_workaround`] has set the
 //! Mesa/glvnd env vars that sidestep the NVIDIA EGL-Wayland
 //! explicit-sync bug (servo/surfman#354). The test calls that helper
 //! automatically.
@@ -71,7 +71,7 @@
 //! To run locally:
 //!
 //! ```bash
-//! cargo test -p capytain-renderer --features servo --test corpus \
+//! cargo test -p qsl-renderer --features servo --test corpus \
 //!     -- --ignored --nocapture
 //! ```
 
@@ -80,9 +80,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use capytain_renderer::{apply_nvidia_wayland_workaround, CorpusRenderer};
 use dpi::PhysicalSize;
 use image::RgbaImage;
+use qsl_renderer::{apply_nvidia_wayland_workaround, CorpusRenderer};
 
 /// Fixed render size for every corpus fixture. 800x600 hits the
 /// common breakpoints in email template CSS (many templates cap at
@@ -113,7 +113,7 @@ fn corpus_renders_every_fixture_without_panic() {
     );
     fs::create_dir_all(&reference_dir).unwrap();
 
-    let regen = std::env::var("CAPYTAIN_CORPUS_REGEN").as_deref() == Ok("1");
+    let regen = std::env::var("QSL_CORPUS_REGEN").as_deref() == Ok("1");
 
     let mut fixtures = fs::read_dir(&fixtures_dir)
         .unwrap()
@@ -180,7 +180,7 @@ fn corpus_renders_every_fixture_without_panic() {
                         ));
                         // Dump the actual render next to target/ for eyeballing.
                         let actual_path =
-                            std::env::temp_dir().join(format!("capytain-corpus-{name}-actual.png"));
+                            std::env::temp_dir().join(format!("qsl-corpus-{name}-actual.png"));
                         let _ = img.save(&actual_path);
                         eprintln!("  actual written to {}", actual_path.display());
                     }

@@ -13,9 +13,9 @@
 
 use chrono::Utc;
 
-use capytain_core::{Draft, DraftAttachment, DraftBodyKind, EmailAddress};
-use capytain_ipc::{AccountId, DraftId, IpcResult};
-use capytain_storage::repos::drafts as drafts_repo;
+use qsl_core::{Draft, DraftAttachment, DraftBodyKind, EmailAddress};
+use qsl_ipc::{AccountId, DraftId, IpcResult};
+use qsl_storage::repos::drafts as drafts_repo;
 use serde::Deserialize;
 use tauri::State;
 

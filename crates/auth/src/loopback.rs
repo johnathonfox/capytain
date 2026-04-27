@@ -166,10 +166,10 @@ const SUCCESS_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\n\
 Content-Type: text/html; charset=utf-8\r\n\
 Connection: close\r\n\
 \r\n\
-<!doctype html><html><head><title>Capytain</title><style>\
+<!doctype html><html><head><title>QSL</title><style>\
 body{font-family:system-ui,sans-serif;margin:4em auto;max-width:32em;color:#333}\
 </style></head><body><h1>Authentication complete</h1>\
-<p>You can close this tab and return to Capytain.</p></body></html>";
+<p>You can close this tab and return to QSL.</p></body></html>";
 
 #[cfg(test)]
 mod tests {

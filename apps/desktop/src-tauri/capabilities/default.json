@@ -1,13 +1,17 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default permissions granted to the main Capytain window. Locked down to the capytain-defined commands only — no ambient filesystem, shell, or OS access.",
+  "description": "Default permissions granted to the main QSL window. Locked down to the qsl-defined commands only — no ambient filesystem, shell, or OS access.",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-close",
     "core:window:allow-minimize",
     "core:window:allow-maximize",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "notification:default",
+    "notification:allow-is-permission-granted",
+    "notification:allow-request-permission",
+    "notification:allow-notify"
   ]
 }

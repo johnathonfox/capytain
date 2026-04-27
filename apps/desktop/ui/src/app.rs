@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Root Dioxus component for the Capytain UI (wasm32-only).
+//! Root Dioxus component for the QSL UI (wasm32-only).
 //!
 //! Phase 0 Week 5 renders a three-pane layout:
 //!
@@ -16,11 +16,11 @@
 //! over the `window.__TAURI_INTERNALS__.invoke` bridge; HTML
 //! rendering via Servo arrives in Week 6.
 
-use capytain_ipc::{
+use dioxus::prelude::*;
+use qsl_ipc::{
     Account, AccountId, Attachment, Draft, DraftBodyKind, DraftId, EmailAddress, Folder, FolderId,
     MessageHeaders, MessageId, MessagePage, RenderedMessage, SortOrder, SyncEvent,
 };
-use dioxus::prelude::*;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -78,13 +78,13 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
     // but do change its `(x, y)`. Idempotent — repeat calls
     // tear down the previous observer first.
     export function startReaderBodyTracker() {
-        if (window.__capytainReaderTracker) {
-            window.__capytainReaderTracker.dispose();
+        if (window.__qslReaderTracker) {
+            window.__qslReaderTracker.dispose();
         }
         const push = function() {
             const el = document.querySelector('.reader-body-fill');
             if (!el) {
-                console.log('[capytain] push: no .reader-body-fill yet');
+                console.log('[qsl] push: no .reader-body-fill yet');
                 return;
             }
             const r = el.getBoundingClientRect();
@@ -100,7 +100,7 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
             const w = r.width * dpr;
             const h = r.height * dpr;
             console.log(
-                '[capytain] push css',
+                '[qsl] push css',
                 'x=' + r.x.toFixed(1),
                 'y=' + r.y.toFixed(1),
                 'w=' + r.width.toFixed(1),
@@ -140,7 +140,7 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
         const onResize = function() { push(); };
         window.addEventListener('resize', onResize);
 
-        window.__capytainReaderTracker = {
+        window.__qslReaderTracker = {
             dispose: function() {
                 if (resizeObs) resizeObs.disconnect();
                 mutObs.disconnect();
@@ -155,8 +155,8 @@ const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
     // slot and we want Servo's surface re-positioned in the same
     // animation frame.
     export function pushReaderBodyRect() {
-        if (window.__capytainReaderTracker) {
-            window.__capytainReaderTracker.push();
+        if (window.__qslReaderTracker) {
+            window.__qslReaderTracker.push();
         }
     }
 "#)]
@@ -494,7 +494,7 @@ fn web_sys_log(msg: &str) {
 /// Preference order for the body section:
 ///
 /// 1. `rendered.sanitized_html` — populated by `messages_get` via
-///    `capytain_mime::sanitize_email_html` (Phase 1 Week 7). This
+///    `qsl_mime::sanitize_email_html` (Phase 1 Week 7). This
 ///    is the normal path for modern email and carries the original
 ///    layout, tables, inline styles, etc.
 /// 2. `rendered.body_text` escaped through [`minimal_escape`] and
@@ -530,16 +530,16 @@ fn compose_reader_html(rendered: &RenderedMessage) -> String {
     @media (prefers-color-scheme: light) {{
       body {{ color: #14161a; background: #ffffff; }}
     }}
-    .capytain-body {{ color: inherit; }}
-    .capytain-body pre {{ white-space: pre-wrap; word-wrap: break-word; margin: 0; font: inherit; }}
-    .capytain-body a {{ color: #74b4ff; }}
+    .qsl-body {{ color: inherit; }}
+    .qsl-body pre {{ white-space: pre-wrap; word-wrap: break-word; margin: 0; font: inherit; }}
+    .qsl-body a {{ color: #74b4ff; }}
     @media (prefers-color-scheme: light) {{
-      .capytain-body a {{ color: #2563eb; }}
+      .qsl-body a {{ color: #2563eb; }}
     }}
   </style>
 </head>
 <body>
-  <div class="capytain-body">{body_section}</div>
+  <div class="qsl-body">{body_section}</div>
   <script>
     // Click forwarder. Servo's `request_navigation` fires on every
     // navigation Servo initiates, but plain anchor clicks inside a
@@ -1165,7 +1165,7 @@ fn SidebarAccountBlock(
             };
             let inbox = list
                 .iter()
-                .find(|f| matches!(f.role, Some(capytain_ipc::FolderRole::Inbox)));
+                .find(|f| matches!(f.role, Some(qsl_ipc::FolderRole::Inbox)));
             if let Some(inbox) = inbox {
                 let mut sel = selection.write();
                 sel.account = Some(account_id.clone());
@@ -1299,8 +1299,8 @@ fn SidebarLabelRow(folder: Folder, account_id: AccountId, selection: Signal<Sele
 /// the sidebar has zero asset dependencies and the strokes can match
 /// the surrounding text color via `currentColor`.
 #[component]
-fn MailboxRoleIcon(role: Option<capytain_ipc::FolderRole>) -> Element {
-    use capytain_ipc::FolderRole;
+fn MailboxRoleIcon(role: Option<qsl_ipc::FolderRole>) -> Element {
+    use qsl_ipc::FolderRole;
     // 16px box, 1.5 stroke, lucide-style geometry.
     match role {
         Some(FolderRole::Inbox) => rsx! {
@@ -1379,7 +1379,7 @@ fn MailboxRoleIcon(role: Option<capytain_ipc::FolderRole>) -> Element {
 /// the reference design — Gmail's per-label affordance reads more
 /// like a tag than a destination folder.
 fn split_mailboxes_labels(folders: Vec<Folder>) -> (Vec<Folder>, Vec<Folder>) {
-    use capytain_ipc::FolderRole;
+    use qsl_ipc::FolderRole;
     fn band(role: &Option<FolderRole>) -> Option<u8> {
         match role {
             Some(FolderRole::Inbox) => Some(0),
@@ -1540,10 +1540,31 @@ fn MessageListV2(folder: FolderId, selection: Signal<Selection>, sync_tick: Sync
     let mut loading_older = use_signal(|| false);
     let mut tail_exhausted = use_signal(|| false);
 
-    let load_older = {
+    // Pixel distance from the bottom that triggers the next batch.
+    // 200px ≈ 3 message rows on the default theme — enough lead time
+    // for the IPC + Tauri round-trip to complete before the user
+    // hits true bottom on a fast scroll.
+    const LOAD_THRESHOLD_PX: f64 = 200.0;
+
+    // Infinite scroll. Each scroll event near the bottom of the
+    // list dispatches one `messages_load_older` of 50, gated by
+    // `loading_older` so a fast scroll doesn't queue several. After
+    // a load lands, `visible_limit` grows and the new rows extend
+    // the scrollable area downward — the user has to keep scrolling
+    // for the next batch, which is the natural debounce.
+    let onscroll_msglist = {
         let folder = folder.clone();
         let mut sync_tick = sync_tick;
-        move |_| {
+        move |e: Event<ScrollData>| {
+            if *loading_older.read() || *tail_exhausted.read() {
+                return;
+            }
+            let scroll_top = e.data().scroll_top();
+            let client_h = f64::from(e.data().client_height());
+            let scroll_h = f64::from(e.data().scroll_height());
+            if scroll_h - scroll_top - client_h >= LOAD_THRESHOLD_PX {
+                return;
+            }
             let folder = folder.clone();
             loading_older.set(true);
             wasm_bindgen_futures::spawn_local(async move {
@@ -1585,6 +1606,7 @@ fn MessageListV2(folder: FolderId, selection: Signal<Selection>, sync_tick: Sync
                 }
                 div {
                     class: "msglist-scroll",
+                    onscroll: onscroll_msglist,
                     if messages.is_empty() {
                         p { class: "msglist-empty", "No messages in this mailbox." }
                     } else {
@@ -1597,14 +1619,8 @@ fn MessageListV2(folder: FolderId, selection: Signal<Selection>, sync_tick: Sync
                     class: "msglist-footer",
                     if *tail_exhausted.read() {
                         span { class: "msglist-tail-hint", "All older messages loaded." }
-                    } else {
-                        button {
-                            class: "msglist-load-older",
-                            r#type: "button",
-                            disabled: *loading_older.read(),
-                            onclick: load_older,
-                            if *loading_older.read() { "Loading…" } else { "Load 50 older messages" }
-                        }
+                    } else if *loading_older.read() {
+                        span { class: "msglist-tail-hint", "Loading more…" }
                     }
                 }
             },

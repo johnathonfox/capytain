@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 Capytain Contributors
+SPDX-FileCopyrightText: 2026 QSL Contributors
 SPDX-License-Identifier: Apache-2.0
 -->
 
@@ -58,9 +58,9 @@ a dual-context conflict.
 Relevant log excerpt with `WAYLAND_DEBUG=client`:
 
 ```
-[...] -> xdg_toplevel#46.set_title("Capytain Reader (Servo)")
+[...] -> xdg_toplevel#46.set_title("QSL Reader (Servo)")
 INFO  paint::painter: Running on NVIDIA GeForce RTX 5070 Ti/PCIe/SSE2 with OpenGL version 3.2.0 NVIDIA 595.58.03
-INFO  capytain-desktop: Servo renderer installed
+INFO  qsl-desktop: Servo renderer installed
 [Display Queue] wl_display#1.error(wp_linux_drm_syncobj_surface_v1#48, 4,
     "explicit sync is used, but no acquire point is set")
 Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display.
@@ -104,7 +104,7 @@ to re-file against `servo/servo` or upstream NVIDIA if preferred.
 
 ## Impact on downstream
 
-For Capytain (a pure-Rust email client embedding Servo for the
+For QSL (a pure-Rust email client embedding Servo for the
 reader pane), this is the single blocker between compile-validated
 Servo integration on Linux and runtime-validated end-to-end
 rendering on the host hardware class that's currently most common

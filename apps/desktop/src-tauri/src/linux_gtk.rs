@@ -38,7 +38,7 @@
 //! See `docs/week-6-day-4-gtk-integration.md` for the original design
 //! and the hardware-gating rationale; `docs/upstream/surfman-explicit-sync.md`
 //! for why the native NVIDIA EGL-Wayland path is broken and we rely
-//! on the Mesa llvmpipe fallback (`capytain_renderer::apply_nvidia_wayland_workaround`).
+//! on the Mesa llvmpipe fallback (`qsl_renderer::apply_nvidia_wayland_workaround`).
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -183,21 +183,45 @@ impl LinuxGtkParent {
         // event back up to the webview underneath.
         drawing_area.connect_button_press_event(|_w, ev| {
             let (x, y) = ev.position();
-            capytain_renderer::forward_pointer_button_press(ev.button(), x as f32, y as f32);
+            qsl_renderer::forward_pointer_button_press(ev.button(), x as f32, y as f32);
             glib::Propagation::Stop
         });
         drawing_area.connect_button_release_event(|_w, ev| {
             let (x, y) = ev.position();
-            capytain_renderer::forward_pointer_button_release(ev.button(), x as f32, y as f32);
+            qsl_renderer::forward_pointer_button_release(ev.button(), x as f32, y as f32);
             glib::Propagation::Stop
         });
         drawing_area.connect_motion_notify_event(|_w, ev| {
             let (x, y) = ev.position();
-            capytain_renderer::forward_pointer_move(x as f32, y as f32);
+            qsl_renderer::forward_pointer_move(x as f32, y as f32);
             glib::Propagation::Stop
         });
         drawing_area.connect_leave_notify_event(|_w, _ev| {
-            capytain_renderer::forward_pointer_left_viewport();
+            qsl_renderer::forward_pointer_left_viewport();
+            glib::Propagation::Stop
+        });
+        // Wheel/scroll forwarding. GDK reports either a discrete
+        // `ScrollDirection::{Up,Down,Left,Right}` (mouse wheel notch)
+        // or `ScrollDirection::Smooth` with `delta()` in scroll units
+        // (touchpad two-finger). GDK's sign convention is "user wants
+        // to move the viewport in this direction"; Servo's
+        // `WheelDelta` says "view scrolls in this direction" with the
+        // opposite sign, so we negate before forwarding.
+        drawing_area.connect_scroll_event(|_w, ev| {
+            use gdk::ScrollDirection;
+            let (x, y) = ev.position();
+            let (dx, dy) = match ev.direction() {
+                ScrollDirection::Up => (0.0_f32, 1.0_f32),
+                ScrollDirection::Down => (0.0, -1.0),
+                ScrollDirection::Left => (1.0, 0.0),
+                ScrollDirection::Right => (-1.0, 0.0),
+                ScrollDirection::Smooth => {
+                    let (sdx, sdy) = ev.delta();
+                    (-(sdx as f32), -(sdy as f32))
+                }
+                _ => (0.0, 0.0),
+            };
+            qsl_renderer::forward_pointer_wheel(dx, dy, x as f32, y as f32);
             glib::Propagation::Stop
         });
 

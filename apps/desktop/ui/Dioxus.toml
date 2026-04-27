@@ -6,11 +6,11 @@
 # `../ui/dist` so the two stay in sync.
 
 [application]
-name = "capytain"
+name = "qsl"
 default_platform = "web"
 
 [web.app]
-title = "Capytain"
+title = "QSL"
 
 [web.watcher]
 reload_html = true

@@ -8,12 +8,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
-  # `capytain-desktop`'s build.rs invokes `dx build --platform web` on
+  # `qsl-desktop`'s build.rs invokes `dx build --platform web` on
   # the Dioxus UI so `cargo run` produces a working bundle. CI only
   # runs check / clippy / test — it never launches the binary — and
   # installing `dioxus-cli` from source would add ~4 minutes to every
   # job. Skip the UI build step for CI builds.
-  CAPYTAIN_SKIP_UI_BUILD: "1"
+  QSL_SKIP_UI_BUILD: "1"
 
 jobs:
   check:
@@ -88,20 +88,20 @@ jobs:
         run: cargo clippy --workspace --all-targets
       - name: Test (workspace)
         run: cargo test --workspace
-      - name: Check capytain-renderer with servo feature explicitly
-        run: cargo check -p capytain-renderer --features servo
+      - name: Check qsl-renderer with servo feature explicitly
+        run: cargo check -p qsl-renderer --features servo
 
       # --- No-Servo fallback verification (Linux only; Windows full
       # workspace above already covers it) ---
       #
-      # The `servo` feature is off on `capytain-renderer` by default;
-      # downstream crates that depend on it via `capytain-core` only
+      # The `servo` feature is off on `qsl-renderer` by default;
+      # downstream crates that depend on it via `qsl-core` only
       # (the trait + NullRenderer path) must keep compiling when
       # Servo is excluded. Rerun Clippy with `--no-default-features`
       # on Linux to guard that path.
-      - name: Clippy capytain-renderer without servo (Linux)
+      - name: Clippy qsl-renderer without servo (Linux)
         if: matrix.os == 'ubuntu-latest'
-        run: cargo clippy -p capytain-renderer --no-default-features --all-targets
+        run: cargo clippy -p qsl-renderer --no-default-features --all-targets
 
   deny:
     name: cargo-deny

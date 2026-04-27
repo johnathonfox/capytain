@@ -1,8 +1,8 @@
-# Contributing to Capytain
+# Contributing to QSL
 
-> **Before you start:** Capytain is an experimental personal project published in the open. There is no maintainer committed to reviewing, responding to, or merging contributions at this time. If you open a PR or issue, it may sit without a response. That's the honest state — please set expectations accordingly.
+> **Before you start:** QSL is an experimental personal project published in the open. There is no maintainer committed to reviewing, responding to, or merging contributions at this time. If you open a PR or issue, it may sit without a response. That's the honest state — please set expectations accordingly.
 >
-> If you want to work on Capytain anyway, this guide covers the shape of a good contribution so that, if one eventually gets reviewed, it has the best chance of being merged. It also covers the DCO sign-off that any merged contribution will need.
+> If you want to work on QSL anyway, this guide covers the shape of a good contribution so that, if one eventually gets reviewed, it has the best chance of being merged. It also covers the DCO sign-off that any merged contribution will need.
 
 ## Before You Start
 
@@ -23,11 +23,11 @@ If you're planning a large change, open a discussion issue first — not because
 
 ## Development Setup
 
-Target: from a fresh machine and a fresh clone to `cargo test --workspace` passing in under 10 minutes. If it takes you longer than that, please [file an issue](https://github.com/johnathonfox/capytain/issues) — the quickstart is broken and we want to know.
+Target: from a fresh machine and a fresh clone to `cargo test --workspace` passing in under 10 minutes. If it takes you longer than that, please [file an issue](https://github.com/johnathonfox/qsl/issues) — the quickstart is broken and we want to know.
 
 ### 1. Install the Rust toolchain
 
-Capytain pins its toolchain with `rust-toolchain.toml`, so you don't have to pick a version. Install [rustup](https://rustup.rs/) and `cargo` will auto-download the pinned toolchain the first time you run a cargo command in the repo:
+QSL pins its toolchain with `rust-toolchain.toml`, so you don't have to pick a version. Install [rustup](https://rustup.rs/) and `cargo` will auto-download the pinned toolchain the first time you run a cargo command in the repo:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # macOS / Linux
@@ -64,8 +64,8 @@ Hot reload works for UI changes (`dx` re-emits, Tauri picks it up). Core Rust ch
 ### 3. Clone and check
 
 ```sh
-git clone git@github.com:johnathonfox/capytain.git
-cd capytain
+git clone git@github.com:johnathonfox/qsl.git
+cd qsl
 cargo test --workspace
 ```
 
@@ -191,7 +191,7 @@ Signed-off-by: Your Name <your.email@example.com>
 - **Network access in tests is forbidden.** Use recorded fixtures or mocked backends. If a test genuinely needs a live server, mark it `#[ignore]` with a comment explaining how to run it manually.
 - **Snapshots** (for rendering tests) live alongside the test that generates them; `cargo insta` is the convention.
 
-Run the whole suite with `cargo test --workspace`; run a single crate with `cargo test -p <crate-name>` (e.g. `cargo test -p capytain-core`).
+Run the whole suite with `cargo test --workspace`; run a single crate with `cargo test -p <crate-name>` (e.g. `cargo test -p qsl-core`).
 
 ## Release Flow
 
@@ -201,7 +201,7 @@ For now, the "release" process is: PR merges to `main`, CI is green, contributor
 
 ## Security Issues
 
-Do not open public issues for security vulnerabilities. Use GitHub's private vulnerability reporting feature on the `johnathonfox/capytain` repository (Security tab → "Report a vulnerability"). This routes the report through GitHub without requiring a maintained email address.
+Do not open public issues for security vulnerabilities. Use GitHub's private vulnerability reporting feature on the `johnathonfox/qsl` repository (Security tab → "Report a vulnerability"). This routes the report through GitHub without requiring a maintained email address.
 
 **Note on response times:** per the status note on the repository, there is no maintainer committed to security triage at this time. Reports will be seen when someone with access checks, not on any guaranteed timeline. If you need a timely response, a public CVE filing is faster.
 

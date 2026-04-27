@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Build-time glue that captures OAuth2 client IDs from environment
-//! variables and bakes them into `capytain-auth` via
+//! variables and bakes them into `qsl-auth` via
 //! [`cargo:rustc-env`][cargo-env]. The provider modules then read them
 //! with `env!`.
 //!
@@ -11,7 +11,7 @@
 //! builds set these before `cargo build`:
 //!
 //! ```sh
-//! CAPYTAIN_GMAIL_CLIENT_ID=… CAPYTAIN_FASTMAIL_CLIENT_ID=… cargo build
+//! QSL_GMAIL_CLIENT_ID=… QSL_FASTMAIL_CLIENT_ID=… cargo build
 //! ```
 //!
 //! A workspace-root `.env` file is also loaded (only populating
@@ -44,10 +44,10 @@ fn main() {
     // Invalidate the cache whenever the env var changes so changing client
     // IDs / secrets doesn't require a `cargo clean`.
     for var in [
-        "CAPYTAIN_GMAIL_CLIENT_ID",
-        "CAPYTAIN_GMAIL_CLIENT_SECRET",
-        "CAPYTAIN_FASTMAIL_CLIENT_ID",
-        "CAPYTAIN_FASTMAIL_CLIENT_SECRET",
+        "QSL_GMAIL_CLIENT_ID",
+        "QSL_GMAIL_CLIENT_SECRET",
+        "QSL_FASTMAIL_CLIENT_ID",
+        "QSL_FASTMAIL_CLIENT_SECRET",
     ] {
         println!("cargo:rerun-if-env-changed={var}");
         // Always set the rustc env vars — empty string if unset. Provider

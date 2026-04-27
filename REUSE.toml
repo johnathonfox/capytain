@@ -27,7 +27,7 @@ path = [
     ".github/**.yaml",
 ]
 precedence = "aggregate"
-SPDX-FileCopyrightText = "2026 Capytain Contributors"
+SPDX-FileCopyrightText = "2026 QSL Contributors"
 SPDX-License-Identifier = "Apache-2.0"
 
 # Source files that carry inline `SPDX-License-Identifier` but no
@@ -38,7 +38,7 @@ path = [
     "**.toml",
 ]
 precedence = "aggregate"
-SPDX-FileCopyrightText = "2026 Capytain Contributors"
+SPDX-FileCopyrightText = "2026 QSL Contributors"
 
 # SQL migrations and proptest regressions (the latter is generated on test
 # failure and tracked in git so failures reproduce across machines).
@@ -48,7 +48,7 @@ path = [
     "crates/storage/tests/**.proptest-regressions",
 ]
 precedence = "aggregate"
-SPDX-FileCopyrightText = "2026 Capytain Contributors"
+SPDX-FileCopyrightText = "2026 QSL Contributors"
 SPDX-License-Identifier = "Apache-2.0"
 
 # Tauri configuration JSON and Dioxus HTML/CSS entrypoints. JSON files
@@ -63,7 +63,7 @@ path = [
     "apps/desktop/ui/assets/**.css",
 ]
 precedence = "aggregate"
-SPDX-FileCopyrightText = "2026 Capytain Contributors"
+SPDX-FileCopyrightText = "2026 QSL Contributors"
 SPDX-License-Identifier = "Apache-2.0"
 
 # Placeholder application icons. Generated programmatically during Phase
@@ -74,7 +74,7 @@ path = [
     "apps/desktop/src-tauri/icons/**",
 ]
 precedence = "aggregate"
-SPDX-FileCopyrightText = "2026 Capytain Contributors"
+SPDX-FileCopyrightText = "2026 QSL Contributors"
 SPDX-License-Identifier = "Apache-2.0"
 
 # Build-script output. `tauri-build` regenerates `apps/desktop/
@@ -87,12 +87,12 @@ path = [
     "apps/desktop/src-tauri/gen/**",
 ]
 precedence = "aggregate"
-SPDX-FileCopyrightText = "2026 Capytain Contributors"
+SPDX-FileCopyrightText = "2026 QSL Contributors"
 SPDX-License-Identifier = "Apache-2.0"
 
 # Phase 0 Week 6 Day 5 corpus reference outputs — PNG screenshots +
-# SHA-256 hashes produced by `cargo test -p capytain-renderer
-# --features servo --test corpus -- --nocapture CAPYTAIN_CORPUS_REGEN=1`.
+# SHA-256 hashes produced by `cargo test -p qsl-renderer
+# --features servo --test corpus -- --nocapture QSL_CORPUS_REGEN=1`.
 # Binary + content-addressed hash files can't carry inline SPDX metadata,
 # so they're covered here. The fixtures next door (`**/fixtures/*.html`)
 # do carry inline SPDX headers in HTML comments and pass `reuse lint`
@@ -102,5 +102,5 @@ path = [
     "crates/renderer/tests/corpus/reference/**",
 ]
 precedence = "aggregate"
-SPDX-FileCopyrightText = "2026 Capytain Contributors"
+SPDX-FileCopyrightText = "2026 QSL Contributors"
 SPDX-License-Identifier = "Apache-2.0"

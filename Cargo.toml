@@ -26,8 +26,8 @@ version = "0.0.0"
 edition = "2021"
 rust-version = "1.94"
 license = "Apache-2.0"
-repository = "https://github.com/johnathonfox/capytain"
-authors = ["Capytain Contributors"]
+repository = "https://github.com/johnathonfox/qsl"
+authors = ["QSL Contributors"]
 publish = false
 
 [workspace.dependencies]
@@ -49,9 +49,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 clap = { version = "4", features = ["derive"] }
 directories = "6"
 async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
-capytain-ipc = { path = "crates/ipc", version = "=0.0.0" }
-capytain-mime = { path = "crates/mime", version = "=0.0.0" }
-capytain-renderer = { path = "crates/renderer", version = "=0.0.0", default-features = false }
+qsl-ipc = { path = "crates/ipc", version = "=0.0.0" }
+qsl-mime = { path = "crates/mime", version = "=0.0.0" }
+qsl-renderer = { path = "crates/renderer", version = "=0.0.0", default-features = false }
 dioxus = { version = "0.7" }
 jmap-client = { version = "0.4", default-features = false, features = ["async"] }
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "async-secret-service", "crypto-rust", "tokio"] }
@@ -72,7 +72,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"
 # `default-features = false` drops turso's bundled mimalloc
 # `#[global_allocator]`, which would otherwise conflict at link time
 # with `servo_allocator`'s jemalloc global allocator inside
-# `capytain-desktop`. We keep `sync` because `capytain-storage` drives
+# `qsl-desktop`. We keep `sync` because `qsl-storage` drives
 # the sync SDK. See docs/week-6-day-2-notes.md.
 turso = { version = "0.5", default-features = false, features = ["sync"] }
 url = { version = "2", features = ["serde"] }
@@ -80,7 +80,7 @@ webbrowser = "1"
 webpki-roots = "1"
 zstd = { version = "0.13", default-features = false }
 
-# Servo + friends — behind the `servo` feature on `capytain-renderer`.
+# Servo + friends — behind the `servo` feature on `qsl-renderer`.
 # servo 0.1.0 (2026-04-13) has no `lts` feature; the crate is versioned 0.1.0
 # and tracks semver. docs/servo-composition.md §8 called verifying the LTS
 # feature name an open question; resolved: there isn't one. Pin `~0.1.0`
@@ -104,13 +104,13 @@ proptest = "1"
 # and gives cargo-deny a concrete version to check (it treats a bare
 # `{ path = ... }` as a wildcard dep otherwise); `publish = false` means the
 # version is only ever used as local metadata.
-capytain-auth = { path = "crates/auth", version = "=0.0.0" }
-capytain-core = { path = "crates/core", version = "=0.0.0" }
-capytain-imap-client = { path = "crates/imap-client", version = "=0.0.0" }
-capytain-jmap-client = { path = "crates/jmap-client", version = "=0.0.0" }
-capytain-storage = { path = "crates/storage", version = "=0.0.0" }
-capytain-sync = { path = "crates/sync", version = "=0.0.0" }
-capytain-telemetry = { path = "crates/telemetry", version = "=0.0.0" }
+qsl-auth = { path = "crates/auth", version = "=0.0.0" }
+qsl-core = { path = "crates/core", version = "=0.0.0" }
+qsl-imap-client = { path = "crates/imap-client", version = "=0.0.0" }
+qsl-jmap-client = { path = "crates/jmap-client", version = "=0.0.0" }
+qsl-storage = { path = "crates/storage", version = "=0.0.0" }
+qsl-sync = { path = "crates/sync", version = "=0.0.0" }
+qsl-telemetry = { path = "crates/telemetry", version = "=0.0.0" }
 
 [workspace.lints.rust]
 # `deny` (rather than `forbid`) so narrow, documented `#[allow(unsafe_code)]`

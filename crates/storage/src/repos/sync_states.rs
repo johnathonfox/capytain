@@ -5,7 +5,7 @@
 //! Stored inline on the `folders.sync_state` TEXT column. The core never
 //! inspects the payload; it's whatever the backend adapter wrote.
 
-use capytain_core::{FolderId, StorageError, SyncState};
+use qsl_core::{FolderId, StorageError, SyncState};
 
 use crate::conn::{DbConn, Params, Value};
 

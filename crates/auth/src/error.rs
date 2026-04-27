@@ -66,12 +66,12 @@ impl From<url::ParseError> for AuthError {
 /// primarily cares about `Auth` (prompt re-auth) and `Cancelled` (user
 /// aborted); everything else collapses to `Internal` or `Network`.
 ///
-/// Lives here rather than in `capytain-ipc` because `capytain-ipc`
+/// Lives here rather than in `qsl-ipc` because `qsl-ipc`
 /// compiles to wasm32 for the Dioxus UI and can't pull in this crate's
 /// tokio/keyring/reqwest dependencies.
-impl From<AuthError> for capytain_ipc::IpcError {
+impl From<AuthError> for qsl_ipc::IpcError {
     fn from(e: AuthError) -> Self {
-        use capytain_ipc::IpcErrorKind as K;
+        use qsl_ipc::IpcErrorKind as K;
         use AuthError as A;
         let kind = match &e {
             A::ProviderNotConfigured(_) => K::Internal,
@@ -81,7 +81,7 @@ impl From<AuthError> for capytain_ipc::IpcError {
             A::Cancelled => K::Cancelled,
             _ => K::Internal,
         };
-        capytain_ipc::IpcError::new(kind, e.to_string())
+        qsl_ipc::IpcError::new(kind, e.to_string())
     }
 }
 

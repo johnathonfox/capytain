@@ -7,8 +7,8 @@
 //! in Phase 1 once the unified-inbox UX and background sync engine
 //! land.
 
-use capytain_ipc::{AccountId, Folder, IpcResult};
-use capytain_storage::repos::{folders as folders_repo, messages as messages_repo};
+use qsl_ipc::{AccountId, Folder, IpcResult};
+use qsl_storage::repos::{folders as folders_repo, messages as messages_repo};
 use serde::Deserialize;
 use tauri::State;
 

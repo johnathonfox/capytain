@@ -19,7 +19,7 @@ use tokio::sync::Mutex;
 use tokio_rustls::client::TlsStream;
 use tracing::{debug, info, warn};
 
-use capytain_core::{
+use qsl_core::{
     AccountId, AttachmentRef, BackendKind, EmailAddress, Folder, FolderId, FolderRole, MailBackend,
     MailError, MessageBody, MessageFlags, MessageHeaders, MessageId, MessageList, SyncState,
     ThreadId,
@@ -497,7 +497,7 @@ impl MailBackend for ImapBackend {
         let raw = self.fetch_raw_message(id).await?;
         let folder_id = FolderId(r.folder.clone());
         let flags = MessageFlags::default();
-        let identity = capytain_mime::MessageIdentity {
+        let identity = qsl_mime::MessageIdentity {
             id,
             account_id: &self.account,
             folder_id: &folder_id,
@@ -506,7 +506,7 @@ impl MailBackend for ImapBackend {
             flags: &flags,
             labels: &[],
         };
-        capytain_mime::parse_rfc822(&raw, identity)
+        qsl_mime::parse_rfc822(&raw, identity)
             .ok_or_else(|| MailError::Parse(format!("mail-parser could not parse UID {}", r.uid)))
     }
 
@@ -753,7 +753,7 @@ impl MailBackend for ImapBackend {
     async fn submit_message(&self, raw_rfc822: &[u8]) -> Result<Option<MessageId>, MailError> {
         let _ = raw_rfc822;
         Err(MailError::Other(
-            "IMAP submission arrives in Phase 0 Week 2 (Phase 2) via capytain-smtp-client".into(),
+            "IMAP submission arrives in Phase 0 Week 2 (Phase 2) via qsl-smtp-client".into(),
         ))
     }
 }
@@ -873,7 +873,7 @@ fn fetch_to_headers(
     let subject = envelope
         .and_then(|e| e.subject.as_deref())
         .and_then(|b| std::str::from_utf8(b).ok())
-        .map(capytain_mime::decode_header_value)
+        .map(qsl_mime::decode_header_value)
         .unwrap_or_default();
     let from = addr_vec(envelope.and_then(|e| e.from.as_ref()));
     let reply_to = addr_vec(envelope.and_then(|e| e.reply_to.as_ref()));
@@ -925,7 +925,7 @@ fn fetch_to_headers(
     // pipeline falls back to subject normalization).
     let (in_reply_to, references) = fetch
         .header()
-        .map(capytain_mime::extract_thread_headers)
+        .map(qsl_mime::extract_thread_headers)
         .unwrap_or_default();
 
     Ok(Some(MessageHeaders {
@@ -969,7 +969,7 @@ fn addr_vec(addrs: Option<&Vec<imap_proto::Address<'_>>>) -> Vec<EmailAddress> {
                 .name
                 .as_deref()
                 .and_then(|b| std::str::from_utf8(b).ok())
-                .map(capytain_mime::decode_header_value);
+                .map(qsl_mime::decode_header_value);
             Some(EmailAddress {
                 address: format!("{mailbox}@{host}"),
                 display_name: name,

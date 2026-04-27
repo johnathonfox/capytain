@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Capytain authentication.
+//! QSL authentication.
 //!
 //! OAuth2 with PKCE is the only supported auth path (per `DESIGN.md` §1).
 //! This crate exposes:
@@ -13,7 +13,7 @@
 //! - [`flow`] — the high-level orchestrator: `run_loopback_flow(…)` opens
 //!   the browser, awaits the redirect, and exchanges the code for tokens.
 //! - [`keyring`] — [`TokenVault`], one refresh-token entry per account
-//!   under the `com.capytain.app` keychain service.
+//!   under the `com.qsl.app` keychain service.
 //! - [`refresh`] — helper that returns a valid access token, refreshing
 //!   via the stored refresh token when needed.
 //!

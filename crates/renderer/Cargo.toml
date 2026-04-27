@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "capytain-renderer"
+name = "qsl-renderer"
 description = "Servo-backed implementation of the EmailRenderer trait."
 version.workspace = true
 edition.workspace = true
@@ -19,9 +19,9 @@ publish.workspace = true
 # via a dep-level `features = ["servo"]`, so end users still get the
 # real renderer without passing any extra flags.
 #
-# Turning the feature off leaves `capytain-renderer` as an empty library
-# that re-exports `capytain_core::NullRenderer`, which is useful for:
-# (a) downstream crates that depend on the trait via `capytain-core`
+# Turning the feature off leaves `qsl-renderer` as an empty library
+# that re-exports `qsl_core::NullRenderer`, which is useful for:
+# (a) downstream crates that depend on the trait via `qsl-core`
 # only and want to avoid Servo's cmake / clang / gstreamer / ~15 GB
 # build-artifact toolchain (see `docs/servo-composition.md` §7), and
 # (b) Windows CI until Servo-on-Windows lands as a follow-up PR.
@@ -35,7 +35,7 @@ servo = [
 ]
 
 [dependencies]
-capytain-core = { workspace = true }
+qsl-core = { workspace = true }
 # Used by the always-compiled `link_cleaner` module + by the
 # Servo-feature-gated path. Kept non-optional so the cleaner is
 # available even when downstream crates compile this crate without

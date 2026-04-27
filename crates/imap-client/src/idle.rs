@@ -23,7 +23,7 @@
 //!
 //! Reconnect on socket drop is **out of scope**: this function only
 //! owns one session for one folder. Callers (the sync engine in
-//! `capytain-sync`) detect the returned `Err` and build a fresh
+//! `qsl-sync`) detect the returned `Err` and build a fresh
 //! session via [`crate::backend::dial_session`] before calling
 //! `watch_folder` again.
 //!
@@ -37,7 +37,7 @@ use async_imap::extensions::idle::IdleResponse;
 use async_imap::Session;
 use tokio::sync::mpsc;
 
-use capytain_core::{AccountId, BackendEvent, FolderId, MailError};
+use qsl_core::{AccountId, BackendEvent, FolderId, MailError};
 
 use crate::backend::StreamT;
 

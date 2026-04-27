@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `mailcli` — Capytain's headless protocol CLI.
+//! `mailcli` — QSL's headless protocol CLI.
 //!
 //! Phase 0 scope (all of Week 4 landed end-to-end here):
 //!
@@ -18,7 +18,7 @@
 //!   (IMAP) or Email/query+get-s (JMAP) the most recent N messages.
 //! - `sync <email>` finds the INBOX, upserts its folder row, runs
 //!   delta sync against any previously-persisted cursor, writes each
-//!   message header via `capytain_storage::repos::messages`, and
+//!   message header via `qsl_storage::repos::messages`, and
 //!   persists the new sync cursor. Prints
 //!   `Synced N new messages, M removed, in T ms`.
 //! - `show-message <id>` is a placeholder — IMAP ids encode the
@@ -33,25 +33,25 @@ use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
 use tracing::info;
 
-use capytain_auth::{
+use qsl_auth::{
     lookup as provider_lookup, refresh_access_token, run_loopback_flow, AuthError, TokenVault,
 };
-use capytain_core::{Account, AccountId, BackendKind, FolderId, MailBackend, MailError};
-use capytain_imap_client::ImapBackend;
-use capytain_jmap_client::JmapBackend;
-use capytain_storage::{repos, run_migrations, TursoConn};
+use qsl_core::{Account, AccountId, BackendKind, FolderId, MailBackend, MailError};
+use qsl_imap_client::ImapBackend;
+use qsl_jmap_client::JmapBackend;
+use qsl_storage::{repos, run_migrations, TursoConn};
 
-/// Capytain headless protocol CLI.
+/// QSL headless protocol CLI.
 #[derive(Debug, Parser)]
 #[command(name = "mailcli", version, about, long_about = None)]
 struct Cli {
     /// Tracing filter directive, e.g. `info`, `debug`, or
-    /// `capytain_imap_client=trace,warn`. Takes precedence over
+    /// `qsl_imap_client=trace,warn`. Takes precedence over
     /// `RUST_LOG`.
     #[arg(long, value_name = "FILTER", global = true)]
     log_level: Option<String>,
 
-    /// Override the Capytain data directory. Defaults to the
+    /// Override the QSL data directory. Defaults to the
     /// OS-idiomatic location (XDG on Linux, Application Support on
     /// macOS, AppData on Windows).
     #[arg(long, value_name = "DIR", global = true)]
@@ -116,7 +116,7 @@ enum AuthAction {
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    if let Err(e) = capytain_telemetry::init(cli.log_level.as_deref()) {
+    if let Err(e) = qsl_telemetry::init(cli.log_level.as_deref()) {
         eprintln!("mailcli: failed to initialize tracing: {e}");
         return std::process::ExitCode::from(1);
     }
@@ -125,7 +125,7 @@ async fn main() -> std::process::ExitCode {
     // Both `ring` and `aws-lc-rs` end up enabled transitively (reqwest
     // + async-imap + tokio-rustls + servo-side crypto in the larger
     // workspace), so rustls refuses to auto-pick and panics at the
-    // first HTTPS resolution. Mirror `capytain-desktop/src/main.rs` —
+    // first HTTPS resolution. Mirror `qsl-desktop/src/main.rs` —
     // prefer `ring` explicitly.
     if rustls::crypto::ring::default_provider()
         .install_default()
@@ -167,7 +167,7 @@ async fn dispatch_auth(action: AuthAction, paths: &DataPaths) -> Result<(), Mail
 }
 
 async fn auth_add(provider_slug: &str, email: &str, paths: &DataPaths) -> Result<(), MailcliError> {
-    let provider = capytain_auth::lookup(provider_slug)
+    let provider = qsl_auth::lookup(provider_slug)
         .ok_or_else(|| MailcliError::Usage(format!("unknown provider: {provider_slug}")))?;
 
     info!(provider = provider_slug, %email, "starting OAuth2 + PKCE flow");
@@ -186,8 +186,8 @@ async fn auth_add(provider_slug: &str, email: &str, paths: &DataPaths) -> Result
     // variants (e.g. EAS when/if it becomes relevant — unlikely per
     // DESIGN.md §2, but cheap insurance) from breaking this crate.
     let kind = match provider.profile().kind {
-        capytain_auth::ProviderKind::ImapSmtp => BackendKind::ImapSmtp,
-        capytain_auth::ProviderKind::Jmap => BackendKind::Jmap,
+        qsl_auth::ProviderKind::ImapSmtp => BackendKind::ImapSmtp,
+        qsl_auth::ProviderKind::Jmap => BackendKind::Jmap,
         _ => {
             return Err(MailcliError::Usage(format!(
                 "provider {provider_slug} uses an unsupported backend kind"
@@ -273,10 +273,7 @@ async fn auth_remove(email: &str, paths: &DataPaths) -> Result<(), MailcliError>
 
 // ---------- read path commands ----------
 
-async fn resolve_account(
-    conn: &TursoConn,
-    email: &str,
-) -> Result<capytain_core::Account, MailcliError> {
+async fn resolve_account(conn: &TursoConn, email: &str) -> Result<qsl_core::Account, MailcliError> {
     let accounts = repos::accounts::list(conn).await?;
     accounts
         .into_iter()
@@ -313,7 +310,7 @@ async fn open_backend(account: &Account) -> Result<Box<dyn MailBackend>, Mailcli
                 other => {
                     return Err(MailcliError::Usage(format!(
                         "no hardcoded IMAP host for provider {other}; \
-                         set one in capytain-imap-client before connecting"
+                         set one in qsl-imap-client before connecting"
                     )))
                 }
             };
@@ -434,16 +431,15 @@ async fn sync_account(email: &str, paths: &DataPaths) -> Result<(), MailcliError
     let conn = paths.open_db().await?;
     let account = resolve_account(&conn, email).await?;
     let backend = open_backend(&account).await?;
-    let blobs = capytain_storage::BlobStore::new(paths.data_dir.join("blobs"));
+    let blobs = qsl_storage::BlobStore::new(paths.data_dir.join("blobs"));
 
     let start = Instant::now();
-    let outcomes =
-        capytain_sync::sync_account(&conn, backend.as_ref(), Some(&blobs), Some(200)).await?;
+    let outcomes = qsl_sync::sync_account(&conn, backend.as_ref(), Some(&blobs), Some(200)).await?;
     let duration = start.elapsed();
 
     // Aggregate counts across every folder we visited; print one
     // line per folder for visibility on partial failures.
-    let mut total = capytain_sync::SyncReport::default();
+    let mut total = qsl_sync::SyncReport::default();
     for outcome in &outcomes {
         match &outcome.result {
             Ok(report) => {
@@ -493,7 +489,7 @@ impl DataPaths {
     fn resolve(override_dir: Option<&std::path::Path>) -> Result<Self, MailcliError> {
         let data_dir = match override_dir {
             Some(p) => p.to_path_buf(),
-            None => ProjectDirs::from("app", "capytain", "capytain")
+            None => ProjectDirs::from("app", "qsl", "qsl")
                 .ok_or_else(|| {
                     MailcliError::Usage(
                         "could not resolve OS data directory; pass --data-dir".into(),
@@ -508,7 +504,7 @@ impl DataPaths {
     }
 
     fn db_path(&self) -> PathBuf {
-        self.data_dir.join("capytain.db")
+        self.data_dir.join("qsl.db")
     }
 
     async fn open_db(&self) -> Result<TursoConn, MailcliError> {
@@ -528,16 +524,16 @@ enum MailcliError {
     #[error(transparent)]
     Mail(#[from] MailError),
     #[error(transparent)]
-    Storage(#[from] capytain_core::StorageError),
+    Storage(#[from] qsl_core::StorageError),
     #[error(transparent)]
     Auth(#[from] AuthError),
 }
 
-impl From<capytain_sync::SyncError> for MailcliError {
-    fn from(e: capytain_sync::SyncError) -> Self {
+impl From<qsl_sync::SyncError> for MailcliError {
+    fn from(e: qsl_sync::SyncError) -> Self {
         match e {
-            capytain_sync::SyncError::Mail(m) => MailcliError::Mail(m),
-            capytain_sync::SyncError::Storage(s) => MailcliError::Storage(s),
+            qsl_sync::SyncError::Mail(m) => MailcliError::Mail(m),
+            qsl_sync::SyncError::Storage(s) => MailcliError::Storage(s),
         }
     }
 }

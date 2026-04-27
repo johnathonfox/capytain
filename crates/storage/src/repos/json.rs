@@ -2,7 +2,7 @@
 
 //! Helpers that round-trip `serde`-serializable values through text columns.
 
-use capytain_core::StorageError;
+use qsl_core::StorageError;
 use serde::{de::DeserializeOwned, Serialize};
 
 pub(super) fn encode<T: Serialize>(value: &T) -> Result<String, StorageError> {

@@ -21,11 +21,11 @@ impl OAuthProvider for FastmailProvider {
 static PROFILE: ProviderProfile = ProviderProfile {
     name: "Fastmail",
     slug: "fastmail",
-    client_id: env!("CAPYTAIN_FASTMAIL_CLIENT_ID"),
+    client_id: env!("QSL_FASTMAIL_CLIENT_ID"),
     // Fastmail's native-app OAuth is PKCE-only (no secret). Env-var
     // hook kept for future-proofing in case they add a confidential
     // mode.
-    client_secret: env!("CAPYTAIN_FASTMAIL_CLIENT_SECRET"),
+    client_secret: env!("QSL_FASTMAIL_CLIENT_SECRET"),
     authorization_url: "https://api.fastmail.com/oauth/authorize",
     token_url: "https://api.fastmail.com/oauth/refresh",
     scopes: &[

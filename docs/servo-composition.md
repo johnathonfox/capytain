@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2026 Capytain Contributors
+SPDX-FileCopyrightText: 2026 QSL Contributors
 SPDX-License-Identifier: Apache-2.0
 -->
 
@@ -30,7 +30,7 @@ published `servo` v0.1.0 to crates.io with a public, documented
 embedding API and an LTS track. See the [release announcement][rel] and
 the [docs.rs page][docs].
 
-The practical consequences for Capytain:
+The practical consequences for QSL:
 
 - `cargo add servo` works. No git submodules, no vendored forks of
   `mozjs_sys`.
@@ -38,7 +38,7 @@ The practical consequences for Capytain:
   working proofs-of-concept against 0.1.0 within a week: Simon Willison's
   [servo-shot][shot] headless CLI, the in-flight
   [tauri-runtime-verso][verso] runtime.
-- An LTS version exists. Capytain pins to the LTS line; half-yearly
+- An LTS version exists. QSL pins to the LTS line; half-yearly
   migration windows fit our cadence better than the monthly breaking-
   change track.
 
@@ -56,7 +56,7 @@ originally planned for a stall.
 
 ## 1. Problem statement
 
-Capytain renders email-body HTML in the reader pane. For security,
+QSL renders email-body HTML in the reader pane. For security,
 consistency, and the §1 Rust-native commitment, we want Servo — not the
 system webview — doing that specific rendering. Everything else (the
 Dioxus-rendered app chrome, the sidebar, the message list, the
@@ -123,14 +123,14 @@ exercises:
 ### 3.1 The four types Servo asks embedders to know
 
 - **`Servo`** — the engine instance. Owns the constellation, script
-  threads, layout thread pool, compositor. One per process (Capytain
+  threads, layout thread pool, compositor. One per process (QSL
   uses exactly one).
 - **`ServoBuilder`** — constructs a `Servo` given a
   `Rc<dyn RenderingContext>` plus optional `Opts`, `Preferences`,
   `EventLoopWaker`, `UserContentManager`, `ProtocolRegistry`,
-  `WebXrRegistry`. For Capytain, defaults are fine except for
+  `WebXrRegistry`. For QSL, defaults are fine except for
   `Preferences` (see §5 below).
-- **`WebView`** — a single webview handle. Capytain uses exactly one
+- **`WebView`** — a single webview handle. QSL uses exactly one
   (the reader pane). Built via `WebViewBuilder::new(&servo, ctx)` with
   `.url(...)`, `.hidpi_scale_factor(...)`, `.delegate(...)`, `.build()`.
 - **`Rc<dyn RenderingContext>`** — where pixels go. Two stock
@@ -140,7 +140,7 @@ exercises:
 
 ### 3.2 The delegate trait we implement
 
-`WebViewDelegate` is Servo's callback surface. Capytain cares about a
+`WebViewDelegate` is Servo's callback surface. QSL cares about a
 small subset; the rest we leave at defaults.
 
 | Method | Why we care | Maps to |
@@ -234,7 +234,7 @@ clicks route through the delegate.
 
 ### 4.3 Day 4 — Linux (GTK widget)
 
-- Capytain uses Wayland-primary with X11 fallback. Tauri on Linux uses
+- QSL uses Wayland-primary with X11 fallback. Tauri on Linux uses
   GTK 3 (per `README.md`). The `raw-window-handle` path gives us either
   `WaylandWindowHandle` or `XlibWindowHandle`.
 - The cleanest integration is to mirror what the [servo-gtk][servogtk]
@@ -404,7 +404,7 @@ Day 2 (macOS):
 3. Flip `crates/renderer` default features to include `servo`.
 4. Implement `ServoRenderer::new_macos(parent: RawWindowHandle)`:
    create `NSView` child, build `WindowRenderingContext`, build
-   `Servo`, build `WebView`, wire `CapytainDelegate`.
+   `Servo`, build `WebView`, wire `QSLDelegate`.
 5. Implement the trait methods — replace each `todo!()` in
    `crates/renderer/src/servo.rs` with real Servo calls.
 6. Wire into the Tauri reader-pane command. Hardcoded test HTML is
@@ -465,7 +465,7 @@ our tree).
 "main thread" on macOS is the AppKit main thread, on Windows the
 thread that called `CreateWindowExW`, on Linux the GTK main context
 thread. Tauri guarantees all three are the same thread the app was
-launched on. But the Tokio runtime Capytain uses is multi-threaded,
+launched on. But the Tokio runtime QSL uses is multi-threaded,
 and the sync engine fires events from worker threads. The
 `EmailRenderer` trait is `Send` — the object is moved to the main
 thread at construction — but the IPC layer delivering "render this
@@ -577,7 +577,7 @@ docs):
   (an `Arc<dyn MainThreadDispatch>`, an `Arc<Mutex<LinkCb>>`, an
   `AtomicU64`). It is safely stored in Tauri's `AppState`.
 - The actual Servo state (`Rc<Servo>`, `WebView`, `Rc<Window
-  RenderingContext>`, `Rc<CapytainDelegate>`) lives in a
+  RenderingContext>`, `Rc<QSLDelegate>`) lives in a
   `thread_local!` on whichever thread called the platform
   constructor — the Tauri main thread in production.
 - Every trait method dispatches onto the main thread via the
@@ -640,8 +640,8 @@ shared `CorpusRenderer` (one `Servo` instance, one `WebView`, reused
 across all fixtures to stay within the one-per-process limit) and
 hashes the resulting `image::RgbaImage`.
 
-**Regeneration:** `CAPYTAIN_CORPUS_REGEN=1 cargo test -p
-capytain-renderer --features servo --test corpus -- --nocapture`.
+**Regeneration:** `QSL_CORPUS_REGEN=1 cargo test -p
+qsl-renderer --features servo --test corpus -- --nocapture`.
 References live under `crates/renderer/tests/corpus/reference/` as
 paired `.sha256` + `.png` files — the PNGs are committed so reviewers
 can diff by eye when the hash drifts.
@@ -720,9 +720,9 @@ have predicted from the pre-spike design:
   `main()` entry. Ring matches what tokio-rustls uses elsewhere in
   the workspace.
 - **Feature-layout pivot for Windows CI.** Default-enabling `servo`
-  on `capytain-renderer` fights the Windows CI runner (no Servo
+  on `qsl-renderer` fights the Windows CI runner (no Servo
   toolchain). Landed shape: renderer's `default = []`, desktop owns
-  a `servo` feature that propagates to `capytain-renderer/servo`,
+  a `servo` feature that propagates to `qsl-renderer/servo`,
   workspace pins `default-features = false` for the renderer. Linux
   gets the real engine by default; Windows CI uses `--no-default-
   features` to drop it.

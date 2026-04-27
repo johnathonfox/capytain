@@ -3,7 +3,7 @@
 //! Shared runtime state for the Tauri shell.
 //!
 //! `AppState` owns the long-lived handles every command needs: the
-//! Turso-backed [`capytain_storage::TursoConn`] for persistence, a
+//! Turso-backed [`qsl_storage::TursoConn`] for persistence, a
 //! per-account cache of live [`MailBackend`] implementations, and
 //! — when the `servo` feature is on and the platform supports it —
 //! the Servo-backed [`EmailRenderer`] attached to a secondary Tauri
@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use capytain_core::{AccountId, EmailRenderer, MailBackend};
-use capytain_storage::TursoConn;
+use qsl_core::{AccountId, EmailRenderer, MailBackend};
+use qsl_storage::TursoConn;
 use tokio::sync::{Mutex, Notify};
 
 /// Long-lived state attached to the Tauri app via `manage`.

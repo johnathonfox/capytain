@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Capytain storage layer.
+//! QSL storage layer.
 //!
 //! Hosts the [`DbConn`] trait, the migration runner, the repository layer,
 //! and the blob store for raw `.eml` bodies. Callers above this crate

@@ -7,9 +7,9 @@
 //! 1. Calls [`backend_factory::fresh_imap_params`] to refresh the
 //!    account's OAuth access token.
 //! 2. Dials a fresh side session via
-//!    [`capytain_imap_client::dial_session`].
+//!    [`qsl_imap_client::dial_session`].
 //! 3. Hands the session to
-//!    [`capytain_imap_client::watch_folder`], which runs the IDLE
+//!    [`qsl_imap_client::watch_folder`], which runs the IDLE
 //!    state machine and emits [`BackendEvent::FolderChanged`] over
 //!    `tx` on every untagged response.
 //!
@@ -21,8 +21,8 @@
 
 use std::time::Duration;
 
-use capytain_core::{AccountId, BackendEvent, FolderId};
-use capytain_imap_client::{dial_session, watch_folder};
+use qsl_core::{AccountId, BackendEvent, FolderId};
+use qsl_imap_client::{dial_session, watch_folder};
 use tauri::{AppHandle, Manager};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -87,7 +87,7 @@ async fn watch_one_session(
     account_id: &AccountId,
     folder: &FolderId,
     tx: &mpsc::Sender<BackendEvent>,
-) -> Result<(), capytain_core::MailError> {
+) -> Result<(), qsl_core::MailError> {
     let state: tauri::State<'_, AppState> = app.state();
     let params = backend_factory::fresh_imap_params(&state, account_id).await?;
     let session = dial_session(

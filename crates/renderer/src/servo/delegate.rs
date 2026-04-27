@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `WebViewDelegate` that wires Servo's webview callbacks to the
-//! Capytain renderer — the narrow subset described in design doc §3.2
+//! QSL renderer — the narrow subset described in design doc §3.2
 //! that actually exists on Servo 0.1.0's `WebViewDelegate` trait.
 //!
 //! Methods listed in the design doc that the 0.1.0 trait does *not*
@@ -39,13 +39,13 @@ pub type CursorCb = Option<Box<dyn FnMut(Cursor) + Send + 'static>>;
 /// [`notify_new_frame_ready`](WebViewDelegate::notify_new_frame_ready)
 /// can drive the paint + present cycle without reaching into the outer
 /// renderer) and to the shared link-click / cursor-change callback slots.
-pub struct CapytainDelegate {
+pub struct QslDelegate {
     rendering_context: Rc<WindowRenderingContext>,
     link_cb: Arc<Mutex<LinkCb>>,
     cursor_cb: Arc<Mutex<CursorCb>>,
 }
 
-impl CapytainDelegate {
+impl QslDelegate {
     pub fn new(
         rendering_context: Rc<WindowRenderingContext>,
         link_cb: Arc<Mutex<LinkCb>>,
@@ -59,7 +59,7 @@ impl CapytainDelegate {
     }
 }
 
-impl WebViewDelegate for CapytainDelegate {
+impl WebViewDelegate for QslDelegate {
     /// The paint contract documented in `docs/servo-composition.md` §6.1:
     /// when Servo signals a new frame, we must call `webview.paint()` or
     /// the back buffer never gets filled and the surface stays blank.
@@ -87,7 +87,7 @@ impl WebViewDelegate for CapytainDelegate {
     /// the webview initiates (link click, form submit, `window.location`,
     /// etc.). We deny every navigation — the reader pane is a one-shot
     /// render, not a browser — but first surface the URL to the caller's
-    /// [`EmailRenderer::on_link_click`](capytain_core::EmailRenderer::on_link_click)
+    /// [`EmailRenderer::on_link_click`](qsl_core::EmailRenderer::on_link_click)
     /// callback *if* it's a scheme we route (https + mailto).
     ///
     /// Per design doc §3.2, filtering to `https:` and `mailto:` happens
@@ -156,7 +156,7 @@ impl WebViewDelegate for CapytainDelegate {
 
 /// Minimal `WebViewDelegate` for the headless Day 5 corpus harness.
 ///
-/// Same paint contract as [`CapytainDelegate`] but against
+/// Same paint contract as [`QslDelegate`] but against
 /// `SoftwareRenderingContext` (CPU-side pixel buffer) rather than
 /// `WindowRenderingContext`. Does not surface link clicks — the corpus
 /// tests don't exercise navigation — and denies every permission and
