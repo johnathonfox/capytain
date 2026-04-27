@@ -783,6 +783,51 @@ ul {
   color: #cfd3da;
 }
 
+.reader-remote-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: #1a1f2a;
+  border: 1px solid #2c3340;
+  border-left: 3px solid #d4a544;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #cfd3da;
+}
+
+.reader-remote-banner-text {
+  flex: 1 1 auto;
+}
+
+.reader-remote-banner-actions {
+  display: inline-flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.reader-remote-banner-button {
+  padding: 4px 10px;
+  background: #20242e;
+  border: 1px solid #2c3340;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #cfd3da;
+  cursor: pointer;
+}
+
+.reader-remote-banner-button:hover:not(:disabled) {
+  background: #2c3340;
+  border-color: #3a4252;
+}
+
+.reader-remote-banner-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .reader-body {
   margin-top: 16px;
   padding-top: 16px;

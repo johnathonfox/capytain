@@ -16,6 +16,8 @@
 //! over the `window.__TAURI_INTERNALS__.invoke` bridge; HTML
 //! rendering via Servo arrives in Week 6.
 
+use std::collections::HashMap;
+
 use dioxus::prelude::*;
 use qsl_ipc::{
     Account, AccountId, Attachment, Draft, DraftBodyKind, DraftId, EmailAddress, Folder, FolderId,
@@ -233,17 +235,19 @@ pub struct ComposeState {
     pub draft_id: Option<DraftId>,
 }
 
-/// Per-folder revision counter. The desktop's sync engine emits a
-/// `sync_event` over Tauri whenever a folder finishes a sync cycle;
-/// the listener bumps this signal so message-list resources whose
-/// `use_reactive!` deps include it auto-refetch.
-///
-/// One signal for the whole app means an event for folder A causes a
-/// no-op refetch of folder B's list — at one cheap DB query that's a
-/// fine tradeoff over per-folder bookkeeping. If it ever shows up in
-/// profiles, swap to a `Signal<HashMap<(AccountId, FolderId), u64>>`
-/// keyed by the changed folder.
+/// Global revision counter, bumped on every `sync_event`. Drives
+/// resources whose work is structurally cross-folder — folder lists in
+/// the sidebar (unread counts can change in any folder) and the
+/// unified inbox.
 pub type SyncTick = Signal<u64>;
+
+/// Per-folder revision counter. The sync listener bumps the entry for
+/// the folder named in `SyncEvent::FolderSynced` / `FolderError`, so a
+/// per-folder `MessageListV2` only refetches when *its* folder
+/// actually synced. Without this, a 10-folder bootstrap pass would
+/// trigger 10 refetches of the visible folder; with it, only the
+/// matching event triggers work.
+pub type FolderTokens = Signal<HashMap<FolderId, u64>>;
 
 // ---------- Root ----------
 
@@ -269,6 +273,7 @@ pub fn App() -> Element {
 fn full_app_shell() -> Element {
     let selection = use_signal(Selection::default);
     let mut sync_tick: SyncTick = use_signal(|| 0u64);
+    let mut folder_tokens: FolderTokens = use_signal(HashMap::new);
     let compose: Signal<Option<ComposeState>> = use_signal(|| None);
 
     // ComposePane occupies the reader slot when active, so the Servo
@@ -302,15 +307,24 @@ fn full_app_shell() -> Element {
     // capturing pointer events mid-drag.
     let mut drag = use_signal(|| Option::<(SplitTarget, f64, u32)>::None);
 
-    // Listen for sync engine events: bump sync_tick so message-list
-    // / folder-list resources refetch, and update the status bar
-    // signal with the parsed payload. The JS-side `tauriListen`
-    // wrapper passes us just `event.payload`, which deserializes
-    // straight into a `SyncEvent` enum.
+    // Listen for sync engine events: bump sync_tick so cross-folder
+    // resources (sidebar, unified inbox) refetch, bump the per-folder
+    // token so the message list for that specific folder refetches,
+    // and update the status bar signal with the parsed payload. The
+    // JS-side `tauriListen` wrapper passes us just `event.payload`,
+    // which deserializes straight into a `SyncEvent` enum.
     use_hook(move || {
         let cb = Closure::<dyn FnMut(JsValue)>::new(move |payload: JsValue| {
             sync_tick.with_mut(|t| *t = t.wrapping_add(1));
             if let Ok(evt) = serde_wasm_bindgen::from_value::<SyncEvent>(payload) {
+                let folder = match &evt {
+                    SyncEvent::FolderSynced { folder, .. }
+                    | SyncEvent::FolderError { folder, .. } => folder.clone(),
+                };
+                folder_tokens.with_mut(|m| {
+                    let entry = m.entry(folder).or_insert(0);
+                    *entry = entry.wrapping_add(1);
+                });
                 sync_status.set(SyncStatus::from_event(&evt));
             }
         });
@@ -404,7 +418,7 @@ fn full_app_shell() -> Element {
             }
             div {
                 class: "shell-pane shell-pane-list",
-                MessageListPaneV2 { selection, sync_tick }
+                MessageListPaneV2 { selection, sync_tick, folder_tokens }
             }
             div {
                 class: "shell-splitter",
@@ -1571,7 +1585,11 @@ fn split_mailboxes_labels(folders: Vec<Folder>) -> (Vec<Folder>, Vec<Folder>) {
 // ---------- Message list ----------
 
 #[component]
-fn MessageListPaneV2(selection: Signal<Selection>, sync_tick: SyncTick) -> Element {
+fn MessageListPaneV2(
+    selection: Signal<Selection>,
+    sync_tick: SyncTick,
+    folder_tokens: FolderTokens,
+) -> Element {
     let unified = selection.read().unified;
     let folder_id = selection.read().folder.clone();
     rsx! {
@@ -1587,7 +1605,9 @@ fn MessageListPaneV2(selection: Signal<Selection>, sync_tick: SyncTick) -> Eleme
                             "Select a mailbox to view messages."
                         }
                     },
-                    Some(fid) => rsx! { MessageListV2 { folder: fid, selection, sync_tick } },
+                    Some(fid) => rsx! {
+                        MessageListV2 { folder: fid, selection, folder_tokens }
+                    },
                 }
             }
         }
@@ -1634,10 +1654,18 @@ fn UnifiedMessageListV2(selection: Signal<Selection>, sync_tick: SyncTick) -> El
 }
 
 #[component]
-fn MessageListV2(folder: FolderId, selection: Signal<Selection>, sync_tick: SyncTick) -> Element {
+fn MessageListV2(
+    folder: FolderId,
+    selection: Signal<Selection>,
+    folder_tokens: FolderTokens,
+) -> Element {
     let mut visible_limit = use_signal(|| 200u32);
     let folder_for_fetch = folder.clone();
-    let tick_value = sync_tick();
+    // Read this folder's per-folder token. Reading the signal here
+    // makes use_reactive! see a u64 dep that only changes when *this*
+    // folder synced — refetches no longer fan out across all open
+    // message lists when an unrelated folder pushes an event.
+    let tick_value = folder_tokens.read().get(&folder).copied().unwrap_or(0u64);
     let limit_value = visible_limit();
     let page = use_resource(use_reactive!(
         |folder_for_fetch, tick_value, limit_value| async move {
@@ -1659,9 +1687,9 @@ fn MessageListV2(folder: FolderId, selection: Signal<Selection>, sync_tick: Sync
 
     // Lazy-fetch new IMAP messages whenever this folder is opened.
     // Fires once per `folder` value change. The Tauri command emits
-    // `sync_event` when it finishes, which bumps `sync_tick` and
-    // refetches the list above — so any newly-arrived headers slide
-    // into the visible page automatically.
+    // `sync_event` when it finishes, which bumps this folder's entry
+    // in `folder_tokens` and refetches the list above — so any newly-
+    // arrived headers slide into the visible page automatically.
     {
         let folder_for_refresh = folder.clone();
         use_effect(use_reactive!(|folder_for_refresh| {
@@ -1715,7 +1743,7 @@ fn MessageListV2(folder: FolderId, selection: Signal<Selection>, sync_tick: Sync
     // for the next batch, which is the natural debounce.
     let onscroll_msglist = {
         let folder = folder.clone();
-        let mut sync_tick = sync_tick;
+        let mut folder_tokens = folder_tokens;
         move |e: Event<ScrollData>| {
             if *loading_older.read() || *tail_exhausted.read() {
                 return;
@@ -1727,6 +1755,7 @@ fn MessageListV2(folder: FolderId, selection: Signal<Selection>, sync_tick: Sync
                 return;
             }
             let folder = folder.clone();
+            let folder_for_bump = folder.clone();
             loading_older.set(true);
             wasm_bindgen_futures::spawn_local(async move {
                 let result = invoke::<u32>(
@@ -1743,7 +1772,10 @@ fn MessageListV2(folder: FolderId, selection: Signal<Selection>, sync_tick: Sync
                     }
                     Ok(n) => {
                         visible_limit.with_mut(|m| *m = m.saturating_add(n.max(50)));
-                        sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+                        folder_tokens.with_mut(|m| {
+                            let entry = m.entry(folder_for_bump).or_insert(0);
+                            *entry = entry.wrapping_add(1);
+                        });
                     }
                     Err(e) => {
                         web_sys_log(&format!("messages_load_older: {e}"));
@@ -2043,29 +2075,50 @@ fn ReaderPaneV2(
 
 #[component]
 fn ReaderV2(id: MessageId, sync_tick: SyncTick, compose: Signal<Option<ComposeState>>) -> Element {
+    // `force_trusted` is the one-shot "Load images" override. Resets
+    // to false when the user navigates to a different message — see
+    // the use_effect below — so a previously-loaded message doesn't
+    // leak its trust state into the next one.
+    let mut force_trusted: Signal<bool> = use_signal(|| false);
+    {
+        let id_for_reset = id.clone();
+        use_effect(use_reactive!(|id_for_reset| {
+            let _ = id_for_reset;
+            force_trusted.set(false);
+        }));
+    }
+
     let id_for_fetch = id.clone();
-    let msg = use_resource(use_reactive!(|id_for_fetch| async move {
-        let rendered = invoke::<RenderedMessage>(
-            "messages_get",
-            serde_json::json!({ "input": { "id": id_for_fetch } }),
-        )
-        .await?;
-        // Hand the body straight to Servo's overlay surface. Doing
-        // it inside the resource closure means it fires once per
-        // successful message fetch — putting it in a `use_effect`
-        // outside the closure would only fire on initial mount and
-        // miss subsequent message switches.
-        let html = compose_reader_html(&rendered);
-        let _ = invoke::<()>(
-            "reader_render",
-            serde_json::json!({ "input": { "html": html } }),
-        )
-        .await;
-        // Force one tracker push so the overlay surface lands in
-        // the right slot on the same frame the new content paints.
-        push_reader_body_rect();
-        Ok::<_, String>(rendered)
-    }));
+    let force_trusted_val = *force_trusted.read();
+    let msg = use_resource(use_reactive!(
+        |id_for_fetch, force_trusted_val| async move {
+            let rendered = invoke::<RenderedMessage>(
+                "messages_get",
+                serde_json::json!({
+                    "input": {
+                        "id": id_for_fetch,
+                        "force_trusted": force_trusted_val,
+                    }
+                }),
+            )
+            .await?;
+            // Hand the body straight to Servo's overlay surface. Doing
+            // it inside the resource closure means it fires once per
+            // successful message fetch — putting it in a `use_effect`
+            // outside the closure would only fire on initial mount and
+            // miss subsequent message switches.
+            let html = compose_reader_html(&rendered);
+            let _ = invoke::<()>(
+                "reader_render",
+                serde_json::json!({ "input": { "html": html } }),
+            )
+            .await;
+            // Force one tracker push so the overlay surface lands in
+            // the right slot on the same frame the new content paints.
+            push_reader_body_rect();
+            Ok::<_, String>(rendered)
+        }
+    ));
 
     // Mark-as-read on selection. Fires once per `id` change. The
     // command also queues an outbox entry for the server flag write,
@@ -2205,6 +2258,18 @@ fn ReaderV2(id: MessageId, sync_tick: SyncTick, compose: Signal<Option<ComposeSt
                         if !rendered.attachments.is_empty() {
                             ReaderAttachments { attachments: rendered.attachments.clone() }
                         }
+                        if rendered.remote_content_blocked {
+                            RemoteContentBanner {
+                                account_id: rendered.headers.account_id.clone(),
+                                sender_addr: rendered
+                                    .headers
+                                    .from
+                                    .first()
+                                    .map(|a| a.address.clone())
+                                    .unwrap_or_default(),
+                                force_trusted,
+                            }
+                        }
                     }
                     // Body slot — transparent placeholder. The
                     // ResizeObserver wired in App() watches this
@@ -2239,6 +2304,101 @@ fn ReaderRecipientRow(label: String, addrs: Vec<EmailAddress>) -> Element {
                     let display = if name.is_empty() { addr } else { name };
                     rsx! {
                         span { class: "reader-chip", title: "{title}", "{display}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Banner that appears above the reader body when the sanitizer
+/// blocked remote content for this message. "Load images" flips
+/// `force_trusted` for the current render only; "Always load from
+/// this sender" persists an `remote_content_opt_ins` row via
+/// `messages_trust_sender`, then re-fetches so subsequent loads
+/// pick up the trust state.
+#[component]
+fn RemoteContentBanner(
+    account_id: AccountId,
+    sender_addr: String,
+    force_trusted: Signal<bool>,
+) -> Element {
+    let mut trusting: Signal<bool> = use_signal(|| false);
+    let sender_label = if sender_addr.is_empty() {
+        "this sender".to_string()
+    } else {
+        sender_addr.clone()
+    };
+
+    let load_once = {
+        let mut force_trusted = force_trusted;
+        move |_| force_trusted.set(true)
+    };
+
+    let trust_sender = {
+        let account_id = account_id.clone();
+        let sender_addr = sender_addr.clone();
+        let mut force_trusted = force_trusted;
+        move |_| {
+            if sender_addr.is_empty() || *trusting.read() {
+                return;
+            }
+            trusting.set(true);
+            let account_id = account_id.clone();
+            let sender_addr = sender_addr.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                match invoke::<()>(
+                    "messages_trust_sender",
+                    serde_json::json!({
+                        "input": {
+                            "account_id": account_id,
+                            "email_address": sender_addr,
+                        }
+                    }),
+                )
+                .await
+                {
+                    Ok(()) => {
+                        // Trigger a re-render through the same signal
+                        // the per-render override uses; the resource
+                        // closure re-fires and the next `messages_get`
+                        // sees the new opt-in row.
+                        force_trusted.set(true);
+                    }
+                    Err(e) => {
+                        web_sys_log(&format!("messages_trust_sender: {e}"));
+                    }
+                }
+                trusting.set(false);
+            });
+        }
+    };
+
+    rsx! {
+        div {
+            class: "reader-remote-banner",
+            span {
+                class: "reader-remote-banner-text",
+                "Images blocked for privacy."
+            }
+            div {
+                class: "reader-remote-banner-actions",
+                button {
+                    class: "reader-remote-banner-button",
+                    r#type: "button",
+                    onclick: load_once,
+                    "Load images"
+                }
+                button {
+                    class: "reader-remote-banner-button",
+                    r#type: "button",
+                    disabled: sender_addr.is_empty() || *trusting.read(),
+                    onclick: trust_sender,
+                    title: "{sender_label}",
+                    if *trusting.read() {
+                        "Saving…"
+                    } else {
+                        "Always load from this sender"
                     }
                 }
             }
