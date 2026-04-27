@@ -213,6 +213,17 @@ extern "C" {
 
 /// Thin wrapper around the Tauri `invoke` bridge. Serializes `args` to
 /// JSON, forwards to JS, and deserializes the return value into `T`.
+///
+/// The return path round-trips through `JSON.stringify` +
+/// `serde_json::from_str` instead of `serde_wasm_bindgen::from_value`.
+/// `serde-wasm-bindgen` 0.6 silently dropped `Option<FolderRole>` to
+/// `None` for several externally-tagged unit-variant tag values that the
+/// Rust side ships as plain JSON strings, so the sidebar saw INBOX +
+/// All Mail and lost the rest of the [Gmail]/* mailboxes. Tauri 2's
+/// command results are JSON-encoded over the wire anyway, so the
+/// round-trip is just re-stringifying the value the JS bridge already
+/// `JSON.parse`d — no information loss, and `serde_json` handles
+/// externally-tagged enums correctly.
 pub(crate) async fn invoke<T>(cmd: &str, args: impl Serialize) -> Result<T, String>
 where
     T: for<'de> serde::Deserialize<'de>,
@@ -221,7 +232,11 @@ where
     let js_ret = core_invoke(cmd, js_args)
         .await
         .map_err(|e| format!("{e:?}"))?;
-    serde_wasm_bindgen::from_value(js_ret).map_err(|e| e.to_string())
+    let json = js_sys::JSON::stringify(&js_ret)
+        .map_err(|e| format!("invoke {cmd}: JSON.stringify: {e:?}"))?
+        .as_string()
+        .ok_or_else(|| format!("invoke {cmd}: JSON.stringify returned non-string"))?;
+    serde_json::from_str(&json).map_err(|e| format!("invoke {cmd}: {e}"))
 }
 
 // ---------- Selection state ----------

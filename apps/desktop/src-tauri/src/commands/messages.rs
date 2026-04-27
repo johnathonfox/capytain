@@ -918,6 +918,12 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
             .title(title)
             .inner_size(720.0, 800.0)
             .initialization_script(&init_script)
+            // Child windows need an explicit opt-in or right-click →
+            // Inspect / Ctrl+Shift+I are silently disabled even though
+            // the host has Tauri's `devtools` feature enabled. Effective
+            // only when the underlying runtime supports it (Tauri's
+            // `devtools` feature is on for this binary in `Cargo.toml`).
+            .devtools(true)
             .build()
             .map_err(|e| {
                 qsl_ipc::IpcError::new(
