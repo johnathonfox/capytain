@@ -147,6 +147,12 @@ pub async fn messages_list_unified(
 #[derive(Debug, Deserialize)]
 pub struct MessagesGetInput {
     pub id: MessageId,
+    /// One-shot override that forces the trusted sanitizer for this
+    /// render. Used by the reader-pane "Load images" button so the
+    /// user can let remote content through for a single message
+    /// without persistently trusting the sender. Defaults to `false`.
+    #[serde(default)]
+    pub force_trusted: bool,
 }
 
 /// `messages_get` — hydrate a single message for the reader pane.
@@ -177,11 +183,18 @@ pub async fn messages_get(
     let db = state.db.lock().await;
     let headers = messages_repo::get(&*db, &input.id).await?;
     let body_path = messages_repo::body_path(&*db, &input.id).await?;
-    let sender_is_trusted = match headers.from.first() {
-        Some(addr) if !addr.address.is_empty() => {
-            remote_content_opt_ins::is_trusted(&*db, &headers.account_id, &addr.address).await?
+    // `input.force_trusted` is the per-render override used by the
+    // reader's "Load images" banner button — it bypasses the opt-in
+    // check for one render without writing anything to storage.
+    let sender_is_trusted = if input.force_trusted {
+        true
+    } else {
+        match headers.from.first() {
+            Some(addr) if !addr.address.is_empty() => {
+                remote_content_opt_ins::is_trusted(&*db, &headers.account_id, &addr.address).await?
+            }
+            _ => false,
         }
-        _ => false,
     };
     drop(db);
 
@@ -205,6 +218,34 @@ pub async fn messages_get(
         sender_is_trusted,
         remote_content_blocked: !sender_is_trusted,
     })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MessagesTrustSenderInput {
+    pub account_id: qsl_core::AccountId,
+    pub email_address: String,
+}
+
+/// Persist a per-sender remote-content opt-in. Subsequent
+/// `messages_get` calls for any message whose `From` is `email_address`
+/// on `account_id` will run the trusted sanitizer (images,
+/// stylesheets, fonts not stripped). Existing rows are upserted.
+///
+/// Backs the reader-pane "Always load from this sender" banner button.
+#[tauri::command]
+pub async fn messages_trust_sender(
+    state: State<'_, AppState>,
+    input: MessagesTrustSenderInput,
+) -> IpcResult<()> {
+    let MessagesTrustSenderInput {
+        account_id,
+        email_address,
+    } = input;
+    let db = state.db.lock().await;
+    remote_content_opt_ins::add(&*db, &account_id, &email_address).await?;
+    drop(db);
+    tracing::info!(account = %account_id.0, %email_address, "messages_trust_sender: added opt-in");
+    Ok(())
 }
 
 /// Read a previously-fetched body blob from disk. A stale
