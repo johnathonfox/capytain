@@ -51,6 +51,17 @@ pub const DEFAULT_FILTER_RULES: &str = r#"! Mailchimp — click/open tracking pi
 ||sendgrid.net/wf^$image
 ||sendgrid.net/ls^$image
 ||email-sent.sendgrid.net^$image
+! SendGrid behind a brand CNAME (e.g. `ablink.email.<brand>.com/wf/open?upn=...`).
+! Marketing-automation services (Rocket Money, etc.) front SendGrid
+! through a custom subdomain so the sendgrid.net rule alone doesn't match.
+! `wf/open?upn=` is a stable signature of SendGrid's open-tracking path
+! that holds across CNAMEs, so a path substring is enough.
+wf/open?upn=$image
+! Braze marketing-automation pixels — `appboy` is the legacy product name
+! still present in their image_assets URLs and tracking endpoints.
+||braze.com^$image
+||braze.eu^$image
+||appboy.com^$image
 ! Google Analytics / Tag Manager / DoubleClick
 ||google-analytics.com^
 ||googletagmanager.com^
@@ -150,6 +161,30 @@ mod tests {
         assert!(!is_blocked(
             engine,
             "https://mail.google.com/mail/u/0/images/cleardot.gif",
+            "image",
+        ));
+    }
+
+    #[test]
+    fn sendgrid_open_pixel_through_custom_cname_is_blocked() {
+        // Rocket Money / Braze relays SendGrid open-tracking through
+        // a `ablink.email.<brand>.com` CNAME. The sendgrid.net rule
+        // alone doesn't catch this; the wildcard subdomain rule does.
+        let engine = default_engine();
+        assert!(is_blocked(
+            engine,
+            "https://ablink.email.rocketmoney.com/wf/open?upn=u001.abc",
+            "image",
+        ));
+    }
+
+    #[test]
+    fn braze_open_pixel_blocked() {
+        let engine = default_engine();
+        // Generic Braze marketing-automation open pixel.
+        assert!(is_blocked(
+            engine,
+            "https://example.iad-01.braze.com/api/v3/messaging/log_open?id=abc",
             "image",
         ));
     }

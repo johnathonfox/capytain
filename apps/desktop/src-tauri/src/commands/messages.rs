@@ -184,6 +184,11 @@ pub async fn messages_get(
         }
         _ => false,
     };
+    tracing::debug!(
+        id = %input.id.0,
+        sender_is_trusted,
+        "messages_get sanitize path"
+    );
     drop(db);
 
     let blobs = BlobStore::new(state.data_dir.join("blobs"));
