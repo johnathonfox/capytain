@@ -31,7 +31,7 @@ pub mod refresh;
 pub mod tokens;
 
 pub use error::AuthError;
-pub use flow::{run_loopback_flow, FlowOutcome};
+pub use flow::{run_loopback_flow, run_loopback_flow_with, FlowOutcome};
 pub use keyring::TokenVault;
 pub use provider::{lookup, OAuthProvider, ProviderKind, ProviderProfile};
 pub use refresh::{access_token_for, refresh_access_token};
