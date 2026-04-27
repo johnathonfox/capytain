@@ -424,7 +424,7 @@ fn spawn_forwarder(
 
 async fn list_accounts(app: &AppHandle) -> Result<Vec<Account>, String> {
     let state: tauri::State<'_, AppState> = app.state();
-    let db = state.db.lock().await;
+    let db = state.sync_db.lock().await;
     repos::accounts::list(&*db)
         .await
         .map_err(|e| format!("list accounts: {e}"))
@@ -458,7 +458,7 @@ async fn bootstrap_account(app: &AppHandle, account: &Account) -> Result<Vec<Fol
     // emit_folder_outcome runs, since it re-takes the lock for the
     // unread-count read.
     let outcomes: Vec<(Folder, Result<_, _>)> = {
-        let db = state.db.lock().await;
+        let db = state.sync_db.lock().await;
         let mut acc = Vec::with_capacity(folders.len());
         for folder in folders {
             let result =
@@ -511,7 +511,7 @@ pub async fn sync_one_folder(
         }
     };
 
-    let db = state.db.lock().await;
+    let db = state.sync_db.lock().await;
     let result =
         qsl_sync::sync_folder(&*db, backend.as_ref(), Some(blobs), folder, Some(200)).await;
     drop(db);
@@ -534,7 +534,7 @@ async fn sync_one_account(app: &AppHandle, blobs: &BlobStore, account_id: &Accou
         }
     };
 
-    let db = state.db.lock().await;
+    let db = state.sync_db.lock().await;
     let outcomes =
         match qsl_sync::sync_account(&*db, backend.as_ref(), Some(blobs), Some(200)).await {
             Ok(o) => o,
@@ -573,7 +573,7 @@ async fn emit_folder_outcome(
         Ok(report) => {
             let unread = {
                 let state: tauri::State<'_, AppState> = app.state();
-                let db = state.db.lock().await;
+                let db = state.sync_db.lock().await;
                 qsl_storage::repos::messages::count_unread_by_folder(&*db, folder)
                     .await
                     .unwrap_or(0)
@@ -642,7 +642,7 @@ fn fire_new_mail_notification(
 async fn drain_outbox_once(app: &AppHandle) -> Result<(), qsl_core::StorageError> {
     let state: tauri::State<'_, AppState> = app.state();
     let resolver = AppHandleResolver { app: app.clone() };
-    let db = state.db.lock().await;
+    let db = state.sync_db.lock().await;
     let outcomes = qsl_sync::outbox_drain::drain(&*db, &resolver, 32).await?;
     drop(db);
 

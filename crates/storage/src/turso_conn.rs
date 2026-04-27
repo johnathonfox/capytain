@@ -43,7 +43,13 @@ impl TursoConn {
         Ok(Self::new(conn))
     }
 
-    /// Open (or create) a database file at `path`.
+    /// Open (or create) a database file at `path`. Enables WAL mode
+    /// so multiple connections to the same file can read concurrently
+    /// while a writer is in flight — required for the desktop app's
+    /// split between the IPC connection (`AppState::db`) and the sync
+    /// engine's connection (`AppState::sync_db`). The pragma is
+    /// idempotent: WAL mode persists in the file header, so calling
+    /// it on every open is a cheap no-op once it's already set.
     pub async fn open<P: AsRef<std::path::Path>>(path: P) -> Result<Self, StorageError> {
         let path = path
             .as_ref()
@@ -54,7 +60,15 @@ impl TursoConn {
             .await
             .map_err(err_db)?;
         let conn = db.connect().map_err(err_db)?;
-        Ok(Self::new(conn))
+        let this = Self::new(conn);
+        // PRAGMAs accept no params and return a single row when they
+        // succeed; we don't actually inspect the response, but do
+        // wait for the call to complete so the file header is
+        // updated before the migrations runner touches it.
+        let _ = this
+            .query("PRAGMA journal_mode=WAL", crate::conn::Params::empty())
+            .await?;
+        Ok(this)
     }
 
     /// Borrow the underlying `turso::Connection` for Turso-specific
