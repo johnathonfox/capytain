@@ -381,7 +381,7 @@ pub fn App() -> Element {
                 if compose.read().is_some() {
                     ComposePane { compose, sync_tick }
                 } else {
-                    ReaderPaneV2 { selection, sync_tick }
+                    ReaderPaneV2 { selection, sync_tick, compose }
                 }
             }
             // Full-window overlay during drag so the reader's iframe
@@ -1738,8 +1738,126 @@ fn folder_title_from_selection(folder: &FolderId, _selection: &Signal<Selection>
 
 // ---------- Reader pane ----------
 
+/// What variant of compose to open when a reader-action button is
+/// clicked. Drives the pre-fill logic in [`open_reply`].
+#[derive(Copy, Clone)]
+enum ReplyKind {
+    Reply,
+    ReplyAll,
+    Forward,
+}
+
+/// Build a `DraftInput` from the opened message + reply variant,
+/// persist it via `drafts_save`, then point the compose pane at it.
+/// Runs entirely off-main as a spawned future so the click handler
+/// returns immediately. Errors are logged to the console; we don't
+/// surface a UI banner since the only failure mode is a broken IPC
+/// channel (which is recoverable on its own).
+fn open_reply(
+    rendered: RenderedMessage,
+    mut compose: Signal<Option<ComposeState>>,
+    kind: ReplyKind,
+) {
+    wasm_bindgen_futures::spawn_local(async move {
+        let account_id = rendered.headers.account_id.clone();
+
+        // Fetch accounts so reply-all can drop the user's own
+        // address from the cc list. A miss (account vanished, list
+        // failed) just leaves the user in the cc — they can edit.
+        let self_email = if matches!(kind, ReplyKind::ReplyAll) {
+            invoke::<Vec<Account>>("accounts_list", ())
+                .await
+                .ok()
+                .and_then(|accts| {
+                    accts
+                        .into_iter()
+                        .find(|a| a.id == account_id)
+                        .map(|a| a.email_address)
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        let (to, cc, subject, in_reply_to, references, body) = match kind {
+            ReplyKind::Reply => {
+                let to = crate::reply::reply_to_recipients(&rendered.headers);
+                let subject = crate::reply::reply_subject(&rendered.headers.subject);
+                let body = crate::reply::quote_body_for_reply(&rendered, None);
+                (
+                    to,
+                    Vec::<EmailAddress>::new(),
+                    subject,
+                    rendered.headers.rfc822_message_id.clone(),
+                    crate::reply::reply_references(&rendered.headers),
+                    body,
+                )
+            }
+            ReplyKind::ReplyAll => {
+                let to = crate::reply::reply_to_recipients(&rendered.headers);
+                let cc = crate::reply::reply_all_cc(&rendered.headers, &to, &self_email);
+                let subject = crate::reply::reply_subject(&rendered.headers.subject);
+                let body = crate::reply::quote_body_for_reply(&rendered, None);
+                (
+                    to,
+                    cc,
+                    subject,
+                    rendered.headers.rfc822_message_id.clone(),
+                    crate::reply::reply_references(&rendered.headers),
+                    body,
+                )
+            }
+            ReplyKind::Forward => {
+                let subject = crate::reply::forward_subject(&rendered.headers.subject);
+                let body = crate::reply::forward_body(&rendered);
+                (
+                    Vec::<EmailAddress>::new(),
+                    Vec::<EmailAddress>::new(),
+                    subject,
+                    None,
+                    Vec::<String>::new(),
+                    body,
+                )
+            }
+        };
+
+        let payload = serde_json::json!({
+            "input": {
+                "draft": {
+                    "id": Option::<DraftId>::None,
+                    "account_id": account_id,
+                    "to": to,
+                    "cc": cc,
+                    "bcc": Vec::<EmailAddress>::new(),
+                    "subject": subject,
+                    "body": body,
+                    "body_kind": DraftBodyKind::Plain,
+                    "attachments": Vec::<()>::new(),
+                    "in_reply_to": in_reply_to,
+                    "references": references,
+                }
+            }
+        });
+        match invoke::<DraftId>("drafts_save", payload).await {
+            Ok(draft_id) => {
+                compose.set(Some(ComposeState {
+                    default_account: Some(account_id),
+                    draft_id: Some(draft_id),
+                }));
+            }
+            Err(e) => {
+                web_sys_log(&format!("open_reply: drafts_save: {e}"));
+            }
+        }
+    });
+}
+
 #[component]
-fn ReaderPaneV2(selection: Signal<Selection>, sync_tick: SyncTick) -> Element {
+fn ReaderPaneV2(
+    selection: Signal<Selection>,
+    sync_tick: SyncTick,
+    compose: Signal<Option<ComposeState>>,
+) -> Element {
     let message_id = selection.read().message.clone();
 
     // Hide Servo's overlay surface whenever no message is selected.
@@ -1762,14 +1880,14 @@ fn ReaderPaneV2(selection: Signal<Selection>, sync_tick: SyncTick) -> Element {
             class: "reader-pane",
             match message_id {
                 None => rsx! { div { class: "reader-empty", "Select a message to read." } },
-                Some(id) => rsx! { ReaderV2 { id, sync_tick } },
+                Some(id) => rsx! { ReaderV2 { id, sync_tick, compose } },
             }
         }
     }
 }
 
 #[component]
-fn ReaderV2(id: MessageId, sync_tick: SyncTick) -> Element {
+fn ReaderV2(id: MessageId, sync_tick: SyncTick, compose: Signal<Option<ComposeState>>) -> Element {
     let id_for_fetch = id.clone();
     let msg = use_resource(use_reactive!(|id_for_fetch| async move {
         let rendered = invoke::<RenderedMessage>(
@@ -1888,16 +2006,32 @@ fn ReaderV2(id: MessageId, sync_tick: SyncTick) -> Element {
                                 button {
                                     class: "reader-action",
                                     r#type: "button",
-                                    disabled: true,
-                                    title: "Reply lands in Phase 2 Week 20",
+                                    title: "Reply",
+                                    onclick: {
+                                        let r = rendered.clone();
+                                        move |_| open_reply(r.clone(), compose, ReplyKind::Reply)
+                                    },
                                     "Reply"
                                 }
                                 button {
                                     class: "reader-action",
                                     r#type: "button",
-                                    disabled: true,
-                                    title: "Archive wiring lands later this phase",
-                                    "Archive"
+                                    title: "Reply to all",
+                                    onclick: {
+                                        let r = rendered.clone();
+                                        move |_| open_reply(r.clone(), compose, ReplyKind::ReplyAll)
+                                    },
+                                    "Reply All"
+                                }
+                                button {
+                                    class: "reader-action",
+                                    r#type: "button",
+                                    title: "Forward",
+                                    onclick: {
+                                        let r = rendered.clone();
+                                        move |_| open_reply(r.clone(), compose, ReplyKind::Forward)
+                                    },
+                                    "Forward"
                                 }
                             }
                         }
