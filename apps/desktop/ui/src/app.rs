@@ -1540,10 +1540,31 @@ fn MessageListV2(folder: FolderId, selection: Signal<Selection>, sync_tick: Sync
     let mut loading_older = use_signal(|| false);
     let mut tail_exhausted = use_signal(|| false);
 
-    let load_older = {
+    // Pixel distance from the bottom that triggers the next batch.
+    // 200px ≈ 3 message rows on the default theme — enough lead time
+    // for the IPC + Tauri round-trip to complete before the user
+    // hits true bottom on a fast scroll.
+    const LOAD_THRESHOLD_PX: f64 = 200.0;
+
+    // Infinite scroll. Each scroll event near the bottom of the
+    // list dispatches one `messages_load_older` of 50, gated by
+    // `loading_older` so a fast scroll doesn't queue several. After
+    // a load lands, `visible_limit` grows and the new rows extend
+    // the scrollable area downward — the user has to keep scrolling
+    // for the next batch, which is the natural debounce.
+    let onscroll_msglist = {
         let folder = folder.clone();
         let mut sync_tick = sync_tick;
-        move |_| {
+        move |e: Event<ScrollData>| {
+            if *loading_older.read() || *tail_exhausted.read() {
+                return;
+            }
+            let scroll_top = e.data().scroll_top();
+            let client_h = f64::from(e.data().client_height());
+            let scroll_h = f64::from(e.data().scroll_height());
+            if scroll_h - scroll_top - client_h >= LOAD_THRESHOLD_PX {
+                return;
+            }
             let folder = folder.clone();
             loading_older.set(true);
             wasm_bindgen_futures::spawn_local(async move {
@@ -1585,6 +1606,7 @@ fn MessageListV2(folder: FolderId, selection: Signal<Selection>, sync_tick: Sync
                 }
                 div {
                     class: "msglist-scroll",
+                    onscroll: onscroll_msglist,
                     if messages.is_empty() {
                         p { class: "msglist-empty", "No messages in this mailbox." }
                     } else {
@@ -1597,14 +1619,8 @@ fn MessageListV2(folder: FolderId, selection: Signal<Selection>, sync_tick: Sync
                     class: "msglist-footer",
                     if *tail_exhausted.read() {
                         span { class: "msglist-tail-hint", "All older messages loaded." }
-                    } else {
-                        button {
-                            class: "msglist-load-older",
-                            r#type: "button",
-                            disabled: *loading_older.read(),
-                            onclick: load_older,
-                            if *loading_older.read() { "Loading…" } else { "Load 50 older messages" }
-                        }
+                    } else if *loading_older.read() {
+                        span { class: "msglist-tail-hint", "Loading more…" }
                     }
                 }
             },
