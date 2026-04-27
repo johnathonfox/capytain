@@ -137,6 +137,31 @@ If not this pass: ship the rest, leave threading for after MCP. The MCP spec alr
 
 **Status: Done.** Shipped 2026-04-26 in PR #60 (commit `d4fc1d2`). Replaced the "Load 50 older messages" button with an `onscroll` handler on `.msglist-scroll` that fires `messages_load_older` whenever the user gets within 200px of the bottom, gated by `loading_older` so a fast scroll only triggers one batch.
 
+## 11. Popup reader: reuse the main pane's RenderedMessage cache
+
+**Status: Open.** `messages_open_in_window` always calls `messages_get` to build the popup preload. When the user double-clicks a message that's already selected in the main pane, we pay the lazy-fetch cost a second time — measured ~493 ms on a marketing email whose body wasn't yet on disk.
+
+**Symptom:** First popup open for a not-yet-cached message takes ~500 ms longer than subsequent opens of the same message, because the second open hits the warm body blob.
+
+**Diagnostic / fix sketch:**
+- The main reader pane already calls `messages_get` for the selected message; the result lives in Dioxus signal state, not a server-side cache.
+- Two paths: (a) lift a `RenderedMessage` cache to `AppState` keyed by `MessageId` with TTL/LRU; (b) have the UI's double-click handler pass the already-rendered HTML directly to the popup command, bypassing re-fetch.
+- (a) helps any consumer of `messages_get`; (b) is one-line on the UI side but only helps the "double-click while reader pane shows it" case.
+
+**Verification:** Open a message in the main pane → wait for it to render → double-click to popup. Popup `preload fetched` line in the log should be <50 ms regardless of body size.
+
+## 12. Popup reader: reduce the install → first-paint gap
+
+**Status: Open.** Even with the GTK layout pump capped at 100 ms (commit `044d1cf`), there's still ~250 ms between Servo install completing and the first `reader_set_position` arriving. The popup's Servo overlay paints into its install-time off-screen rect until Dioxus boots, mounts `ReaderOnlyApp`, and the `ResizeObserver` pushes the real bounding rect.
+
+**Symptom:** Popup window visibly shows header-only chrome before the body appears, even on warm-cache opens.
+
+**Fix sketch:**
+- Compose the reader HTML on the Rust side (move/duplicate `compose_reader_html` from `apps/desktop/ui/src/app.rs` into a shared crate, e.g. `qsl-mime`) and call `renderer.render(html)` immediately after Servo install completes.
+- Pre-position the Servo overlay using known popup dimensions (window inner size minus a fixed header height) so the body paints into the correct rect before Dioxus mounts. ResizeObserver still pushes corrections later.
+
+**Verification:** Time between `Servo install completed` and the first visible body paint should drop from ~250 ms to <50 ms.
+
 ## Suggested order
 
 Updated to reflect status. Strikethrough = nothing to do.
