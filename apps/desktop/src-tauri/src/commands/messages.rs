@@ -9,12 +9,18 @@
 //! `messages_download_attachment`) land in Phase 1 alongside the
 //! outbox / optimistic-mutation engine.
 
-use qsl_core::{FolderRole, MessageFlags, MessageHeaders};
-use qsl_ipc::{FolderId, IpcResult, MessageId, MessagePage, RenderedMessage, SortOrder};
-use qsl_mime::{parse_rfc822, sanitize_email_html, sanitize_email_html_trusted, MessageIdentity};
+use base64::engine::general_purpose::STANDARD as base64_engine;
+use base64::Engine as _;
+use qsl_core::{EmailAddress, FolderRole, MessageFlags, MessageHeaders};
+use qsl_ipc::{DraftId, FolderId, IpcResult, MessageId, MessagePage, RenderedMessage, SortOrder};
+use qsl_mime::{
+    compose::build_rfc5322, parse_rfc822, sanitize_email_html, sanitize_email_html_trusted,
+    MessageIdentity,
+};
 use qsl_storage::{
-    repos::folders as folders_repo, repos::messages as messages_repo, repos::outbox as outbox_repo,
-    repos::remote_content_opt_ins, BlobStore,
+    repos::accounts as accounts_repo, repos::drafts as drafts_repo, repos::folders as folders_repo,
+    repos::messages as messages_repo, repos::outbox as outbox_repo, repos::remote_content_opt_ins,
+    BlobStore,
 };
 use serde::Deserialize;
 use tauri::State;
@@ -550,6 +556,72 @@ pub async fn messages_delete(
         let payload = serde_json::json!({ "ids": ids });
         outbox_repo::enqueue(&*db, &account, "delete_messages", &payload.to_string()).await?;
     }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MessagesSendInput {
+    pub draft_id: DraftId,
+}
+
+/// `messages_send` — convert a saved draft into an outbox row and
+/// drop it on the wire.
+///
+/// Reads the draft from storage, looks up the account's email
+/// address for the From envelope, builds the RFC 5322 byte stream
+/// via `qsl_mime::compose::build_rfc5322`, base64-encodes the
+/// bytes into the outbox payload (so the JSON row stays a single
+/// SQLite text column), and enqueues an `OP_SUBMIT_MESSAGE` row.
+/// The drain worker picks it up and routes through the account's
+/// `MailBackend::submit_message`.
+///
+/// The draft row is deleted on enqueue. Once the bytes are in the
+/// outbox the draft is no longer the source of truth — the queue
+/// row is. If submission DLQs, the user sees a "failed to send"
+/// banner; the bytes are recoverable from the outbox row's
+/// payload.
+#[tauri::command]
+pub async fn messages_send(state: State<'_, AppState>, input: MessagesSendInput) -> IpcResult<()> {
+    let MessagesSendInput { draft_id } = input;
+
+    let db = state.db.lock().await;
+    let draft = drafts_repo::get(&*db, &draft_id).await?;
+    let account = accounts_repo::get(&*db, &draft.account_id).await?;
+
+    let from = EmailAddress {
+        address: account.email_address.clone(),
+        display_name: Some(account.display_name.clone()),
+    };
+
+    let built = build_rfc5322(&draft, &from).map_err(|e| {
+        qsl_ipc::IpcError::new(
+            qsl_ipc::IpcErrorKind::Internal,
+            format!("messages_send: build RFC 5322: {e}"),
+        )
+    })?;
+
+    let payload = serde_json::json!({
+        "message_id": built.message_id,
+        "raw_b64": base64_engine.encode(&built.bytes),
+    });
+
+    outbox_repo::enqueue(
+        &*db,
+        &draft.account_id,
+        qsl_sync::outbox_drain::OP_SUBMIT_MESSAGE,
+        &payload.to_string(),
+    )
+    .await?;
+    drafts_repo::delete(&*db, &draft_id).await?;
+    drop(db);
+
+    tracing::info!(
+        draft = %draft_id.0,
+        account = %draft.account_id.0,
+        message_id = %built.message_id,
+        "messages_send: enqueued submit_message"
+    );
+
     Ok(())
 }
 

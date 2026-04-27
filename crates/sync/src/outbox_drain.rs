@@ -16,6 +16,8 @@
 //! dead-letter state and the engine emits a `SyncEvent` the UI
 //! shows as a "failed to sync" banner.
 
+use base64::engine::general_purpose::STANDARD as base64_engine;
+use base64::Engine as _;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument, warn};
@@ -29,6 +31,10 @@ pub const OP_UPDATE_FLAGS: &str = "update_flags";
 pub const OP_MOVE: &str = "move_messages";
 /// Op-kind tag for `delete_messages` payloads.
 pub const OP_DELETE: &str = "delete_messages";
+/// Op-kind tag for `submit_message` payloads — sends an outgoing
+/// message via the account's submission backend (SMTP for IMAP
+/// accounts, JMAP `EmailSubmission/set` for JMAP accounts).
+pub const OP_SUBMIT_MESSAGE: &str = "submit_message";
 
 /// One drained row's outcome — the engine uses this to decide
 /// whether to emit a UI event for a failure-to-DLQ transition.
@@ -71,6 +77,23 @@ pub struct MovePayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeletePayload {
     pub ids: Vec<MessageId>,
+}
+
+/// JSON payload for `submit_message` rows. The full RFC 5322 byte
+/// stream rides along — drains are dispatched against an
+/// `Arc<dyn MailBackend>` whose `submit_message(raw_rfc822)` does
+/// both SMTP submission and the post-send `APPEND` to Sent. The
+/// `message_id` is the angle-bracket-wrapped Message-ID header
+/// minted by `qsl_mime::compose::build_rfc5322`; the sync engine
+/// uses it to reconcile the eventual server-side row in Sent
+/// without double-rendering the same conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmitMessagePayload {
+    pub message_id: String,
+    /// Base64-encoded RFC 5322 bytes. Encoded so the JSON row in
+    /// SQLite stays tight — a raw `Vec<u8>` would round-trip as a
+    /// JSON array of integers (~3.5x bloat).
+    pub raw_b64: String,
 }
 
 /// Trait the engine implements to hand the worker a backend on
@@ -185,6 +208,14 @@ async fn dispatch(
             let payload: DeletePayload = serde_json::from_str(&entry.payload_json)
                 .map_err(|e| MailError::Parse(format!("outbox.delete_messages payload: {e}")))?;
             backend.delete_messages(&payload.ids).await
+        }
+        OP_SUBMIT_MESSAGE => {
+            let payload: SubmitMessagePayload = serde_json::from_str(&entry.payload_json)
+                .map_err(|e| MailError::Parse(format!("outbox.submit_message payload: {e}")))?;
+            let raw = base64_engine
+                .decode(&payload.raw_b64)
+                .map_err(|e| MailError::Parse(format!("outbox.submit_message base64: {e}")))?;
+            backend.submit_message(&raw).await.map(|_| ())
         }
         other => Err(MailError::Other(format!("outbox: unknown op_kind {other}"))),
     }
