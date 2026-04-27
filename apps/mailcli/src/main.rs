@@ -36,7 +36,10 @@ use tracing::info;
 use qsl_auth::{
     lookup as provider_lookup, refresh_access_token, run_loopback_flow, AuthError, TokenVault,
 };
-use qsl_core::{Account, AccountId, BackendKind, FolderId, MailBackend, MailError};
+use qsl_core::{
+    Account, AccountId, BackendKind, Draft, DraftBodyKind, DraftId, EmailAddress, FolderId,
+    MailBackend, MailError,
+};
 use qsl_imap_client::ImapBackend;
 use qsl_jmap_client::JmapBackend;
 use qsl_storage::{repos, run_migrations, TursoConn};
@@ -88,6 +91,41 @@ enum Command {
 
     /// Sync an account. Phase 0 stub.
     Sync { email: String },
+
+    /// Build an RFC 5322 message and submit it via the account's send
+    /// path (Gmail SMTP+XOAUTH2 for IMAP accounts, JMAP
+    /// `EmailSubmission/set` for Fastmail accounts). Smoke-test path
+    /// for the Phase 2 send pipeline — bypasses the desktop UI and
+    /// the local outbox; calls `MailBackend::submit_message` directly.
+    Send {
+        /// Email address of the previously-added "From" account.
+        from: String,
+
+        /// Recipient. Repeat for multiple addresses.
+        #[arg(long, value_name = "ADDR", required = true)]
+        to: Vec<String>,
+
+        /// Optional Cc. Repeat for multiple addresses.
+        #[arg(long, value_name = "ADDR")]
+        cc: Vec<String>,
+
+        /// Optional Bcc. Repeat for multiple addresses.
+        #[arg(long, value_name = "ADDR")]
+        bcc: Vec<String>,
+
+        /// Subject line.
+        #[arg(long)]
+        subject: String,
+
+        /// Plain-text body (mutually exclusive with `--body-file`).
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+
+        /// Read the plain-text body from a file
+        /// (mutually exclusive with `--body`).
+        #[arg(long, value_name = "PATH", conflicts_with = "body")]
+        body_file: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -155,6 +193,15 @@ async fn run(cli: Cli) -> Result<(), MailcliError> {
         } => list_messages(&email, &folder, limit, &paths).await,
         Command::ShowMessage { id } => show_message(&id, &paths).await,
         Command::Sync { email } => sync_account(&email, &paths).await,
+        Command::Send {
+            from,
+            to,
+            cc,
+            bcc,
+            subject,
+            body,
+            body_file,
+        } => send_message(&from, &to, &cc, &bcc, &subject, body, body_file, &paths).await,
     }
 }
 
@@ -333,10 +380,14 @@ async fn open_backend(account: &Account) -> Result<Box<dyn MailBackend>, Mailcli
                     )))
                 }
             };
-            let backend =
-                JmapBackend::connect(session_url, token_set.access.expose(), account.id.clone())
-                    .await
-                    .map_err(MailcliError::Mail)?;
+            let backend = JmapBackend::connect(
+                session_url,
+                token_set.access.expose(),
+                account.id.clone(),
+                &account.email_address,
+            )
+            .await
+            .map_err(MailcliError::Mail)?;
             Ok(Box::new(backend))
         }
         _ => Err(MailcliError::Usage(format!(
@@ -477,6 +528,84 @@ async fn sync_account(email: &str, paths: &DataPaths) -> Result<(), MailcliError
         duration.as_millis()
     );
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_message(
+    from_email: &str,
+    to: &[String],
+    cc: &[String],
+    bcc: &[String],
+    subject: &str,
+    body: Option<String>,
+    body_file: Option<PathBuf>,
+    paths: &DataPaths,
+) -> Result<(), MailcliError> {
+    let body = match (body, body_file) {
+        (Some(b), None) => b,
+        (None, Some(p)) => std::fs::read_to_string(&p)
+            .map_err(|e| MailcliError::Usage(format!("read --body-file {}: {e}", p.display())))?,
+        (None, None) => {
+            return Err(MailcliError::Usage(
+                "send: provide either --body or --body-file".into(),
+            ))
+        }
+        (Some(_), Some(_)) => {
+            return Err(MailcliError::Usage(
+                "send: --body and --body-file are mutually exclusive".into(),
+            ))
+        }
+    };
+
+    let conn = paths.open_db().await?;
+    let account = resolve_account(&conn, from_email).await?;
+
+    let now = Utc::now();
+    let draft = Draft {
+        id: DraftId(format!("smoke-{}", now.timestamp_nanos_opt().unwrap_or(0))),
+        account_id: account.id.clone(),
+        in_reply_to: None,
+        references: Vec::new(),
+        to: to.iter().map(|s| parse_addr(s)).collect(),
+        cc: cc.iter().map(|s| parse_addr(s)).collect(),
+        bcc: bcc.iter().map(|s| parse_addr(s)).collect(),
+        subject: subject.to_string(),
+        body,
+        body_kind: DraftBodyKind::Plain,
+        attachments: Vec::new(),
+        created_at: now,
+        updated_at: now,
+    };
+    let from = EmailAddress {
+        address: account.email_address.clone(),
+        display_name: Some(account.display_name.clone()),
+    };
+    let built = qsl_mime::compose::build_rfc5322(&draft, &from)
+        .map_err(|e| MailcliError::Usage(format!("build_rfc5322: {e}")))?;
+
+    let backend = open_backend(&account).await?;
+    backend
+        .submit_message(&built.bytes)
+        .await
+        .map_err(MailcliError::Mail)?;
+
+    println!(
+        "Sent {} from {} to {} recipient(s)",
+        built.message_id,
+        account.email_address,
+        to.len() + cc.len() + bcc.len()
+    );
+    Ok(())
+}
+
+/// Parse a CLI address argument into an `EmailAddress`. Accepts a bare
+/// `addr@domain` — display-name parsing (`Name <addr@dom>`) is overkill
+/// for the smoke-test surface and would fight clap's value parsing.
+fn parse_addr(s: &str) -> EmailAddress {
+    EmailAddress {
+        address: s.trim().to_string(),
+        display_name: None,
+    }
 }
 
 // ---------- paths + DB ----------

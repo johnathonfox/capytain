@@ -121,9 +121,13 @@ async fn open(account: &Account) -> Result<Arc<dyn MailBackend>, MailError> {
                     )))
                 }
             };
-            let backend =
-                JmapBackend::connect(session_url, token_set.access.expose(), account.id.clone())
-                    .await?;
+            let backend = JmapBackend::connect(
+                session_url,
+                token_set.access.expose(),
+                account.id.clone(),
+                &account.email_address,
+            )
+            .await?;
             Ok(Arc::new(backend))
         }
         _ => Err(MailError::Other(format!(

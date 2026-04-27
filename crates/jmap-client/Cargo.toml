@@ -13,6 +13,7 @@ publish.workspace = true
 
 [dependencies]
 qsl-core = { workspace = true }
+qsl-mime = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 futures-util = { workspace = true }
@@ -20,6 +21,9 @@ jmap-client = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
