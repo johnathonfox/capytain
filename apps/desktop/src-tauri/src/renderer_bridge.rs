@@ -195,6 +195,18 @@ fn build_servo_for<R: Runtime>(
         parent,
         PhysicalSize::new(READER_INITIAL_WIDTH, READER_INITIAL_HEIGHT),
     )?;
+
+    // The renderer just registered a `WebView` against the shared
+    // Servo runtime under a fresh `webview_id`. Wire that id back to
+    // the parent so the GTK pointer signal handlers know which
+    // popup's webview to dispatch input to. Wire the signal handlers
+    // last — before this point pointer events fall on the floor (the
+    // `webview_id == 0` no-op branch in `qsl_renderer::forward`),
+    // which is fine because the user can't generate input on a window
+    // that isn't visible yet.
+    parent.set_webview_id(renderer.webview_id());
+    LinuxGtkParent::wire_input_forwarding(parent);
+
     Ok(renderer)
 }
 

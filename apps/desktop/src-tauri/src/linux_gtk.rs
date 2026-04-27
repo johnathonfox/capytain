@@ -43,6 +43,7 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use gdk::prelude::*;
@@ -108,6 +109,12 @@ pub struct LinuxGtkParent {
     /// The child widget Servo paints into. Public so callers can
     /// wire `connect_size_allocate` for reader-pane resize events.
     pub drawing_area: gtk::DrawingArea,
+    /// Identifier of the `WebView` registered in `qsl_renderer`'s
+    /// per-thread `WEBVIEWS` map for this parent. Set by
+    /// [`Self::set_webview_id`] right after the renderer is built.
+    /// Stays at `0` until then; signal handlers treat `0` as a
+    /// "no webview yet" no-op.
+    webview_id: AtomicU64,
 }
 
 // SAFETY: GTK widgets are not thread-safe at the type level, but the
@@ -200,54 +207,11 @@ impl LinuxGtkParent {
         drawing_area.set_margin_start(10_000);
         drawing_area.set_margin_top(0);
 
-        // Wire pointer events into Servo's input pipeline. GDK
-        // delivers `(x, y)` in widget-local coordinates in device
-        // pixels — the same units `WebViewPoint::Device` expects.
-        // Each handler returns `Stop` so GTK doesn't bubble the
-        // event back up to the webview underneath.
-        drawing_area.connect_button_press_event(|_w, ev| {
-            let (x, y) = ev.position();
-            qsl_renderer::forward_pointer_button_press(ev.button(), x as f32, y as f32);
-            glib::Propagation::Stop
-        });
-        drawing_area.connect_button_release_event(|_w, ev| {
-            let (x, y) = ev.position();
-            qsl_renderer::forward_pointer_button_release(ev.button(), x as f32, y as f32);
-            glib::Propagation::Stop
-        });
-        drawing_area.connect_motion_notify_event(|_w, ev| {
-            let (x, y) = ev.position();
-            qsl_renderer::forward_pointer_move(x as f32, y as f32);
-            glib::Propagation::Stop
-        });
-        drawing_area.connect_leave_notify_event(|_w, _ev| {
-            qsl_renderer::forward_pointer_left_viewport();
-            glib::Propagation::Stop
-        });
-        // Wheel/scroll forwarding. GDK reports either a discrete
-        // `ScrollDirection::{Up,Down,Left,Right}` (mouse wheel notch)
-        // or `ScrollDirection::Smooth` with `delta()` in scroll units
-        // (touchpad two-finger). GDK's sign convention is "user wants
-        // to move the viewport in this direction"; Servo's
-        // `WheelDelta` says "view scrolls in this direction" with the
-        // opposite sign, so we negate before forwarding.
-        drawing_area.connect_scroll_event(|_w, ev| {
-            use gdk::ScrollDirection;
-            let (x, y) = ev.position();
-            let (dx, dy) = match ev.direction() {
-                ScrollDirection::Up => (0.0_f32, 1.0_f32),
-                ScrollDirection::Down => (0.0, -1.0),
-                ScrollDirection::Left => (1.0, 0.0),
-                ScrollDirection::Right => (-1.0, 0.0),
-                ScrollDirection::Smooth => {
-                    let (sdx, sdy) = ev.delta();
-                    (-(sdx as f32), -(sdy as f32))
-                }
-                _ => (0.0, 0.0),
-            };
-            qsl_renderer::forward_pointer_wheel(dx, dy, x as f32, y as f32);
-            glib::Propagation::Stop
-        });
+        // Pointer signal handlers are wired in
+        // [`Self::wire_input_forwarding`] after the renderer assigns a
+        // webview_id. Wiring them here would mean the closures had no
+        // way to identify which `WebView` to forward to, since the
+        // renderer is constructed strictly after this function returns.
 
         overlay.add_overlay(&drawing_area);
 
@@ -318,7 +282,89 @@ impl LinuxGtkParent {
         Ok(Self {
             _overlay: overlay,
             drawing_area,
+            webview_id: AtomicU64::new(0),
         })
+    }
+
+    /// Record the `webview_id` for this parent's renderer. Called by
+    /// the renderer-bridge code immediately after `ServoRenderer::new_linux`
+    /// returns. Once set, GTK signal handlers wired by
+    /// [`Self::wire_input_forwarding`] forward pointer events to that
+    /// id; before this is called signal handlers no-op via the
+    /// `webview_id == 0` early-return inside `qsl_renderer::forward`.
+    pub fn set_webview_id(&self, id: u64) {
+        self.webview_id.store(id, Ordering::Relaxed);
+    }
+
+    /// Wire GTK pointer signal handlers to forward into Servo. Must
+    /// be called once after the parent has been leaked into
+    /// `'static` storage and registered against a `webview_id`. The
+    /// closures capture `&'static LinuxGtkParent` so they can re-read
+    /// the id atomically on every event — letting them survive the
+    /// brief gap between widget construction and renderer install
+    /// without dispatching to a stale id.
+    pub fn wire_input_forwarding(parent: &'static LinuxGtkParent) {
+        // Wire pointer events into Servo's input pipeline. GDK
+        // delivers `(x, y)` in widget-local coordinates in device
+        // pixels — the same units `WebViewPoint::Device` expects.
+        // Each handler returns `Stop` so GTK doesn't bubble the
+        // event back up to the webview underneath.
+        parent
+            .drawing_area
+            .connect_button_press_event(move |_w, ev| {
+                let id = parent.webview_id.load(Ordering::Relaxed);
+                let (x, y) = ev.position();
+                qsl_renderer::forward_pointer_button_press(id, ev.button(), x as f32, y as f32);
+                glib::Propagation::Stop
+            });
+        parent
+            .drawing_area
+            .connect_button_release_event(move |_w, ev| {
+                let id = parent.webview_id.load(Ordering::Relaxed);
+                let (x, y) = ev.position();
+                qsl_renderer::forward_pointer_button_release(id, ev.button(), x as f32, y as f32);
+                glib::Propagation::Stop
+            });
+        parent
+            .drawing_area
+            .connect_motion_notify_event(move |_w, ev| {
+                let id = parent.webview_id.load(Ordering::Relaxed);
+                let (x, y) = ev.position();
+                qsl_renderer::forward_pointer_move(id, x as f32, y as f32);
+                glib::Propagation::Stop
+            });
+        parent
+            .drawing_area
+            .connect_leave_notify_event(move |_w, _ev| {
+                let id = parent.webview_id.load(Ordering::Relaxed);
+                qsl_renderer::forward_pointer_left_viewport(id);
+                glib::Propagation::Stop
+            });
+        // Wheel/scroll forwarding. GDK reports either a discrete
+        // `ScrollDirection::{Up,Down,Left,Right}` (mouse wheel notch)
+        // or `ScrollDirection::Smooth` with `delta()` in scroll units
+        // (touchpad two-finger). GDK's sign convention is "user wants
+        // to move the viewport in this direction"; Servo's
+        // `WheelDelta` says "view scrolls in this direction" with the
+        // opposite sign, so we negate before forwarding.
+        parent.drawing_area.connect_scroll_event(move |_w, ev| {
+            use gdk::ScrollDirection;
+            let id = parent.webview_id.load(Ordering::Relaxed);
+            let (x, y) = ev.position();
+            let (dx, dy) = match ev.direction() {
+                ScrollDirection::Up => (0.0_f32, 1.0_f32),
+                ScrollDirection::Down => (0.0, -1.0),
+                ScrollDirection::Left => (1.0, 0.0),
+                ScrollDirection::Right => (-1.0, 0.0),
+                ScrollDirection::Smooth => {
+                    let (sdx, sdy) = ev.delta();
+                    (-(sdx as f32), -(sdy as f32))
+                }
+                _ => (0.0, 0.0),
+            };
+            qsl_renderer::forward_pointer_wheel(id, dx, dy, x as f32, y as f32);
+            glib::Propagation::Stop
+        });
     }
 
     /// Move and resize the DrawingArea to overlap the reader-body

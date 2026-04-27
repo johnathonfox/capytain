@@ -8,12 +8,13 @@
 //! ```text
 //! ┌─── any thread ────────────────┐       ┌────── main thread ─────────┐
 //! │                               │       │                            │
-//! │  ServoRenderer (Send + Sync)  │──────►│  MAIN_THREAD_STATE         │
-//! │   • Arc<dyn MainThreadDispatch│  main │    thread_local<RefCell>   │
-//! │   • Arc<Mutex<LinkCb>>        │ thread│    • Rc<Servo>             │
-//! │   • AtomicU64 handle counter  │       │    • WebView               │
+//! │  ServoRenderer (Send + Sync)  │──────►│  SERVO_RUNTIME (singleton) │
+//! │   • Arc<dyn MainThreadDispatch│  main │    Rc<Servo>               │
+//! │   • Arc<Mutex<LinkCb>>        │ thread│                            │
+//! │   • AtomicU64 handle counter  │       │  WEBVIEWS (id → state)     │
+//! │   • u64 webview_id            │       │    • WebView               │
 //! │                               │       │    • Rc<WindowRenderingCtx>│
-//! │                               │       │    • Rc<QslDelegate>  │
+//! │                               │       │    • Rc<QslDelegate>       │
 //! └───────────────────────────────┘       └────────────────────────────┘
 //! ```
 //!
@@ -24,9 +25,13 @@
 //!
 //! 1. [`ServoRenderer`] — a Send + Sync proxy that downstream code (the
 //!    Tauri desktop app) stores and calls from any thread.
-//! 2. [`MainThreadState`] — the actual Servo state, stored in a
-//!    `thread_local!` on whatever thread called `new_linux` / `new_macos`
-//!    (the Tauri main thread in production).
+//! 2. Two main-thread `thread_local!`s: `SERVO_RUNTIME` (one `Rc<Servo>`
+//!    for the process — `servo_config::opts::OPTIONS` is a process-global
+//!    `OnceCell` and would panic on a second `ServoBuilder::build`) and
+//!    `WEBVIEWS` (one entry per popup, keyed by the `webview_id` carried
+//!    on each `ServoRenderer`). Each entry owns its own `WebView`,
+//!    `WindowRenderingContext`, and delegate; the runtime's
+//!    `spin_event_loop` services every webview at once.
 //!
 //! Calls on `ServoRenderer` marshal work to the main thread via the
 //! [`MainThreadDispatch`] trait object supplied by the caller. The caller
@@ -34,6 +39,7 @@
 //! which is platform-agnostic across macOS / Windows / Linux.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -161,13 +167,15 @@ pub enum RendererError {
 /// Servo-backed `EmailRenderer`. See module docs for the architecture.
 ///
 /// All fields are `Send + Sync`; the real Servo state lives in
-/// `MAIN_THREAD_STATE` on whatever thread `new_linux` / `new_macos` was
-/// called from.
+/// `WEBVIEWS` on whatever thread `new_linux` / `new_macos` was called
+/// from, keyed by [`Self::webview_id`]. The shared Servo runtime lives
+/// in `SERVO_RUNTIME` on the same thread.
 pub struct ServoRenderer {
     dispatch: Arc<dyn MainThreadDispatch>,
     link_cb: Arc<Mutex<LinkCb>>,
     cursor_cb: Arc<Mutex<CursorCb>>,
     next_handle: AtomicU64,
+    webview_id: u64,
 }
 
 impl ServoRenderer {
@@ -177,31 +185,72 @@ impl ServoRenderer {
     pub fn on_cursor_change(&mut self, cb: Box<dyn FnMut(servo::Cursor) + Send + 'static>) {
         *self.cursor_cb.lock().expect("cursor_cb poisoned") = Some(cb);
     }
+
+    /// Identifier for this renderer's `WebView` inside the per-thread
+    /// `WEBVIEWS` registry. The desktop crate threads this id back into
+    /// [`forward_pointer_button_press`] etc. so GTK signal handlers
+    /// dispatch input to the correct popup window.
+    pub fn webview_id(&self) -> u64 {
+        self.webview_id
+    }
 }
 
+/// Process-global counter that hands out webview ids. Starts at 1 so
+/// `0` can stand in as "no webview yet" inside `LinuxGtkParent`'s
+/// `AtomicU64` slot before the renderer is constructed.
+static NEXT_WEBVIEW_ID: AtomicU64 = AtomicU64::new(1);
+
 impl ServoRenderer {
-    /// Common bit: build the `MainThreadState` from an already-constructed
-    /// rendering context. Called from every platform-specific constructor
+    /// Common bit: build (or reuse) the shared Servo runtime, attach a
+    /// new `WebView` for the supplied rendering context, and register
+    /// it in the per-thread `WEBVIEWS` map under a freshly-allocated
+    /// `webview_id`. Called from every platform-specific constructor
     /// after the context has been wired up. Must be on the main thread.
+    ///
+    /// The `dispatch` argument is consumed for the `EventLoopWaker`
+    /// only on the very first call (when the Servo runtime is
+    /// constructed); subsequent calls reuse the runtime that the first
+    /// dispatcher already wired up. In practice every dispatcher in
+    /// QSL is a `TauriDispatcher` cloning the same `AppHandle`, so
+    /// "the first one wins" is functionally identical to "use mine."
     fn install_state_on_main_thread(
         rendering_context: Rc<WindowRenderingContext>,
         dispatch: Arc<dyn MainThreadDispatch>,
         link_cb: Arc<Mutex<LinkCb>>,
         cursor_cb: Arc<Mutex<CursorCb>>,
-    ) {
-        let waker: Box<dyn EventLoopWaker> = Box::new(DispatchingWaker {
-            dispatch: Arc::clone(&dispatch),
+    ) -> u64 {
+        // Bootstrap the process-global Servo runtime on first call.
+        // `servo_config::opts::OPTIONS` is a `OnceCell` initialized
+        // inside `ServoBuilder::build`; calling `build` a second time
+        // panics with "Already initialized" (servo-config 0.1.0
+        // opts.rs:246), so we hold exactly one `Rc<Servo>` for the
+        // life of the process and clone it for every additional
+        // `WebView`.
+        SERVO_RUNTIME.with(|slot| {
+            let mut s = slot.borrow_mut();
+            if s.is_none() {
+                let waker: Box<dyn EventLoopWaker> = Box::new(DispatchingWaker {
+                    dispatch: Arc::clone(&dispatch),
+                });
+                let mut preferences = Preferences::default();
+                apply_reader_pane_preferences(&mut preferences);
+                let servo = Rc::new(
+                    ServoBuilder::default()
+                        .preferences(preferences)
+                        .event_loop_waker(waker)
+                        .build(),
+                );
+                *s = Some(servo);
+            }
         });
 
-        let mut preferences = Preferences::default();
-        apply_reader_pane_preferences(&mut preferences);
-
-        let servo = Rc::new(
-            ServoBuilder::default()
-                .preferences(preferences)
-                .event_loop_waker(waker)
-                .build(),
-        );
+        let servo: Rc<Servo> = SERVO_RUNTIME.with(|slot| {
+            Rc::clone(
+                slot.borrow()
+                    .as_ref()
+                    .expect("SERVO_RUNTIME initialized just above"),
+            )
+        });
 
         let delegate = Rc::new(QslDelegate::new(
             Rc::clone(&rendering_context),
@@ -216,14 +265,18 @@ impl ServoRenderer {
         webview.focus();
         webview.show();
 
-        MAIN_THREAD_STATE.with(|cell| {
-            *cell.borrow_mut() = Some(MainThreadState {
-                servo,
-                webview,
-                rendering_context,
-                _delegate: delegate,
-            });
+        let id = NEXT_WEBVIEW_ID.fetch_add(1, Ordering::Relaxed);
+        WEBVIEWS.with(|cell| {
+            cell.borrow_mut().insert(
+                id,
+                WebViewState {
+                    webview,
+                    rendering_context,
+                    _delegate: delegate,
+                },
+            );
         });
+        id
     }
 }
 
@@ -243,9 +296,10 @@ impl EmailRenderer for ServoRenderer {
             }
         };
 
+        let id = self.webview_id;
         self.dispatch.dispatch(Box::new(move || {
-            MAIN_THREAD_STATE.with(|cell| {
-                if let Some(state) = cell.borrow().as_ref() {
+            WEBVIEWS.with(|cell| {
+                if let Some(state) = cell.borrow().get(&id) {
                     state.webview.load(data_url);
                 }
             });
@@ -266,9 +320,10 @@ impl EmailRenderer for ServoRenderer {
         // widget but Servo keeps painting into the original
         // PhysicalSize. Marshal onto the main thread because the
         // WebView API is `!Send`.
+        let id = self.webview_id;
         self.dispatch.dispatch(Box::new(move || {
-            MAIN_THREAD_STATE.with(|cell| {
-                if let Some(state) = cell.borrow().as_ref() {
+            WEBVIEWS.with(|cell| {
+                if let Some(state) = cell.borrow().get(&id) {
                     state.webview.resize(size);
                 }
             });
@@ -277,9 +332,10 @@ impl EmailRenderer for ServoRenderer {
 
     fn clear(&mut self) {
         let empty_url = url::Url::parse("about:blank").expect("about:blank is a valid URL");
+        let id = self.webview_id;
         self.dispatch.dispatch(Box::new(move || {
-            MAIN_THREAD_STATE.with(|cell| {
-                if let Some(state) = cell.borrow().as_ref() {
+            WEBVIEWS.with(|cell| {
+                if let Some(state) = cell.borrow().get(&id) {
                     state.webview.load(empty_url);
                 }
             });
@@ -287,18 +343,24 @@ impl EmailRenderer for ServoRenderer {
     }
 
     fn destroy(&mut self) {
+        let id = self.webview_id;
         self.dispatch.dispatch(Box::new(move || {
-            MAIN_THREAD_STATE.with(|cell| {
-                if let Some(state) = cell.borrow_mut().take() {
-                    // Servo 0.1.0 exposes no explicit shutdown API — the
-                    // engine relies on Drop. Pump the event loop a few
-                    // times so in-flight messages settle before the Rc
-                    // goes out of scope at the end of this closure.
-                    for _ in 0..5 {
-                        state.servo.spin_event_loop();
+            let removed = WEBVIEWS.with(|cell| cell.borrow_mut().remove(&id));
+            if removed.is_some() {
+                // Servo 0.1.0 exposes no explicit shutdown API — the
+                // engine relies on Drop. Pump the runtime's event loop
+                // a few times so in-flight messages settle before the
+                // entry's Rcs go out of scope at the end of this
+                // closure. The runtime itself stays alive for the
+                // lifetime of the process.
+                SERVO_RUNTIME.with(|s| {
+                    if let Some(servo) = s.borrow().as_ref() {
+                        for _ in 0..5 {
+                            servo.spin_event_loop();
+                        }
                     }
-                }
-            });
+                });
+            }
         }));
     }
 }
@@ -310,15 +372,23 @@ impl EmailRenderer for ServoRenderer {
 use std::rc::Rc;
 
 thread_local! {
-    /// The Servo engine, webview, and rendering context. Populated by a
+    /// The shared Servo runtime. Populated by the first
     /// platform-specific constructor (`new_linux`, `new_macos`) on the
-    /// thread that owns the Tauri event loop; never touched from any
-    /// other thread.
-    static MAIN_THREAD_STATE: RefCell<Option<MainThreadState>> = const { RefCell::new(None) };
+    /// thread that owns the Tauri event loop; reused on every
+    /// subsequent constructor call. `servo_config::opts::OPTIONS` is a
+    /// process-global `OnceCell` so a second `ServoBuilder::build`
+    /// would panic with "Already initialized" — see opts.rs:246 in
+    /// servo-config 0.1.0.
+    static SERVO_RUNTIME: RefCell<Option<Rc<Servo>>> = const { RefCell::new(None) };
+
+    /// One entry per active `WebView`, keyed by `webview_id`. The main
+    /// reader and every popup window each get their own entry; all
+    /// share the single `SERVO_RUNTIME` above. `spin_event_loop` is a
+    /// runtime-level call that services every webview at once.
+    static WEBVIEWS: RefCell<HashMap<u64, WebViewState>> = RefCell::new(HashMap::new());
 }
 
-struct MainThreadState {
-    servo: Rc<Servo>,
+struct WebViewState {
     webview: WebView,
     rendering_context: Rc<WindowRenderingContext>,
     _delegate: Rc<QslDelegate>,
@@ -340,31 +410,33 @@ struct MainThreadState {
 //
 // 1. Are public free functions so the desktop crate doesn't need to
 //    pull `servo`'s internal embedder-traits types into scope.
-// 2. Run only on the main thread — they read `MAIN_THREAD_STATE`
-//    directly without going through `MainThreadDispatch`. The GTK
-//    signal handlers fire on the main thread by definition, so this
-//    is sound.
-// 3. Are no-ops if the renderer isn't installed (ServoRenderer never
-//    constructed, install_state_on_main_thread never called).
+// 2. Run only on the main thread — they read `WEBVIEWS` directly
+//    without going through `MainThreadDispatch`. The GTK signal
+//    handlers fire on the main thread by definition, so this is sound.
+// 3. Are no-ops if no `WEBVIEWS` entry matches `webview_id`. The
+//    `LinuxGtkParent` carries an `AtomicU64` slot that's left at `0`
+//    until the renderer registers its id, so signal handlers fire
+//    harmlessly during the brief window between widget realization
+//    and renderer construction.
 
 /// Forward a pointer-button press at device-pixel coordinates `(x, y)`
 /// (relative to the WebView's surface) to Servo. `button` is a GDK
 /// button code (1=left, 2=middle, 3=right).
-pub fn forward_pointer_button_press(button: u32, x: f32, y: f32) {
-    forward_button(button, MouseButtonAction::Down, x, y);
+pub fn forward_pointer_button_press(webview_id: u64, button: u32, x: f32, y: f32) {
+    forward_button(webview_id, button, MouseButtonAction::Down, x, y);
 }
 
 /// Forward a pointer-button release. See [`forward_pointer_button_press`].
-pub fn forward_pointer_button_release(button: u32, x: f32, y: f32) {
-    forward_button(button, MouseButtonAction::Up, x, y);
+pub fn forward_pointer_button_release(webview_id: u64, button: u32, x: f32, y: f32) {
+    forward_button(webview_id, button, MouseButtonAction::Up, x, y);
 }
 
 /// Forward a pointer-move event at device-pixel coordinates `(x, y)`.
-pub fn forward_pointer_move(x: f32, y: f32) {
+pub fn forward_pointer_move(webview_id: u64, x: f32, y: f32) {
     let event = InputEvent::MouseMove(MouseMoveEvent::new(WebViewPoint::Device(DevicePoint::new(
         x, y,
     ))));
-    forward(event);
+    forward(webview_id, event);
 }
 
 /// Forward a wheel/scroll event. `(dx, dy)` are in the line-mode
@@ -378,7 +450,7 @@ pub fn forward_pointer_move(x: f32, y: f32) {
 /// the wheel event. The caller (the GTK signal handler) is
 /// responsible for converting GDK's "user wants to scroll" sign
 /// convention into Servo's "view moves" convention before calling.
-pub fn forward_pointer_wheel(dx: f32, dy: f32, x: f32, y: f32) {
+pub fn forward_pointer_wheel(webview_id: u64, dx: f32, dy: f32, x: f32, y: f32) {
     let event = InputEvent::Wheel(WheelEvent::new(
         WheelDelta {
             x: dx as f64,
@@ -388,20 +460,20 @@ pub fn forward_pointer_wheel(dx: f32, dy: f32, x: f32, y: f32) {
         },
         WebViewPoint::Device(DevicePoint::new(x, y)),
     ));
-    forward(event);
+    forward(webview_id, event);
 }
 
 /// Forward a "pointer left the surface" event. The host widget calls
 /// this on `leave-notify-event` so Servo can reset hover state, drop
 /// any in-flight drag, and stop animating the cursor.
-pub fn forward_pointer_left_viewport() {
+pub fn forward_pointer_left_viewport(webview_id: u64) {
     let event = InputEvent::MouseLeftViewport(MouseLeftViewportEvent {
         focus_moving_to_another_iframe: false,
     });
-    forward(event);
+    forward(webview_id, event);
 }
 
-fn forward_button(button: u32, action: MouseButtonAction, x: f32, y: f32) {
+fn forward_button(webview_id: u64, button: u32, action: MouseButtonAction, x: f32, y: f32) {
     // GDK buttons: 1=left, 2=middle, 3=right, 8=back, 9=forward.
     // Servo's `MouseButton::from(u64)` uses 0=left, 1=middle, 2=right
     // — different numbering, so map explicitly rather than rely on
@@ -419,12 +491,15 @@ fn forward_button(button: u32, action: MouseButtonAction, x: f32, y: f32) {
         mapped,
         WebViewPoint::Device(DevicePoint::new(x, y)),
     ));
-    forward(event);
+    forward(webview_id, event);
 }
 
-fn forward(event: InputEvent) {
-    MAIN_THREAD_STATE.with(|cell| {
-        if let Some(state) = cell.borrow().as_ref() {
+fn forward(webview_id: u64, event: InputEvent) {
+    if webview_id == 0 {
+        return;
+    }
+    WEBVIEWS.with(|cell| {
+        if let Some(state) = cell.borrow().get(&webview_id) {
             state.webview.notify_input_event(event);
         }
     });
@@ -447,12 +522,22 @@ impl EventLoopWaker for DispatchingWaker {
 
     fn wake(&self) {
         self.dispatch.dispatch(Box::new(|| {
-            MAIN_THREAD_STATE.with(|cell| {
-                if let Some(state) = cell.borrow().as_ref() {
-                    state.servo.spin_event_loop();
-                    // After spin, the delegate will have called
-                    // webview.paint() if a frame is ready; surface the
-                    // paint to the display.
+            // Servo runs one event loop for the whole runtime; spinning
+            // it dispatches paints to whichever webviews have new
+            // frames pending. Each delegate's
+            // `notify_new_frame_ready` already calls
+            // `rendering_context.present()` for its own surface during
+            // the spin, but we re-present every registered context
+            // afterwards as a backstop — matches the single-webview
+            // pre-refactor behavior and is harmless when nothing
+            // changed.
+            SERVO_RUNTIME.with(|s| {
+                if let Some(servo) = s.borrow().as_ref() {
+                    servo.spin_event_loop();
+                }
+            });
+            WEBVIEWS.with(|m| {
+                for state in m.borrow().values() {
                     state.rendering_context.present();
                 }
             });
