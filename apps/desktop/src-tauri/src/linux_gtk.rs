@@ -246,9 +246,19 @@ impl LinuxGtkParent {
         // `WindowRenderingContext` gets a 1x1 surface handle and
         // ends up creating its own top-level wl_surface to render
         // into (visible as a separate window).
+        //
+        // 100ms is six compositor frames at 60Hz — enough for any
+        // realistic surface to settle. The previous 2-second cap was
+        // a "worst case" guess that ate ~500ms per popup open
+        // (measured: 22 iters × ~22ms each). If the deadline
+        // expires the install proceeds with whatever size GDK has;
+        // `reader_set_position` from Dioxus's ResizeObserver
+        // typically lands within ~200ms after boot and pushes the
+        // real rect, after which `WebView::resize` corrects Servo's
+        // surface.
         let t_layout_start = std::time::Instant::now();
         let mut layout_iters = 0u32;
-        let layout_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let layout_deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
         while std::time::Instant::now() < layout_deadline {
             let size = drawing_area
                 .window()
