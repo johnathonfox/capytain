@@ -600,6 +600,11 @@ ul {
   height: 100%;
   display: flex;
   flex-direction: column;
+  /* Belt-and-suspenders: the parent `.app-shell > *` rule already
+   * clips, but making this explicit prevents a faint right-edge
+   * sliver if Servo's GTK overlay paints a fraction of a pixel past
+   * the `.reader-body-fill` bounding rect (backlog item 2). */
+  overflow: hidden;
 }
 
 .reader-empty {
