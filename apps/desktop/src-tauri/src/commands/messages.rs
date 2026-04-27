@@ -180,6 +180,7 @@ pub async fn messages_get(
     state: State<'_, AppState>,
     input: MessagesGetInput,
 ) -> IpcResult<RenderedMessage> {
+    tracing::debug!(id = %input.id.0, "messages_get");
     let db = state.db.lock().await;
     let headers = messages_repo::get(&*db, &input.id).await?;
     let body_path = messages_repo::body_path(&*db, &input.id).await?;
@@ -196,6 +197,11 @@ pub async fn messages_get(
             _ => false,
         }
     };
+    tracing::debug!(
+        id = %input.id.0,
+        sender_is_trusted,
+        "messages_get sanitize path"
+    );
     drop(db);
 
     let blobs = BlobStore::new(state.data_dir.join("blobs"));
