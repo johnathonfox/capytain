@@ -55,17 +55,16 @@ pub struct AppState {
     #[allow(dead_code)] // consumed by later commands in week 5 part 2
     pub data_dir: PathBuf,
 
-    /// Servo-backed email renderer, if the platform supports it. `None`
-    /// when the `servo` feature is off (fallback path for environments
-    /// without the Servo native toolchain) or when `new_linux` /
-    /// `new_macos` failed at startup (e.g. unsupported window handle
-    /// variant). Consumers MUST handle the `None` case — degrade the
-    /// reader pane rather than crashing.
+    /// Servo-backed email renderers, keyed by Tauri window label
+    /// (`"main"`, `"reader-<msg_id>"`, …). Empty when the `servo`
+    /// feature is off; otherwise `"main"` is populated at setup time
+    /// and popup-window labels are populated lazily on first
+    /// `reader_render` for that label. Consumers MUST handle a
+    /// missing key — degrade the reader pane rather than crashing.
     ///
-    /// Wrapped in `tokio::sync::Mutex` even though the renderer is
-    /// `Send + Sync`: trait methods take `&mut self`, so exclusive
-    /// access is required.
-    pub servo_renderer: Mutex<Option<Box<dyn EmailRenderer>>>,
+    /// Wrapped in `tokio::sync::Mutex` because trait methods on the
+    /// renderer take `&mut self`, so exclusive access is required.
+    pub servo_renderers: Mutex<HashMap<String, Box<dyn EmailRenderer>>>,
 
     /// Fired by the `ui_ready` IPC command once the Dioxus app has
     /// mounted in the webview. The sync engine awaits this (with a
@@ -88,7 +87,7 @@ impl AppState {
             sync_db: Arc::new(Mutex::new(sync_db)),
             backends: Mutex::new(HashMap::new()),
             data_dir,
-            servo_renderer: Mutex::new(None),
+            servo_renderers: Mutex::new(HashMap::new()),
             ui_ready: Arc::new(Notify::new()),
         }
     }

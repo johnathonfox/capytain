@@ -40,9 +40,10 @@
 //! for why the native NVIDIA EGL-Wayland path is broken and we rely
 //! on the Mesa llvmpipe fallback (`qsl_renderer::apply_nvidia_wayland_workaround`).
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 use gdk::prelude::*;
 use glib::translate::ToGlibPtr;
@@ -52,26 +53,49 @@ use raw_window_handle::{
     WaylandDisplayHandle, WaylandWindowHandle, WindowHandle, XlibDisplayHandle, XlibWindowHandle,
 };
 
-/// Process-wide handle to the installed `LinuxGtkParent`. Tauri
-/// commands reach the GTK objects through this — `LinuxGtkParent`
-/// is `!Send` (GTK widgets live on the main thread) so it can't sit
-/// in `AppState`. The reference is `&'static` because
-/// `install_servo_renderer` `Box::leak`s the parent; that matches
-/// GTK's "lives until the process exits" requirement exactly.
-static GTK_PARENT: OnceLock<&'static LinuxGtkParent> = OnceLock::new();
+/// Per-window registry of leaked `LinuxGtkParent`s, keyed by Tauri
+/// window label (`"main"`, `"reader-<msg_id>"`, …). Each registered
+/// entry was installed by `install_servo_renderer_for_window` and
+/// stays alive for the lifetime of the process — see the `Box::leak`
+/// rationale on `LinuxGtkParent::install`. `Mutex` rather than
+/// `RwLock` because contention is nil and the Mutex API is simpler.
+static GTK_PARENTS: Mutex<Option<HashMap<String, &'static LinuxGtkParent>>> = Mutex::new(None);
 
-/// Get the installed parent, if any. Commands that depend on Servo
-/// being live (position updates, surface clear) use this and silently
-/// no-op when Servo isn't installed (servo feature off, or
-/// install-time failure on this platform).
-pub fn parent() -> Option<&'static LinuxGtkParent> {
-    GTK_PARENT.get().copied()
+fn with_registry<R>(f: impl FnOnce(&mut HashMap<String, &'static LinuxGtkParent>) -> R) -> R {
+    let mut guard = GTK_PARENTS.lock().expect("GTK_PARENTS mutex poisoned");
+    let map = guard.get_or_insert_with(HashMap::new);
+    f(map)
 }
 
-/// Register the leaked parent so [`parent`] can return it. Called
-/// once during Servo install.
-pub fn register_parent(p: &'static LinuxGtkParent) {
-    let _ = GTK_PARENT.set(p);
+/// Get the registered parent for a window label, if any. Commands
+/// that depend on Servo being live for that window (position updates,
+/// surface clear) use this and silently no-op when Servo isn't
+/// installed for the calling window.
+pub fn parent(label: &str) -> Option<&'static LinuxGtkParent> {
+    with_registry(|m| m.get(label).copied())
+}
+
+/// Register the leaked parent under a window label. Overwrites any
+/// prior entry for the same label (idempotent on re-install paths).
+pub fn register_parent(label: &str, p: &'static LinuxGtkParent) {
+    with_registry(|m| {
+        m.insert(label.to_string(), p);
+    });
+}
+
+/// Drop the registry entry for a label. The pointed-at
+/// `LinuxGtkParent` is `Box::leak`'d and stays in memory; this just
+/// removes the lookup so future `reader_*` IPC calls for that label
+/// no-op. Used by the popup-window close handler.
+pub fn remove_parent(label: &str) {
+    with_registry(|m| {
+        m.remove(label);
+    });
+}
+
+#[cfg(test)]
+fn clear_registry_for_test() {
+    with_registry(|m| m.clear());
 }
 
 /// Reparented Tauri main window. Holds both the Overlay and the new
@@ -445,5 +469,40 @@ fn extract_x11(
             RawDisplayHandle::Xlib(display_handle),
             RawWindowHandle::Xlib(window_handle),
         )
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // We can't construct a real LinuxGtkParent in a unit test (GTK
+    // needs a display + main loop running), so we exercise the
+    // registry's address-keyed bookkeeping with a sentinel pointer
+    // we never dereference.
+    fn fresh_sentinel() -> &'static LinuxGtkParent {
+        // SAFETY: the registry only stores and returns the pointer.
+        // No code path in these tests dereferences it.
+        unsafe { &*std::ptr::NonNull::<LinuxGtkParent>::dangling().as_ptr() }
+    }
+
+    #[test]
+    fn parent_registry_round_trip() {
+        clear_registry_for_test();
+        let p = fresh_sentinel();
+        register_parent("main", p);
+        assert!(parent("main").is_some());
+        assert!(parent("missing").is_none());
+        remove_parent("main");
+        assert!(parent("main").is_none());
+    }
+
+    #[test]
+    fn registry_overwrites_same_label() {
+        clear_registry_for_test();
+        register_parent("main", fresh_sentinel());
+        register_parent("main", fresh_sentinel());
+        assert!(parent("main").is_some());
     }
 }
