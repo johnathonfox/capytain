@@ -51,9 +51,16 @@ Pre-MCP cleanup pass. Each item is independently mergeable. Order is roughly pri
 
 ## 4. Remote image gating (privacy/tracking)
 
-**Symptom:** HTML emails with `<img src="https://...">` load remote images on render. Visible in the Allstate email — both the hero image and the family photo are remote URLs that fetch on open. This means senders can track open events and confirm the email address is active.
+**Status: Partial.** Sanitizer-side blocking is now complete:
+- `<img src>`, `srcset`, `poster`, `background` (Phase 1 Week 8)
+- Inline `style="background-image: url(...)"` and `style="background: url(...) ..."` (this pass)
+- `<link rel="stylesheet" href="...">` stripped by the sanitizer
 
-**Fix:**
+`RenderedMessage.remote_content_blocked` is plumbed end-to-end and a per-sender allowlist exists in `remote_content_opt_ins`. The UI banner ("Images blocked. [Load images] [Always load from this sender]") and dimension-preserving placeholder boxes are deferred to a follow-up — tracked in `docs/KNOWN_ISSUES.md`.
+
+**Original symptom:** HTML emails with `<img src="https://...">` load remote images on render. Visible in the Allstate email — both the hero image and the family photo are remote URLs that fetch on open. This means senders can track open events and confirm the email address is active.
+
+**Original fix scope** (kept for reference; banner/placeholders are the deferred half):
 - Default to **not** loading remote images
 - Show a per-message banner: "Images blocked. [Load images] [Always load from this sender]"
 - Replace blocked `<img>` tags with placeholder boxes the same dimensions (read `width`/`height` attrs; fall back to a fixed placeholder if missing) so layout doesn't reflow when loaded
@@ -61,9 +68,9 @@ Pre-MCP cleanup pass. Each item is independently mergeable. Order is roughly pri
 - Inline images (`cid:` references) load normally — they're embedded in the message, not remote
 - `data:` URIs load normally — also embedded
 
-**Edge cases:**
-- CSS `background-image: url(...)` is the same problem in a different syntax. The HTML sanitizer should strip remote URLs from inline styles too, or rewrite them to `none` until the user opts in.
-- `<link rel="stylesheet" href="...">` should be stripped entirely by the sanitizer (already in scope per the MCP spec, worth confirming it applies to UI rendering too).
+**Edge cases (resolved):**
+- CSS `background-image: url(...)` is the same problem in a different syntax. The HTML sanitizer now strips remote URLs from inline styles too — `filter_inline_style` walks the declaration list and drops any whose `url(...)` argument matches a block rule.
+- `<link rel="stylesheet" href="...">` is stripped entirely by the sanitizer (`rm_tags = ["...", "link"]`).
 
 **Verification:** Open the Allstate email; images don't load, banner appears, layout is preserved. Click "Load images"; images load. Click "Always load from this sender"; close and reopen the email; images load automatically.
 
@@ -89,17 +96,9 @@ Already covered by #3 if you handle it at the display-name layer. Listing separa
 
 ## 7. Verify unread count accuracy
 
-**Symptom:** Inbox shows "86 of 86 · 0 unread" but earlier sidebar screenshot showed "INBOX 6" suggesting 6 unread. Inconsistent.
+**Status: Done (audit only — already correctly wired).** Both the sidebar and the message-list header read unread counts via the same `count_unread_by_folder` repo function (`crates/storage/src/repos/messages.rs:252`). On the IPC side, `folders_list` recomputes the count live per folder before returning (`apps/desktop/src-tauri/src/commands/folders.rs:35-49`), and `messages_list` / `messages_list_unified` call the same helper. On the UI side, both the sidebar's `folders_list` resource and each message-list resource include `sync_tick` in their `use_reactive!` deps, so a sync event refetches both within the same tick. A new defensive integration test in `crates/storage/tests/roundtrip.rs::count_unread_by_folder_matches_seen_flag_state` locks in the contract across `update_flags`. The original symptom was likely a transient async-refetch window after a `\Seen` flip — sidebar and message-list both refetch on the same tick, but their async resources can resolve a few hundred ms apart.
 
-**Possibilities:**
-- Stale count somewhere (sidebar count not refreshed after sync)
-- `\Seen` flag handling not correctly mapped
-- Two different code paths counting unread
-
-**Fix:**
-- Single source of truth for unread counts. Cache table column `unread_count` per folder, updated on flag mutations and on sync.
-- Sidebar and header both read from this column.
-- Cross-reference against Gmail web UI for the same folder; if Gmail shows N unread and QSL shows different, the IMAP `\Seen` flag mapping is wrong.
+**Original symptom:** Inbox shows "86 of 86 · 0 unread" but earlier sidebar screenshot showed "INBOX 6" suggesting 6 unread.
 
 **Verification:** Open Gmail web in another window. Counts match QSL for at least 3 folders.
 

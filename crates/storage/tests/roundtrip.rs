@@ -508,6 +508,103 @@ fn remote_content_opt_in_add_check_remove() {
     });
 }
 
+/// Unread-count consistency (backlog item 7). The sidebar's
+/// `folders_list` and the message-list's `messages_list` /
+/// `messages_list_unified` all read unread counts via
+/// `count_unread_by_folder` (single source of truth). This test
+/// locks in that counting matches the underlying flag state across
+/// `update_flags`, so the two UI surfaces can never disagree at the
+/// data layer.
+#[test]
+fn count_unread_by_folder_matches_seen_flag_state() {
+    let rt = rt();
+    rt.block_on(async move {
+        let conn = fresh_conn().await;
+        let acct = Account {
+            id: AccountId("unread-acct".into()),
+            kind: BackendKind::ImapSmtp,
+            display_name: "x".into(),
+            email_address: "me@example.com".into(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        };
+        repos::accounts::insert(&conn, &acct).await.expect("acct");
+        let folder = Folder {
+            id: FolderId("INBOX".into()),
+            account_id: acct.id.clone(),
+            name: "Inbox".into(),
+            path: "INBOX".into(),
+            role: Some(FolderRole::Inbox),
+            unread_count: 0,
+            total_count: 0,
+            parent: None,
+        };
+        repos::folders::insert(&conn, &folder)
+            .await
+            .expect("folder");
+
+        // Insert 5 messages, all unseen.
+        let make_headers = |i: u32, seen: bool| MessageHeaders {
+            id: MessageId(format!("m-{i}")),
+            account_id: acct.id.clone(),
+            folder_id: folder.id.clone(),
+            thread_id: None,
+            rfc822_message_id: None,
+            subject: format!("subj-{i}"),
+            from: vec![],
+            reply_to: vec![],
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            date: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            flags: MessageFlags {
+                seen,
+                ..Default::default()
+            },
+            labels: vec![],
+            snippet: "".into(),
+            size: 0,
+            has_attachments: false,
+            in_reply_to: None,
+            references: vec![],
+        };
+        for i in 0..5u32 {
+            repos::messages::insert(&conn, &make_headers(i, false), None)
+                .await
+                .expect("insert");
+        }
+
+        let unread = repos::messages::count_unread_by_folder(&conn, &folder.id)
+            .await
+            .expect("count_unread");
+        assert_eq!(unread, 5);
+
+        // Mark 3 as seen via update_flags; count should drop.
+        for i in 0..3u32 {
+            let mid = MessageId(format!("m-{i}"));
+            let mut headers = repos::messages::get(&conn, &mid).await.expect("get");
+            headers.flags.seen = true;
+            repos::messages::update_flags(&conn, &mid, &headers.flags)
+                .await
+                .expect("update_flags");
+        }
+
+        let unread = repos::messages::count_unread_by_folder(&conn, &folder.id)
+            .await
+            .expect("count_unread post-update");
+        assert_eq!(
+            unread, 2,
+            "count_unread_by_folder must reflect post-update_flags state"
+        );
+
+        // Multi-folder helper agrees.
+        let multi =
+            repos::messages::count_unread_by_folders(&conn, std::slice::from_ref(&folder.id))
+                .await
+                .expect("count_unread multi");
+        assert_eq!(multi, 2);
+    });
+}
+
 #[test]
 fn transaction_rollback_reverts_writes() {
     let rt = rt();
