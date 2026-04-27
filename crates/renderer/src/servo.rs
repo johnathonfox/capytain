@@ -529,17 +529,22 @@ fn make_data_url(
     url::Url::parse(&format!("data:text/html;charset=utf-8,{encoded}"))
 }
 
-/// Tiny percent-encoder for the subset of characters that break `data:`
-/// URLs. Good enough for the reader pane; real sanitization is ammonia's
-/// job upstream.
+/// Tiny percent-encoder for the bytes that break `data:` URLs. Good
+/// enough for the reader pane; real sanitization is ammonia's job
+/// upstream.
+///
+/// Non-ASCII bytes (>= 0x80) MUST be percent-escaped, not pushed as
+/// `b as char`. `&str::bytes()` yields the UTF-8 representation of each
+/// codepoint; for a multi-byte char like `®` (0xC2 0xAE) those bytes
+/// get cast to Latin-1 codepoints (`Â` and `®`) and re-encoded back to
+/// UTF-8 as 0xC3 0x82 0xC2 0xAE. Servo then renders that as `Â®` —
+/// the exact mojibake reported in `docs/QSL_BACKLOG_FIXES.md` item 1.
 fn percent_encode(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for b in input.bytes() {
         let encode = matches!(
             b,
-            // Control chars, whitespace Servo won't tolerate in a URL,
-            // and the URL-structural characters.
-            0..=0x20 | 0x7f | b'%' | b'#' | b'?' | b'&' | b'+' | b'\\'
+            0..=0x20 | 0x7f..=0xff | b'%' | b'#' | b'?' | b'&' | b'+' | b'\\'
         );
         if encode {
             out.push_str(&format!("%{b:02X}"));
@@ -586,5 +591,37 @@ mod tests {
         assert!(dark.as_str().contains("dark"));
         assert!(light.as_str().contains("light"));
         assert_ne!(dark, light);
+    }
+
+    /// Regression for the mojibake reported in QSL_BACKLOG_FIXES.md
+    /// item 1. UTF-8 multi-byte sequences must round-trip as their
+    /// percent-encoded byte sequences, not as the Latin-1 codepoint
+    /// reinterpretation of each individual byte.
+    #[test]
+    fn percent_encode_escapes_non_ascii_bytes() {
+        // ® → 0xC2 0xAE in UTF-8.
+        assert_eq!(percent_encode("®"), "%C2%AE");
+        // — (em dash) → 0xE2 0x80 0x94.
+        assert_eq!(percent_encode("—"), "%E2%80%94");
+        // " (left double quotation mark) → 0xE2 0x80 0x9C.
+        assert_eq!(percent_encode("\u{201c}"), "%E2%80%9C");
+        // Mixed ASCII + non-ASCII.
+        assert_eq!(percent_encode("Hands®"), "Hands%C2%AE");
+    }
+
+    #[test]
+    fn data_url_round_trips_utf8_through_percent_decode() {
+        // Build a body with the exact characters from the user's bug
+        // report: ® inside a marketing-style sentence.
+        let body = r#"<p>Good Hands® policy</p>"#;
+        let u = make_data_url(body, ColorScheme::Light).unwrap();
+        let s = u.as_str();
+        // The encoded byte sequence for ® must be present, and the
+        // Latin-1 reinterpretation (Â) must NOT.
+        assert!(s.contains("%C2%AE"), "® not percent-encoded as %C2%AE: {s}");
+        assert!(
+            !s.contains("Â"),
+            "Latin-1 mojibake leaked into data URL: {s}"
+        );
     }
 }
