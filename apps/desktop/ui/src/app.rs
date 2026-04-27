@@ -236,6 +236,23 @@ pub fn App() -> Element {
     let selection = use_signal(Selection::default);
     let mut sync_tick: SyncTick = use_signal(|| 0u64);
     let compose: Signal<Option<ComposeState>> = use_signal(|| None);
+
+    // ComposePane occupies the reader slot when active, so the Servo
+    // overlay surface — which paints over `.reader-body-fill` and is
+    // positioned by a JS-side ResizeObserver — must be hidden whenever
+    // compose opens. ReaderPaneV2 has its own `reader_clear` effect
+    // for the no-message case, but it's unmounted while ComposePane
+    // is up, so the reactive guard goes here at the App level.
+    {
+        let composing = compose.read().is_some();
+        use_effect(use_reactive!(|composing| {
+            if composing {
+                wasm_bindgen_futures::spawn_local(async {
+                    let _ = invoke::<()>("reader_clear", serde_json::json!({})).await;
+                });
+            }
+        }));
+    }
     // Most recent sync_event payload, rendered in the bottom status
     // bar. `None` means we haven't seen any events yet — the bar
     // shows "Initializing…" / "Syncing…" until the first event lands.
@@ -353,11 +370,7 @@ pub fn App() -> Element {
             }
             div {
                 class: "shell-pane shell-pane-list",
-                if compose.read().is_some() {
-                    ComposePane { compose, sync_tick }
-                } else {
-                    MessageListPaneV2 { selection, sync_tick }
-                }
+                MessageListPaneV2 { selection, sync_tick }
             }
             div {
                 class: "shell-splitter",
@@ -365,7 +378,11 @@ pub fn App() -> Element {
             }
             div {
                 class: "shell-pane shell-pane-reader",
-                ReaderPaneV2 { selection, sync_tick }
+                if compose.read().is_some() {
+                    ComposePane { compose, sync_tick }
+                } else {
+                    ReaderPaneV2 { selection, sync_tick }
+                }
             }
             // Full-window overlay during drag so the reader's iframe
             // (and any other webview child) can't capture pointer
