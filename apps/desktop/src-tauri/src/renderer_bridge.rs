@@ -311,4 +311,3 @@ fn cursor_to_css_name(cursor: qsl_renderer::Cursor) -> &'static str {
         Cursor::ZoomOut => "zoom-out",
     }
 }
-

@@ -472,7 +472,6 @@ fn extract_x11(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
