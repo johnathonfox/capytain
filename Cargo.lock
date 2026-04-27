@@ -6088,6 +6088,7 @@ dependencies = [
  "qsl-core",
  "qsl-imap-client",
  "qsl-jmap-client",
+ "qsl-mime",
  "qsl-storage",
  "qsl-sync",
  "qsl-telemetry",

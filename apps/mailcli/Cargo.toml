@@ -20,6 +20,7 @@ qsl-auth = { workspace = true }
 qsl-core = { workspace = true }
 qsl-imap-client = { workspace = true }
 qsl-jmap-client = { workspace = true }
+qsl-mime = { workspace = true }
 qsl-storage = { workspace = true }
 qsl-sync = { workspace = true }
 qsl-telemetry = { workspace = true }
