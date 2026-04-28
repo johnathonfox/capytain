@@ -765,6 +765,38 @@ pub async fn messages_send(state: State<'_, AppState>, input: MessagesSendInput)
     )
     .await?;
     drafts_repo::delete(&*db, &draft_id).await?;
+
+    // Contacts collection: every recipient address the user just
+    // sent to seeds the autocomplete dropdown (PR-C2). We touch the
+    // contact rows here, before dropping the db guard, so a single
+    // send is atomic against an interleaved query_prefix call. As
+    // with the inbound side, upsert failures are warn-logged and
+    // don't block the send — the message is already in the outbox
+    // and will go out regardless of whether contacts were updated.
+    let now = chrono::Utc::now().timestamp();
+    for addr in draft
+        .to
+        .iter()
+        .chain(draft.cc.iter())
+        .chain(draft.bcc.iter())
+    {
+        if let Err(e) = qsl_storage::repos::contacts::upsert_seen(
+            &*db,
+            &addr.address,
+            addr.display_name.as_deref(),
+            qsl_storage::repos::contacts::Source::Outbound,
+            now,
+        )
+        .await
+        {
+            tracing::warn!(
+                draft = %draft_id.0,
+                address = %addr.address,
+                "messages_send: contact upsert failed: {e}"
+            );
+        }
+    }
+
     drop(db);
 
     tracing::info!(
