@@ -382,7 +382,13 @@ fn full_app_shell() -> Element {
         let mut last_query: Signal<String> = use_signal(String::new);
         let q_now = search_query.read().clone();
         use_effect(use_reactive!(|q_now| {
-            let prev = last_query.read().clone();
+            // `peek()` reads without subscribing — `use_effect` re-runs
+            // on any signal it has *read* (subscribed to), so doing
+            // `last_query.read()` here while also `last_query.set(...)`
+            // below creates a self-trigger loop that crashes the wasm
+            // bundle (white screen on boot). The reactive trigger we
+            // *do* want is `q_now` from the surrounding `use_reactive!`.
+            let prev = last_query.peek().clone();
             if !prev.is_empty() && q_now.is_empty() {
                 let trimmed = prev.trim().to_string();
                 if !trimmed.is_empty() {
