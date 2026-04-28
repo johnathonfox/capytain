@@ -1502,3 +1502,160 @@ ul {
   display: inline-block;
   text-align: center;
 }
+
+/* Sidebar empty-state when no accounts are configured. */
+.sidebar-empty-state {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 24px 16px;
+  align-items: stretch;
+}
+
+.sidebar-empty-blurb {
+  margin: 0;
+  font-size: 12px;
+  color: #cfd3da;
+  text-align: center;
+}
+
+.sidebar-empty-add {
+  padding: 8px 12px;
+  border-radius: 4px;
+  border: 1px solid #3a4252;
+  background: #1f2533;
+  color: #e6e8eb;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.sidebar-empty-add:hover {
+  background: #2a3242;
+  border-color: #4a5466;
+}
+
+/* OAuth-add window — single-column form. */
+.oauth-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  height: 100vh;
+  padding: 28px 32px;
+  background: #181c25;
+  color: #e6e8eb;
+  font-size: 13px;
+  box-sizing: border-box;
+}
+
+.oauth-title {
+  margin: 0 0 4px 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.oauth-blurb {
+  margin: 0;
+  font-size: 12px;
+  color: #cfd3da;
+  line-height: 1.4;
+}
+
+.oauth-provider-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.oauth-provider {
+  padding: 14px 16px;
+  border-radius: 4px;
+  border: 1px solid #2a3242;
+  background: #14171f;
+  color: #cfd3da;
+  font-size: 14px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.oauth-provider:hover {
+  background: #1c202a;
+  border-color: #3a4252;
+}
+
+.oauth-provider-active {
+  background: #1f2533;
+  border-color: #568eeb;
+  color: #e6e8eb;
+}
+
+.oauth-label {
+  font-size: 11px;
+  color: #7c8290;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.oauth-input {
+  font-size: 13px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  border: 1px solid #2a3242;
+  background: #14171f;
+  color: #e6e8eb;
+  outline: none;
+}
+
+.oauth-input:focus {
+  border-color: #568eeb;
+  background: #181c25;
+}
+
+.oauth-button {
+  padding: 8px 16px;
+  border-radius: 4px;
+  border: 1px solid #2a3242;
+  background: #1c202a;
+  color: #cfd3da;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.oauth-button:hover:not(:disabled) {
+  background: #232936;
+  border-color: #3a4252;
+}
+
+.oauth-button-primary {
+  background: #2a4470;
+  border-color: #568eeb;
+  color: #e6e8eb;
+}
+
+.oauth-button-primary:hover:not(:disabled) {
+  background: #345090;
+}
+
+.oauth-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.oauth-status {
+  margin: 0;
+  font-size: 13px;
+  color: #cfd3da;
+}
+
+.oauth-success {
+  color: #7ed492;
+}
+
+.oauth-error {
+  color: #f3a39c;
+}
+
+.oauth-note {
+  margin: 0;
+  font-size: 12px;
+  color: #7c8290;
+}

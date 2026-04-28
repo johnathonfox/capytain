@@ -18,7 +18,7 @@
 
 use qsl_ipc::IpcResult;
 use qsl_storage::repos::app_settings as app_settings_repo;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::state::AppState;
@@ -68,32 +68,77 @@ pub async fn app_settings_set(
 /// the three-pane shell.
 #[tauri::command]
 pub async fn settings_open<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> IpcResult<()> {
+    open_view_window(&app, "settings", "QSL — Settings", 720.0, 560.0)
+}
+
+/// `oauth_add_open` — show the first-run / add-account window. Same
+/// pattern as `settings_open`: a labelled secondary window with
+/// `__QSL_VIEW__ = 'oauth-add'` injected so the Dioxus root mounts
+/// the `OAuthAddApp` route. The window itself just renders the
+/// provider picker; the actual flow runs inside the
+/// `accounts_add_oauth` command.
+#[tauri::command]
+pub async fn oauth_add_open<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> IpcResult<()> {
+    open_view_window(&app, "oauth-add", "QSL — Add account", 520.0, 460.0)
+}
+
+#[derive(Debug, Serialize)]
+pub struct OauthProviderInfo {
+    pub slug: String,
+    pub name: String,
+}
+
+/// `oauth_providers_list` — return the built-in OAuth providers in
+/// the order the picker should display them. Sourced from
+/// `qsl_auth::provider::builtin` so the host stays the source of
+/// truth; the UI has no compile-time knowledge of which providers
+/// exist.
+#[tauri::command]
+pub async fn oauth_providers_list() -> IpcResult<Vec<OauthProviderInfo>> {
+    let providers = qsl_auth::provider::builtin()
+        .iter()
+        .map(|p| OauthProviderInfo {
+            slug: p.profile().slug.to_string(),
+            name: p.profile().name.to_string(),
+        })
+        .collect();
+    Ok(providers)
+}
+
+fn open_view_window<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    label: &str,
+    title: &str,
+    width: f64,
+    height: f64,
+) -> IpcResult<()> {
     use tauri::Manager;
 
-    const LABEL: &str = "settings";
-
-    if let Some(existing) = app.get_webview_window(LABEL) {
+    if let Some(existing) = app.get_webview_window(label) {
         if let Err(e) = existing.set_focus() {
-            tracing::warn!(error = %e, "settings_open: set_focus failed");
+            tracing::warn!(window = %label, error = %e, "open_view_window: set_focus failed");
         }
         return Ok(());
     }
 
-    let init_script = "window.__QSL_VIEW__ = 'settings';";
+    let init_script = format!(
+        "window.__QSL_VIEW__ = {};",
+        serde_json::Value::String(label.to_string())
+    );
     let _window =
-        tauri::WebviewWindowBuilder::new(&app, LABEL, tauri::WebviewUrl::App("index.html".into()))
-            .title("QSL — Settings")
-            .inner_size(720.0, 560.0)
-            .initialization_script(init_script)
+        tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App("index.html".into()))
+            .title(title)
+            .inner_size(width, height)
+            .initialization_script(&init_script)
             .devtools(true)
             .build()
             .map_err(|e| {
                 qsl_ipc::IpcError::new(
                     qsl_ipc::IpcErrorKind::Internal,
-                    format!("create settings window: {e}"),
+                    format!("create {label} window: {e}"),
                 )
             })?;
 
-    tracing::info!("settings_open: window built");
+    tracing::info!(window = %label, "open_view_window: built");
     Ok(())
 }

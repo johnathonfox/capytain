@@ -127,8 +127,17 @@ fn AccountsTab(tick: SettingsTick) -> Element {
                 button {
                     class: "settings-button",
                     r#type: "button",
-                    title: "Add account (first-run OAuth flow lands in PR-O1)",
-                    disabled: true,
+                    title: "Open the add-account window",
+                    onclick: |_| {
+                        spawn(async {
+                            if let Err(e) = invoke::<()>(
+                                "oauth_add_open",
+                                serde_json::json!({}),
+                            ).await {
+                                web_sys_log(&format!("oauth_add_open: {e}"));
+                            }
+                        });
+                    },
                     "+ Add account"
                 }
             }
