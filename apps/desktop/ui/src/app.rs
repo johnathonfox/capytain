@@ -1837,8 +1837,15 @@ fn MessageListV2(
                     if messages.is_empty() {
                         p { class: "msglist-empty", "No messages in this mailbox." }
                     } else {
-                        for m in messages.iter().cloned() {
-                            MessageRowV2 { msg: m, selection }
+                        for item in crate::threading::group_by_thread(messages.clone()) {
+                            match item {
+                                crate::threading::MessageListItem::Single(m) => rsx! {
+                                    MessageRowV2 { msg: m, selection }
+                                },
+                                crate::threading::MessageListItem::Thread { head, members } => rsx! {
+                                    ThreadRow { head, members, selection }
+                                },
+                            }
                         }
                     }
                 }
@@ -1940,6 +1947,120 @@ fn MessageRowV2(msg: MessageHeaders, selection: Signal<Selection>) -> Element {
             div { class: "msg-row-subject", "{subject}" }
             if !snippet.is_empty() {
                 div { class: "msg-row-snippet", "{snippet}" }
+            }
+        }
+    }
+}
+
+/// Wrapper row rendered when [`crate::threading::group_by_thread`]
+/// rolled two-or-more consecutive same-thread messages into one. The
+/// row itself is a `MessageRowV2`-shaped header for the newest member
+/// (`head`), augmented with a count badge and a chevron toggle.
+/// Clicking the body selects the head; clicking the chevron expands
+/// inline with the older members rendered indented below.
+#[component]
+fn ThreadRow(
+    head: MessageHeaders,
+    members: Vec<MessageHeaders>,
+    selection: Signal<Selection>,
+) -> Element {
+    let mut expanded = use_signal(|| false);
+    let count = members.len();
+    // "Unread" promotes to the parent row whenever any member is
+    // unseen — matches Gmail and avoids surprising the user when the
+    // collapsed row hides an unread reply.
+    let any_unread = members.iter().any(|m| !m.flags.seen);
+
+    let is_head_selected = selection
+        .read()
+        .message
+        .as_ref()
+        .is_some_and(|m| m.0 == head.id.0);
+
+    let from_addr = head.from.first();
+    let from_name = from_addr
+        .map(|a| {
+            a.display_name
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| a.address.clone())
+        })
+        .unwrap_or_default();
+    let avatar_initials = address_initials(
+        &from_name,
+        from_addr.map(|a| a.address.as_str()).unwrap_or(""),
+    );
+    let date = crate::format::format_relative_date(head.date, chrono::Utc::now());
+    let subject = if head.subject.is_empty() {
+        "(no subject)".to_string()
+    } else {
+        head.subject.clone()
+    };
+    let snippet = head.snippet.clone();
+    let is_expanded = expanded();
+    let row_class = match (is_head_selected, any_unread) {
+        (true, true) => "msg-row thread-row selected unread",
+        (true, false) => "msg-row thread-row selected",
+        (false, true) => "msg-row thread-row unread",
+        (false, false) => "msg-row thread-row",
+    };
+    let group_class = if is_expanded {
+        "thread-group expanded"
+    } else {
+        "thread-group"
+    };
+
+    rsx! {
+        div {
+            class: group_class,
+            div {
+                class: row_class,
+                onclick: {
+                    let mid = head.id.clone();
+                    let mut selection = selection;
+                    move |_| selection.write().message = Some(mid.clone())
+                },
+                div { class: "msg-row-avatar", "{avatar_initials}" }
+                div {
+                    class: "msg-row-line1",
+                    span { class: "msg-row-from", "{from_name}" }
+                    span {
+                        class: "thread-count",
+                        title: "{count} messages in thread",
+                        "{count}"
+                    }
+                    if any_unread {
+                        span { class: "msg-row-unread-dot" }
+                    }
+                    span { class: "msg-row-time", "{date}" }
+                    button {
+                        class: "thread-toggle",
+                        r#type: "button",
+                        title: if is_expanded { "Collapse thread" } else { "Expand thread" },
+                        onclick: move |evt: Event<MouseData>| {
+                            evt.stop_propagation();
+                            let v = expanded();
+                            expanded.set(!v);
+                        },
+                        if is_expanded { "▾" } else { "▸" }
+                    }
+                }
+                div { class: "msg-row-subject", "{subject}" }
+                if !snippet.is_empty() {
+                    div { class: "msg-row-snippet", "{snippet}" }
+                }
+            }
+            if is_expanded {
+                div {
+                    class: "thread-members",
+                    // Skip the head — already rendered above. Members
+                    // are in DateDesc order (newest first); rendering
+                    // them as-is makes "click to select" feel like
+                    // walking the conversation backwards in time.
+                    for m in members.iter().skip(1).cloned() {
+                        MessageRowV2 { msg: m, selection }
+                    }
+                }
             }
         }
     }

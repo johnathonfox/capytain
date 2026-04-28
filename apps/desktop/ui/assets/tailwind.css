@@ -553,6 +553,60 @@ ul {
   text-overflow: ellipsis;
 }
 
+/* Threading — adjacent-thread grouping in the message list. */
+.thread-group {
+  display: contents;
+}
+
+.thread-count {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: #2a3242;
+  color: #cfd3da;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.msg-row.unread .thread-count {
+  background: #34507e;
+  color: #e6e8eb;
+}
+
+.thread-toggle {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 0;
+  padding: 0 4px;
+  margin: 0;
+  color: #7c8290;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.thread-toggle:hover {
+  color: #cfd3da;
+}
+
+.thread-members .msg-row {
+  /* Indent members so the parent → child relationship reads
+   * even on a flat list; the left border keeps the thread visually
+   * connected to its head row. */
+  padding-left: 32px;
+  border-left: 2px solid #2a3242;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.thread-members .msg-row.selected {
+  border-left-color: #568eeb;
+}
+
 .msg-row-unread-dot {
   flex: 0 0 auto;
   width: 7px;
