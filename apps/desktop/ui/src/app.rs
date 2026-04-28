@@ -216,6 +216,33 @@ pub(crate) const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
     export function readerWindowView() {
         return window.__QSL_VIEW__ || null;
     }
+
+    // Install the parent-side listener for link-click postMessages
+    // sent by the sandboxed reader iframe (see
+    // `qsl_core::compose_reader_html`'s click forwarder). The
+    // sandboxed iframe can't navigate top-level and can't share
+    // an origin with the host, so it postMessages every clicked
+    // anchor up here; we filter on `data.type === 'qsl-link-click'`
+    // and forward the URL to Tauri's `open_external_url` command,
+    // which validates the scheme and shells out to `webbrowser::
+    // open`. Idempotent — repeat installs replace the previous
+    // listener.
+    export function installReaderLinkListener() {
+        if (window.__qslLinkListener) {
+            window.removeEventListener('message', window.__qslLinkListener);
+        }
+        const listener = function(e) {
+            const data = e && e.data;
+            if (!data || typeof data !== 'object' || data.type !== 'qsl-link-click') return;
+            const url = data.url;
+            if (typeof url !== 'string' || url.length === 0) return;
+            window.__TAURI_INTERNALS__
+                .invoke('open_external_url', { input: { url: url } })
+                .catch(function(err) { console.warn('open_external_url:', err); });
+        };
+        window.addEventListener('message', listener);
+        window.__qslLinkListener = listener;
+    }
 "#)]
 extern "C" {
     #[wasm_bindgen(catch, js_name = coreInvoke)]
@@ -257,6 +284,12 @@ extern "C" {
     /// command. `JsValue::null` for the main three-pane window.
     #[wasm_bindgen(js_name = readerWindowView)]
     pub(crate) fn reader_window_view() -> JsValue;
+
+    /// Install the `message`-event listener that forwards link-click
+    /// postMessages from the sandboxed reader iframe to Tauri's
+    /// `open_external_url` command. Called once at app boot.
+    #[wasm_bindgen(js_name = installReaderLinkListener)]
+    pub(crate) fn install_reader_link_listener();
 }
 
 /// Thin wrapper around the Tauri `invoke` bridge. Serializes `args` to
@@ -519,6 +552,15 @@ fn full_app_shell() -> Element {
     // (Removed on the webkit-iframe branch: the rect tracker existed
     // to position the GTK Servo overlay surface; with the iframe
     // rendering email bodies in-DOM there's nothing to track.)
+
+    // Install the reader-iframe link forwarder. The sandboxed iframe
+    // postMessages every clicked anchor URL up to this window; the
+    // listener invokes `open_external_url`, which shells out to the
+    // OS default browser. Once per app session — the JS side is
+    // idempotent.
+    use_hook(|| {
+        install_reader_link_listener();
+    });
 
     // Theme + density: read both from `app_settings` at boot and
     // apply to `<html>` via `data-theme` / `data-density` so the CSS
@@ -4691,22 +4733,24 @@ fn ReaderV2(
                             }
                         }
                     }
-                    // Body slot — sandboxed iframe. webkit2gtk
-                    // renders the sanitized HTML directly; the
-                    // experiment-branch swap from Servo means we
-                    // give up process isolation in exchange for the
-                    // mature, GPU-agnostic webkit render path.
-                    // `sandbox=""` blocks scripts, forms, top-nav,
-                    // and same-origin cookies — the email body is
-                    // already script-stripped by ammonia upstream,
-                    // but defense-in-depth keeps any future regression
-                    // in the sanitizer from getting JS into the host.
+                    // Body slot — sandboxed iframe. webkit2gtk renders
+                    // the sanitized HTML directly. Sandbox is
+                    // `allow-scripts` (without `allow-same-origin`)
+                    // so the wrapper's click-forwarder can run and
+                    // postMessage URLs to the parent — the iframe is
+                    // still a unique null origin, can't read parent
+                    // cookies or localStorage, and top-level
+                    // navigation stays blocked. Forms and pop-ups
+                    // remain disabled. The email HTML is already
+                    // script-stripped by ammonia; the only JS that
+                    // actually runs is the click forwarder injected
+                    // by `compose_reader_html`.
                     {
                         let body_html = compose_reader_html(rendered);
                         rsx! {
                             iframe {
                                 class: "reader-body-iframe",
-                                "sandbox": "",
+                                "sandbox": "allow-scripts",
                                 srcdoc: "{body_html}",
                             }
                         }

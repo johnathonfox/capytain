@@ -79,21 +79,31 @@ pub fn compose_reader_html(body_html: Option<&str>, body_text: Option<&str>) -> 
 <body>
   <div class="qsl-body">{body_section}</div>
   <script>
-    // Click forwarder. Servo's `request_navigation` fires on every
-    // navigation Servo initiates, but plain anchor clicks inside a
-    // `data:` URL document don't always make it through Servo's
-    // input pipeline (GTK DrawingArea doesn't auto-forward mouse
-    // events to Servo's input system on Linux). Catching the click
-    // in JS and explicitly setting `window.location.href` triggers
-    // a navigation request that the renderer delegate intercepts
-    // and routes to `webbrowser::open`. The delegate denies the
-    // navigation in-page, so the email content stays put.
+    // Click forwarder. Two render paths consume this document:
+    //
+    //   1. Servo (legacy) — the wrapper is loaded into a Servo WebView
+    //      with `window.parent === window`. Anchor clicks set
+    //      `window.location.href`, which Servo's navigation delegate
+    //      intercepts and routes to `webbrowser::open`. The delegate
+    //      denies the navigation in-page, so the email body stays put.
+    //
+    //   2. webkit2gtk iframe — the wrapper is loaded into a sandboxed
+    //      `<iframe>` inside the host webview. Top-level navigation
+    //      is blocked by the sandbox (no `allow-top-navigation`), so
+    //      `window.location.href` would silently no-op. Instead we
+    //      postMessage the URL to the parent frame, where the Dioxus
+    //      shell forwards it to the host's `open_external_url`
+    //      Tauri command.
     document.addEventListener('click', function(e) {{
       var node = e.target;
       while (node && node.nodeName !== 'A') node = node.parentNode;
-      if (node && node.href) {{
-        e.preventDefault();
-        try {{ window.location.href = node.href; }} catch (err) {{}}
+      if (!node || !node.href) return;
+      e.preventDefault();
+      var url = node.href;
+      if (window.parent && window.parent !== window) {{
+        try {{ window.parent.postMessage({{ type: 'qsl-link-click', url: url }}, '*'); }} catch (err) {{}}
+      }} else {{
+        try {{ window.location.href = url; }} catch (err) {{}}
       }}
     }}, true);
   </script>
