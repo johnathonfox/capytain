@@ -29,6 +29,7 @@ use crate::app::{invoke, web_sys_log, TAILWIND_CSS};
 enum Tab {
     Accounts,
     Appearance,
+    Compose,
     Notifications,
     Shortcuts,
     Privacy,
@@ -38,6 +39,7 @@ impl Tab {
     const ALL: &'static [Tab] = &[
         Tab::Accounts,
         Tab::Appearance,
+        Tab::Compose,
         Tab::Notifications,
         Tab::Shortcuts,
         Tab::Privacy,
@@ -47,6 +49,7 @@ impl Tab {
         match self {
             Tab::Accounts => "Accounts",
             Tab::Appearance => "Appearance",
+            Tab::Compose => "Compose",
             Tab::Notifications => "Notifications",
             Tab::Shortcuts => "Shortcuts",
             Tab::Privacy => "Privacy",
@@ -80,6 +83,7 @@ pub fn SettingsApp() -> Element {
                 match *active_tab.read() {
                     Tab::Accounts => rsx! { AccountsTab { tick } },
                     Tab::Appearance => rsx! { AppearanceTab { tick } },
+                    Tab::Compose => rsx! { ComposeTab { tick } },
                     Tab::Notifications => rsx! { NotificationsTab { tick } },
                     Tab::Shortcuts => rsx! { ShortcutsTab {} },
                     Tab::Privacy => rsx! { PrivacyTab { tick } },
@@ -426,6 +430,143 @@ fn SettingsRadioOption(
                 },
             }
             span { "{display}" }
+        }
+    }
+}
+
+// ---------- Compose ----------
+
+/// `app_settings` key for an account's signature, e.g.
+/// `compose.signature.<account_id>`. Free function so the compose
+/// pane can reuse the exact same key when reading the value.
+pub fn compose_signature_key(account_id: &AccountId) -> String {
+    format!("compose.signature.{}", account_id.0)
+}
+
+/// Setting that toggles the undo-send window. Values: `"off"`,
+/// `"5"`, `"10"`, `"30"` (seconds).
+pub const KEY_UNDO_SEND: &str = "compose.undo_send";
+
+#[component]
+fn ComposeTab(tick: SettingsTick) -> Element {
+    let tick_value = *tick.read();
+    let accounts = use_resource(use_reactive!(|tick_value| async move {
+        let _ = tick_value;
+        invoke::<Vec<Account>>("accounts_list", serde_json::json!({})).await
+    }));
+    rsx! {
+        div {
+            class: "settings-section",
+            h2 { class: "settings-section-title", "Send" }
+            SettingsRadioGroup {
+                setting_key: KEY_UNDO_SEND,
+                label: "Undo send",
+                default_value: "off",
+                options: vec![
+                    ("off", "Off"),
+                    ("5", "5 s"),
+                    ("10", "10 s"),
+                    ("30", "30 s"),
+                ],
+                tick,
+            }
+            p {
+                class: "settings-note",
+                "After Send, your message holds in a status-bar countdown. "
+                "Press Esc within the window to cancel."
+            }
+
+            h2 { class: "settings-section-title", "Signatures" }
+            p {
+                class: "settings-note",
+                "One signature per account, appended to a fresh compose body. "
+                "Edit drafts in-place; existing drafts are not retroactively "
+                "changed when you update a signature here."
+            }
+            match &*accounts.read_unchecked() {
+                None => rsx! { p { class: "settings-note", "Loading accounts…" } },
+                Some(Err(e)) => rsx! { p { class: "settings-note", "Error: {e}" } },
+                Some(Ok(list)) if list.is_empty() => rsx! {
+                    p {
+                        class: "settings-note",
+                        "Add an account first — signatures are per-identity."
+                    }
+                },
+                Some(Ok(list)) => rsx! {
+                    for a in list.iter().cloned() {
+                        SignatureField {
+                            account_id: a.id.clone(),
+                            display: format!("{} — {}", a.display_name, a.email_address),
+                            tick,
+                        }
+                    }
+                },
+            }
+        }
+    }
+}
+
+#[component]
+fn SignatureField(account_id: AccountId, display: String, tick: SettingsTick) -> Element {
+    let key = compose_signature_key(&account_id);
+    let key_for_fetch = key.clone();
+    let tick_value = *tick.read();
+    // Read current value via app_settings_get; default empty.
+    let current = use_resource(use_reactive!(|key_for_fetch, tick_value| async move {
+        let _ = tick_value;
+        invoke::<Option<String>>(
+            "app_settings_get",
+            serde_json::json!({ "input": { "key": key_for_fetch } }),
+        )
+        .await
+    }));
+    let initial: String = match &*current.read_unchecked() {
+        Some(Ok(Some(v))) => v.clone(),
+        _ => String::new(),
+    };
+    // Local editor state — auto-saves on debounce (no per-keystroke
+    // round-trip, no Save button to forget).
+    let mut value = use_signal(|| initial.clone());
+    // Re-sync local state whenever the resource resolves with a fresh
+    // string (e.g. settings reopened after an external edit).
+    use_effect(use_reactive!(|initial| {
+        value.set(initial.clone());
+    }));
+    let mut tick_ref = tick;
+    let key_for_save = key;
+    rsx! {
+        div {
+            class: "settings-field settings-signature-row",
+            label { class: "settings-label", "{display}" }
+            textarea {
+                class: "settings-signature-input",
+                rows: "4",
+                placeholder: "-- \nYour signature here",
+                value: "{value}",
+                oninput: move |evt: Event<FormData>| {
+                    value.set(evt.value());
+                },
+                onblur: {
+                    let key_for_save = key_for_save.clone();
+                    move |_| {
+                        let payload = serde_json::json!({
+                            "input": {
+                                "key": key_for_save,
+                                "value": (*value.read()).clone(),
+                            }
+                        });
+                        wasm_bindgen_futures::spawn_local(async move {
+                            if let Err(e) = invoke::<()>("app_settings_set", payload).await {
+                                web_sys_log(&format!("save signature: {e}"));
+                            }
+                        });
+                        // Bump the parent tick so other consumers see
+                        // the new value on their next poll.
+                        let cur = *tick_ref.read();
+                        tick_ref.set(cur.wrapping_add(1));
+                    }
+                },
+            }
         }
     }
 }

@@ -587,6 +587,37 @@ ul {
   letter-spacing: 0;
 }
 
+/* Cc row wraps `AddressField` plus the "+bcc" reveal toggle so they
+ * lay out as a single field-row visually. The wrapper is also a flex
+ * container; the inner AddressField owns its own field-row, so we
+ * neutralize the wrapper's spacing — only the toggle button needs a
+ * little gap from the field's right edge. */
+.compose-cc-row {
+  display: flex;
+  align-items: center;
+}
+
+.compose-cc-row > :first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.compose-bcc-reveal {
+  flex: 0 0 auto;
+  margin-right: 14px;
+  padding: 2px 4px;
+  background: transparent;
+  border: 0;
+  color: var(--text-tertiary);
+  font-family: inherit;
+  font-size: var(--fs-11);
+  cursor: pointer;
+}
+
+.compose-bcc-reveal:hover {
+  color: var(--text-secondary);
+}
+
 .compose-input {
   flex: 1 1 auto;
   background: transparent;
@@ -727,6 +758,16 @@ ul {
 .compose-statusline-send {
   color: var(--accent-amber);
   font-weight: var(--fw-bold);
+}
+
+.compose-statusline-send.danger {
+  color: var(--danger-red, #d8504e);
+}
+
+.compose-undo-countdown {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  margin-right: 8px;
 }
 
 .compose-statusline-saving-dot {
@@ -1900,6 +1941,27 @@ ul {
   gap: 4px;
 }
 
+.settings-signature-row {
+  margin-bottom: 12px;
+}
+
+.settings-signature-input {
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  background: var(--bg-secondary);
+  border: 0.5px solid var(--border-tertiary);
+  border-radius: var(--radius-input);
+  color: var(--text-primary);
+  padding: 6px 8px;
+  resize: vertical;
+  min-height: 60px;
+  outline: none;
+}
+
+.settings-signature-input:focus {
+  border-color: var(--border-secondary);
+}
+
 .settings-field-row {
   display: flex;
   align-items: center;
@@ -2286,4 +2348,119 @@ ul {
   font-size: var(--fs-11);
   color: var(--text-tertiary);
   user-select: none;
+}
+
+/* Right-click context menu on message rows. Backdrop is a transparent
+ * full-window catcher so clicking anywhere outside the menu dismisses
+ * it. The menu itself is anchored at viewport coordinates set by the
+ * row's `oncontextmenu` handler. */
+.ctx-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2500;
+  background: transparent;
+}
+
+.ctx-menu {
+  min-width: 180px;
+  background: var(--bg-tertiary);
+  border: 0.5px solid var(--border-secondary);
+  border-radius: 6px;
+  padding: 4px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: var(--fs-12);
+  color: var(--text-primary);
+  z-index: 2501;
+}
+
+.ctx-menu-item {
+  background: transparent;
+  border: none;
+  text-align: left;
+  padding: 6px 10px;
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.ctx-menu-item:hover {
+  background: var(--accent-amber-subtle, rgba(232, 162, 78, 0.16));
+}
+
+.ctx-menu-item-danger {
+  color: var(--danger-red, #d8504e);
+}
+
+.ctx-menu-sep {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--border-tertiary);
+}
+
+/* Compose attachments row. Lives between the subject field and the
+ * body textarea. Layout: a leading "Files" label, then a flex-wrap
+ * list of chips and a trailing "+ Attach" button. */
+.compose-attachments-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 4px 0;
+}
+
+.compose-attachments-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1 1 auto;
+  align-items: center;
+}
+
+.compose-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px 2px 8px;
+  background: var(--bg-tertiary);
+  border: 0.5px solid var(--border-secondary);
+  border-radius: 4px;
+  font-size: var(--fs-12);
+  color: var(--text-primary);
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compose-attachment-remove {
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  font-size: var(--fs-13);
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+
+.compose-attachment-remove:hover {
+  color: var(--danger-red, #d8504e);
+}
+
+.compose-attachment-add {
+  background: transparent;
+  border: 0.5px dashed var(--border-secondary);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--fs-12);
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.compose-attachment-add:hover {
+  color: var(--text-primary);
+  border-color: var(--accent-amber);
 }

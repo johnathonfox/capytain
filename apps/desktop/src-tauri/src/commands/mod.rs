@@ -15,6 +15,7 @@
 //! them.
 
 pub mod accounts;
+pub mod compose;
 pub mod contacts;
 pub mod drafts;
 pub mod folders;

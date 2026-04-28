@@ -141,6 +141,7 @@ fn main() {
             commands::settings::oauth_providers_list,
             commands::settings::app_settings_get,
             commands::settings::app_settings_set,
+            commands::compose::compose_pick_attachments,
         ])
         .run(tauri::generate_context!())
         .expect("error while running QSL");

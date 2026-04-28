@@ -77,6 +77,14 @@ tracing = { workspace = true }
 # Used by the `open_external_url` IPC command to launch URLs (clicked
 # in the reader pane's email iframe) in the user's OS default browser.
 webbrowser = { workspace = true }
+# Native file picker for the compose-pane "Attach" button. Tauri 2's
+# dialog plugin would also work but adds a JS-bridge surface and a
+# capability token; rfd is a single direct dep that exposes the
+# underlying GTK / NSOpenPanel / IFileDialog without ceremony.
+# `gtk3` matches the workspace's existing GTK-3 backed Linux
+# integration (see `linux_gtk.rs`).
+rfd = { version = "0.15", default-features = false, features = ["gtk3", "tokio"] }
+mime_guess = "2"
 
 # Linux-only: the child-widget integration for the Servo reader pane.
 # See `apps/desktop/src-tauri/src/linux_gtk.rs` and

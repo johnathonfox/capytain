@@ -18,6 +18,7 @@
 //! defers the `multipart/alternative` (markdown → HTML) work to Week 20
 //! where it lives next to the renderer's HTML sanitizer.
 
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mail_builder::{
@@ -27,7 +28,7 @@ use mail_builder::{
 use rand::RngCore;
 use thiserror::Error;
 
-use qsl_core::{Draft, EmailAddress};
+use qsl_core::{Draft, DraftAttachment, EmailAddress};
 
 /// Successful build output. The Message-ID is angle-bracket-wrapped to
 /// match the rest of the workspace's convention (`qsl-mime` parses
@@ -56,6 +57,16 @@ pub enum ComposeError {
     /// caller passed something that doesn't look like an email.
     #[error("from address has no domain: {0:?}")]
     InvalidFromAddress(String),
+
+    /// Attachment file couldn't be read at submission time. Path
+    /// surfaced so the caller can DLQ the outbox row with a useful
+    /// error rather than retrying forever against a missing file.
+    #[error("attachment {filename} unreadable at {path}: {error}")]
+    AttachmentRead {
+        path: String,
+        filename: String,
+        error: String,
+    },
 
     /// `mail-builder` write failure. Should be effectively unreachable
     /// since we write to `Vec<u8>`, but the API returns `io::Result`.
@@ -124,11 +135,52 @@ pub fn build_rfc5322(draft: &Draft, from: &EmailAddress) -> Result<BuiltMessage,
         builder = builder.references(MessageId::from(refs));
     }
 
+    // Attachments. Each entry's bytes are read synchronously here —
+    // this is called from a tokio worker (outbox drain or messages_send
+    // command), so the blocking IO is fine on a worker thread. Inline
+    // attachments use Content-Disposition: inline + a generated `cid`,
+    // matching the existing `DraftAttachment.inline` convention.
+    for att in &draft.attachments {
+        let bytes = read_attachment_bytes(att)?;
+        let filename = att.filename.clone();
+        let mime = att.mime_type.clone();
+        if att.inline {
+            // CID is path-derived — stable across re-saves of the same
+            // draft so a referenced `<img src="cid:...">` keeps working.
+            let cid = inline_cid(&att.path);
+            builder = builder.inline(mime, cid, bytes);
+        } else {
+            builder = builder.attachment(mime, filename, bytes);
+        }
+    }
+
     let bytes = builder.write_to_vec()?;
     Ok(BuiltMessage {
         bytes,
         message_id: mid_wrapped,
     })
+}
+
+fn read_attachment_bytes(att: &DraftAttachment) -> Result<Vec<u8>, ComposeError> {
+    std::fs::read(Path::new(&att.path)).map_err(|e| ComposeError::AttachmentRead {
+        path: att.path.clone(),
+        filename: att.filename.clone(),
+        error: e.to_string(),
+    })
+}
+
+/// Stable CID derived from the attachment's filesystem path. Hashing
+/// the path keeps it short and avoids whitespace / non-token characters
+/// that confuse some MIME parsers, while still being deterministic so
+/// the same draft re-builds with the same CID across saves.
+fn inline_cid(path: &str) -> String {
+    let mut buf = [0u8; 8];
+    let mut h = 0u64;
+    for (i, b) in path.bytes().enumerate() {
+        h = h.wrapping_add((b as u64).wrapping_mul((i as u64).wrapping_add(31)));
+    }
+    buf.copy_from_slice(&h.to_be_bytes());
+    format!("att-{:016x}@qsl.local", u64::from_be_bytes(buf))
 }
 
 fn build_addr(a: &EmailAddress) -> Address<'static> {
@@ -344,6 +396,73 @@ mod tests {
             "got: {refs}"
         );
         assert!(!refs.contains("<<"), "double-wrapped: {refs}");
+    }
+
+    #[test]
+    fn attachments_appear_as_multipart_parts() {
+        // Write a small file to a tempdir, reference it from the
+        // draft, and check that build_rfc5322 emits a multipart message
+        // whose bytes contain the attachment's filename + payload.
+        let tmp = std::env::temp_dir().join("qsl-test-attachment.txt");
+        std::fs::write(&tmp, b"hello attachment\n").unwrap();
+
+        let mut d = draft("Hi", "body", vec![email(None, "to@example.com")]);
+        d.attachments = vec![DraftAttachment {
+            path: tmp.to_string_lossy().into_owned(),
+            filename: "report.txt".to_string(),
+            mime_type: "text/plain".to_string(),
+            size_bytes: 17,
+            inline: false,
+        }];
+        let from = email(None, "me@example.com");
+        let s = body_str(&build_rfc5322(&d, &from).unwrap().bytes);
+
+        // Multipart envelope shows up.
+        assert!(
+            s.lines()
+                .any(|l| l.starts_with("Content-Type:") && l.contains("multipart/")),
+            "missing multipart Content-Type in: {s}"
+        );
+        // Attachment part has a filename header.
+        assert!(
+            s.contains("filename=\"report.txt\"") || s.contains("filename=report.txt"),
+            "missing attachment filename in: {s}"
+        );
+        // mail-builder picks the encoding (base64 for binary, qp for
+        // ascii-ish text), so check for either form of the payload —
+        // the literal bytes in qp/7bit, or the base64-encoded version
+        // for binary mime types.
+        let body_b64 = base64_encode(b"hello attachment\n");
+        let qp = "hello attachment";
+        assert!(
+            s.contains(&body_b64) || s.contains(qp),
+            "missing attachment payload (any encoding) in: {s}"
+        );
+        let _ = std::fs::remove_file(tmp);
+    }
+
+    #[test]
+    fn missing_attachment_path_surfaces_attachment_read_error() {
+        let mut d = draft("Hi", "body", vec![email(None, "to@example.com")]);
+        d.attachments = vec![DraftAttachment {
+            path: "/nonexistent/path/qsl-test-missing".into(),
+            filename: "missing.bin".into(),
+            mime_type: "application/octet-stream".into(),
+            size_bytes: 0,
+            inline: false,
+        }];
+        let from = email(None, "me@example.com");
+        let err = build_rfc5322(&d, &from).unwrap_err();
+        assert!(
+            matches!(err, ComposeError::AttachmentRead { ref filename, .. } if filename == "missing.bin"),
+            "expected AttachmentRead error, got: {err:?}"
+        );
+    }
+
+    fn base64_encode(bytes: &[u8]) -> String {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+        STANDARD.encode(bytes)
     }
 
     #[test]
