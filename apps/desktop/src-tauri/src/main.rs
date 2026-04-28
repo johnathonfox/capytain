@@ -129,6 +129,7 @@ fn main() {
             commands::reader::reader_set_position,
             commands::reader::reader_clear,
             commands::reader::open_external_url,
+            commands::contacts::contacts_query,
         ])
         .run(tauri::generate_context!())
         .expect("error while running QSL");

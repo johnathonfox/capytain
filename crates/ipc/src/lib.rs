@@ -125,6 +125,20 @@ pub enum SyncEvent {
     },
 }
 
+/// One row in the compose pane's autocomplete dropdown.
+///
+/// Wire shape mirrors `qsl_storage::repos::contacts::Contact` but
+/// lives here so the wasm UI can deserialize without pulling the
+/// storage crate. The desktop's `contacts_query` command maps
+/// between the two.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Contact {
+    pub address: String,
+    pub display_name: Option<String>,
+    pub last_seen_at: i64,
+    pub seen_count: i64,
+}
+
 /// What the UI gets back when a user opens a message.
 ///
 /// Phase 0 Week 5 populates only `headers` and `body_text`. HTML
