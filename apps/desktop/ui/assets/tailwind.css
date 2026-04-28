@@ -248,6 +248,66 @@ ul {
   border-color: #568eeb;
 }
 
+/* Autocomplete dropdown — anchored under the input by a relatively-
+ * positioned wrapper so multiple AddressFields don't fight over a
+ * single positioning context. */
+.compose-input-wrap {
+  position: relative;
+  flex: 1 1 auto;
+}
+
+.compose-input-wrap .compose-input {
+  width: 100%;
+}
+
+.compose-autocomplete {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 2px;
+  background: #14181f;
+  border: 1px solid #2a3242;
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  z-index: 100;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.compose-autocomplete-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  border-bottom: 1px solid #1c202a;
+}
+
+.compose-autocomplete-row:last-child {
+  border-bottom: none;
+}
+
+.compose-autocomplete-row:hover,
+.compose-autocomplete-row.active {
+  background: rgba(86, 142, 235, 0.12);
+}
+
+.compose-autocomplete-name {
+  font-weight: 500;
+  color: #e6e8eb;
+  flex: 0 0 auto;
+}
+
+.compose-autocomplete-address {
+  color: #7c8290;
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .field-row select {
   flex: 1 1 auto;
   background: #14181f;
