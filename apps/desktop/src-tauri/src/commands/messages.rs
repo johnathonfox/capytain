@@ -296,14 +296,21 @@ pub async fn messages_get(
         None => (None, None, Vec::new()),
     };
 
-    Ok(RenderedMessage {
+    let rendered = RenderedMessage {
         headers,
         sanitized_html,
         body_text,
         attachments,
         sender_is_trusted,
         remote_content_blocked: !sender_is_trusted,
-    })
+    };
+    // Backlog #11 — populate the single-entry cache so a subsequent
+    // `messages_open_in_window` for the same id can skip the re-fetch
+    // + re-sanitize. The cache is invalidated implicitly: the next
+    // `messages_get` for a different id (or the same id with a
+    // different `force_trusted`) overwrites the slot.
+    *state.last_rendered.lock().await = Some((input.id.clone(), rendered.clone()));
+    Ok(rendered)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1092,25 +1099,56 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
     // logged but doesn't abort the open: the popup falls back to
     // calling `messages_get` itself when `__QSL_READER_PRELOAD__`
     // is `null`.
+    // We need to reach into `state.servo_renderers` after install to
+    // dispatch the early body render (backlog #12), so re-acquire the
+    // `AppState` from the AppHandle rather than moving the borrowed
+    // `state: State<'_, AppState>` argument into `messages_get`.
+    let state_for_render: tauri::State<AppState> = app.state();
     let t_preload_start = std::time::Instant::now();
-    let preload_json: String = match messages_get(
-        state,
-        MessagesGetInput {
-            id: input.id.clone(),
-            force_trusted: false,
-        },
-    )
-    .await
-    {
-        Ok(rendered) => serde_json::to_string(&rendered).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "messages_open_in_window: serialize preload failed");
-            "null".to_string()
-        }),
-        Err(e) => {
-            tracing::warn!(error = %e, "messages_open_in_window: preload fetch failed");
-            "null".to_string()
+    // Backlog #11 — peek the single-entry render cache. If the user
+    // double-clicks a message that's currently selected in the main
+    // pane, `messages_get` already populated this slot; reusing the
+    // hit skips the body lazy-fetch (~50 ms warm cache, ~500 ms cold)
+    // plus the ammonia sanitize pass.
+    let cached_rendered: Option<RenderedMessage> = {
+        let guard = state_for_render.last_rendered.lock().await;
+        guard
+            .as_ref()
+            .filter(|(id, _)| id == &input.id)
+            .map(|(_, r)| r.clone())
+    };
+    let rendered_opt: Option<RenderedMessage> = if let Some(r) = cached_rendered {
+        tracing::info!(
+            id = %input.id.0,
+            "messages_open_in_window: served preload from last_rendered cache"
+        );
+        Some(r)
+    } else {
+        match messages_get(
+            state,
+            MessagesGetInput {
+                id: input.id.clone(),
+                force_trusted: false,
+            },
+        )
+        .await
+        {
+            Ok(rendered) => Some(rendered),
+            Err(e) => {
+                tracing::warn!(error = %e, "messages_open_in_window: preload fetch failed");
+                None
+            }
         }
     };
+    let preload_json: String = rendered_opt
+        .as_ref()
+        .map(|r| {
+            serde_json::to_string(r).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "messages_open_in_window: serialize preload failed");
+                "null".to_string()
+            })
+        })
+        .unwrap_or_else(|| "null".to_string());
     tracing::info!(
         ms = t_preload_start.elapsed().as_millis() as u64,
         bytes = preload_json.len(),
@@ -1215,6 +1253,40 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
             ms = t_install_start.elapsed().as_millis() as u64,
             "messages_open_in_window: Servo install completed"
         );
+
+        // Backlog #12 — render the body into the freshly-installed
+        // Servo overlay immediately, while it's still painting into
+        // its install-time off-screen rect. The popup's wasm bundle
+        // hasn't booted yet, so without this step Servo idles for
+        // ~250 ms until Dioxus mounts and the JS-side ResizeObserver
+        // pushes a real position via `reader_set_position`. Painting
+        // the body into the off-screen rect now means that when the
+        // overlay later moves into the visible reader area, the
+        // first frame that becomes visible already has body content.
+        // We need a `RenderedMessage` to compose from — if the
+        // pre-fetch above failed (and `rendered_opt` is `None`),
+        // skip the early render: the popup's Dioxus side will fall
+        // back to its own `messages_get` round-trip and trigger
+        // `reader_render` itself, matching the pre-#12 behavior.
+        if let Some(rendered) = rendered_opt.as_ref() {
+            let html = qsl_core::compose_reader_html(
+                rendered.sanitized_html.as_deref(),
+                rendered.body_text.as_deref(),
+            );
+            let mut guard = state_for_render.servo_renderers.lock().await;
+            if let Some(renderer) = guard.get_mut(&label) {
+                let _handle = renderer.render(&html, qsl_core::RenderPolicy::strict());
+                tracing::info!(
+                    ms = t_install_start.elapsed().as_millis() as u64,
+                    "messages_open_in_window: pre-Dioxus body render dispatched"
+                );
+            } else {
+                tracing::warn!(
+                    window = %label,
+                    "messages_open_in_window: renderer slot empty after install"
+                );
+            }
+        }
     }
 
     tracing::info!(

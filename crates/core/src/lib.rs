@@ -24,6 +24,7 @@ pub mod folder;
 pub mod ids;
 pub mod mail_backend;
 pub mod message;
+pub mod reader_html;
 pub mod renderer;
 pub mod sync_state;
 
@@ -34,5 +35,6 @@ pub use folder::{Folder, FolderRole};
 pub use ids::{AccountId, AttachmentRef, DraftId, FolderId, MessageId, ThreadId};
 pub use mail_backend::{BackendEvent, MailBackend, MessageList};
 pub use message::{Attachment, EmailAddress, MessageBody, MessageFlags, MessageHeaders};
+pub use reader_html::compose_reader_html;
 pub use renderer::{ColorScheme, EmailRenderer, NullRenderer, RenderHandle, RenderPolicy};
 pub use sync_state::SyncState;
