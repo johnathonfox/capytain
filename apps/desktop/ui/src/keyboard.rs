@@ -46,6 +46,10 @@ pub enum KeyboardCommand {
     /// Move the message-list selection to the previous message.
     /// `k` matches Gmail; wraps at the start of the list.
     PrevMessage,
+    /// Toggle the command palette overlay (⌘K / Ctrl+K).
+    /// The only Ctrl/Cmd-modified shortcut we claim — every other
+    /// modified keystroke still passes through to the OS / browser.
+    TogglePalette,
 }
 
 /// Map a `KeyboardEvent.key` value plus the modifier state to a
@@ -59,7 +63,12 @@ pub enum KeyboardCommand {
 /// Windows) or `Cmd` (macOS). Either modifier defers to the OS.
 pub fn parse(key: &str, ctrl_or_meta: bool) -> Option<KeyboardCommand> {
     if ctrl_or_meta {
-        return None;
+        // ⌘K / Ctrl+K toggles the command palette. Every other modified
+        // keystroke passes through to the OS / browser.
+        return match key {
+            "k" | "K" => Some(KeyboardCommand::TogglePalette),
+            _ => None,
+        };
     }
     match key {
         "c" => Some(KeyboardCommand::Compose),
@@ -101,16 +110,24 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_or_meta_swallows_everything() {
-        // Ctrl+C / Cmd+R should reach the OS, not us — even for keys
-        // whose unmodified form would be ours.
-        for key in ["c", "e", "r", "a", "f", "j", "k", "Escape", "?", "#", "/"] {
+    fn ctrl_or_meta_swallows_everything_except_palette() {
+        // Ctrl+C / Cmd+R should reach the OS, not us — every modified
+        // keystroke except `k` (palette toggle) passes through.
+        for key in ["c", "e", "r", "a", "f", "j", "Escape", "?", "#", "/"] {
             assert_eq!(
                 parse(key, true),
                 None,
                 "Ctrl/Cmd+{key} must not produce a KeyboardCommand"
             );
         }
+    }
+
+    #[test]
+    fn ctrl_or_meta_k_toggles_palette() {
+        assert_eq!(parse("k", true), Some(KeyboardCommand::TogglePalette));
+        assert_eq!(parse("K", true), Some(KeyboardCommand::TogglePalette));
+        // Unmodified `k` still navigates messages.
+        assert_eq!(parse("k", false), Some(KeyboardCommand::PrevMessage));
     }
 
     #[test]

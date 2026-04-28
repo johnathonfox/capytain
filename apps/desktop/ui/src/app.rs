@@ -367,6 +367,36 @@ fn full_app_shell() -> Element {
     // without re-fetching. Sorted by date-desc to match the rendering.
     let visible_messages: Signal<Vec<MessageId>> = use_signal(Vec::new);
 
+    // Command palette visibility (⌘K) and recent-search ring buffer for
+    // the palette's "Recent" section. Both live at App root so the
+    // palette can pull across pane boundaries on open.
+    let palette_visible: Signal<bool> = use_signal(|| false);
+    let mut recent_searches: Signal<Vec<String>> = use_signal(Vec::new);
+
+    // Capture cleared search queries into the recent ring buffer.
+    // Watching the transition non-empty → empty avoids polluting the
+    // ring with every keystroke while still recording every query the
+    // user actually saw results for. Bounded to 8 entries; dedup keeps
+    // a re-typed query from filling the buffer.
+    {
+        let mut last_query: Signal<String> = use_signal(String::new);
+        let q_now = search_query.read().clone();
+        use_effect(use_reactive!(|q_now| {
+            let prev = last_query.read().clone();
+            if !prev.is_empty() && q_now.is_empty() {
+                let trimmed = prev.trim().to_string();
+                if !trimmed.is_empty() {
+                    recent_searches.with_mut(|v| {
+                        v.retain(|s| s != &trimmed);
+                        v.insert(0, trimmed);
+                        v.truncate(8);
+                    });
+                }
+            }
+            last_query.set(q_now);
+        }));
+    }
+
     // ComposePane occupies the reader slot when active, so the Servo
     // overlay surface — which paints over `.reader-body-fill` and is
     // positioned by a JS-side ResizeObserver — must be hidden whenever
@@ -480,6 +510,7 @@ fn full_app_shell() -> Element {
                 help_visible,
                 search_query,
                 visible_messages,
+                palette_visible,
             );
         });
         if let Some(window) = web_sys::window() {
@@ -542,7 +573,7 @@ fn full_app_shell() -> Element {
             onmousemove: onmousemove_shell,
             onmouseup: onmouseup_shell,
             onmouseleave: onmouseup_shell,
-            TopBar { account_filter }
+            TopBar { account_filter, palette_visible }
             div {
                 class: "shell-pane shell-pane-sidebar",
                 SidebarV2 { selection, sync_tick, compose }
@@ -577,6 +608,17 @@ fn full_app_shell() -> Element {
             StatusBar { status: sync_status }
             if help_visible() {
                 ShortcutsOverlay { visible: help_visible }
+            }
+            if palette_visible() {
+                CommandPalette {
+                    visible: palette_visible,
+                    selection,
+                    compose,
+                    sync_tick,
+                    search_query,
+                    recent_searches,
+                    help_visible,
+                }
             }
         }
     }
@@ -626,6 +668,7 @@ fn dispatch_keyboard_command(
     mut help_visible: Signal<bool>,
     mut search_query: Signal<String>,
     visible_messages: Signal<Vec<MessageId>>,
+    mut palette_visible: Signal<bool>,
 ) {
     use crate::keyboard::KeyboardCommand;
 
@@ -641,11 +684,12 @@ fn dispatch_keyboard_command(
             }));
         }
         KeyboardCommand::Cancel => {
-            // Priority: dismiss help first (most modal), then close
-            // compose, then clear active search, then clear the
-            // reader's selection. One press unwinds one layer —
-            // matches Gmail / native dialog behaviour.
-            if *help_visible.read() {
+            // Priority: dismiss palette → help → compose → search →
+            // selection. One press unwinds one layer — matches Gmail /
+            // native dialog behaviour.
+            if *palette_visible.read() {
+                palette_visible.set(false);
+            } else if *help_visible.read() {
                 help_visible.set(false);
             } else if compose.read().is_some() {
                 compose.set(None);
@@ -654,6 +698,10 @@ fn dispatch_keyboard_command(
             } else if selection.read().message.is_some() {
                 selection.with_mut(|s| s.message = None);
             }
+        }
+        KeyboardCommand::TogglePalette => {
+            let cur = *palette_visible.read();
+            palette_visible.set(!cur);
         }
         KeyboardCommand::FocusSearch => {
             // Focus the search input by id — the bar lives at the
@@ -779,6 +827,9 @@ fn ShortcutsOverlay(mut visible: Signal<bool>) -> Element {
                     class: "shortcuts-table",
                     tbody {
                         for (key, label) in [
+                            ("⌘K", "Command palette"),
+                            ("j", "Next message"),
+                            ("k", "Previous message"),
                             ("c", "Compose"),
                             ("e", "Archive selected message"),
                             ("#", "Delete selected message"),
@@ -786,7 +837,7 @@ fn ShortcutsOverlay(mut visible: Signal<bool>) -> Element {
                             ("a", "Reply all"),
                             ("f", "Forward"),
                             ("/", "Search mail"),
-                            ("Esc", "Close compose / clear search / clear selection"),
+                            ("Esc", "Close palette / compose / search / selection"),
                             ("?", "Toggle this help"),
                         ] {
                             tr {
@@ -804,6 +855,307 @@ fn ShortcutsOverlay(mut visible: Signal<bool>) -> Element {
                     "Shortcuts are ignored while typing in a field."
                 }
             }
+        }
+    }
+}
+
+/// Command palette (⌘K). Centered overlay that fuzzy-matches the
+/// query against three sources: every account's folders ("jump to"),
+/// a static command list (compose / settings / add account / help),
+/// and recent search queries. ESC / Cmd+K closes; arrow keys
+/// navigate; Enter dispatches.
+#[component]
+fn CommandPalette(
+    mut visible: Signal<bool>,
+    mut selection: Signal<Selection>,
+    mut compose: Signal<Option<ComposeState>>,
+    sync_tick: SyncTick,
+    mut search_query: Signal<String>,
+    recent_searches: Signal<Vec<String>>,
+    mut help_visible: Signal<bool>,
+) -> Element {
+    let mut query = use_signal(String::new);
+    let mut active_idx = use_signal(|| 0usize);
+
+    // Pull every account + its folders. Refetched on each open since
+    // the palette only mounts when `visible` is true; closed-then-
+    // reopened picks up brand-new accounts/folders without staleness.
+    let folders = use_resource(|| async move {
+        let accounts = invoke::<Vec<Account>>("accounts_list", ()).await?;
+        let mut out: Vec<(Account, Vec<Folder>)> = Vec::with_capacity(accounts.len());
+        for a in accounts {
+            let folders_for_account = invoke::<Vec<Folder>>(
+                "folders_list",
+                serde_json::json!({ "input": { "account": a.id } }),
+            )
+            .await
+            .unwrap_or_default();
+            out.push((a, folders_for_account));
+        }
+        Ok::<_, String>(out)
+    });
+
+    // Build the entry list. Filter happens against the lowercase
+    // search-text of each entry; substring is good enough for v0.1.
+    let q = query.read().to_lowercase();
+    let mut entries: Vec<PaletteEntry> = Vec::new();
+
+    // Static commands always appear so users can discover them.
+    entries.push(PaletteEntry::Command(PaletteCommand::Compose));
+    entries.push(PaletteEntry::Command(PaletteCommand::OpenSettings));
+    entries.push(PaletteEntry::Command(PaletteCommand::AddAccount));
+    entries.push(PaletteEntry::Command(PaletteCommand::ToggleHelp));
+    entries.push(PaletteEntry::Command(PaletteCommand::ClearReader));
+
+    if let Some(Ok(account_groups)) = folders.read_unchecked().as_ref() {
+        for (account, folder_list) in account_groups {
+            for f in folder_list {
+                entries.push(PaletteEntry::Folder {
+                    account_id: account.id.clone(),
+                    folder_id: f.id.clone(),
+                    folder_label: crate::format::display_name_for_folder(&f.name).to_string(),
+                    account_label: account.email_address.clone(),
+                });
+            }
+        }
+    }
+
+    for s in recent_searches.read().iter() {
+        entries.push(PaletteEntry::RecentSearch(s.clone()));
+    }
+
+    let filtered: Vec<PaletteEntry> = if q.is_empty() {
+        entries
+    } else {
+        entries
+            .into_iter()
+            .filter(|e| e.search_text().to_lowercase().contains(&q))
+            .collect()
+    };
+
+    // Clamp the active index inside the filtered range. Re-evaluating
+    // on each render means a query that filters the list shorter
+    // doesn't leave the highlight pointing past the end.
+    let max_idx = filtered.len().saturating_sub(1);
+    let cur_idx = (*active_idx.read()).min(max_idx);
+
+    let mut dispatch_entry = move |entry: PaletteEntry, mut visible: Signal<bool>| {
+        match entry {
+            PaletteEntry::Folder {
+                account_id,
+                folder_id,
+                ..
+            } => {
+                selection.with_mut(|s| {
+                    s.account = Some(account_id);
+                    s.folder = Some(folder_id);
+                    s.message = None;
+                    s.unified = false;
+                });
+            }
+            PaletteEntry::Command(PaletteCommand::Compose) => {
+                let default_account = selection.read().account.clone();
+                compose.set(Some(ComposeState {
+                    default_account,
+                    draft_id: None,
+                }));
+            }
+            PaletteEntry::Command(PaletteCommand::OpenSettings) => {
+                spawn(async move {
+                    if let Err(e) = invoke::<()>("settings_open", serde_json::json!({})).await {
+                        web_sys_log(&format!("settings_open: {e}"));
+                    }
+                });
+            }
+            PaletteEntry::Command(PaletteCommand::AddAccount) => {
+                spawn(async move {
+                    if let Err(e) = invoke::<()>("oauth_add_open", serde_json::json!({})).await {
+                        web_sys_log(&format!("oauth_add_open: {e}"));
+                    }
+                });
+            }
+            PaletteEntry::Command(PaletteCommand::ToggleHelp) => {
+                let cur = *help_visible.read();
+                help_visible.set(!cur);
+            }
+            PaletteEntry::Command(PaletteCommand::ClearReader) => {
+                selection.with_mut(|s| s.message = None);
+            }
+            PaletteEntry::RecentSearch(s) => {
+                search_query.set(s);
+            }
+        }
+        let _ = sync_tick;
+        visible.set(false);
+    };
+
+    rsx! {
+        div {
+            class: "palette-backdrop",
+            onclick: move |_| visible.set(false),
+            div {
+                class: "palette-shell",
+                onclick: |evt: Event<MouseData>| evt.stop_propagation(),
+                input {
+                    id: "qsl-palette-input",
+                    class: "palette-input",
+                    r#type: "text",
+                    autocomplete: "off",
+                    spellcheck: "false",
+                    placeholder: "Jump to mailbox · run command · recent search",
+                    value: "{query}",
+                    oninput: move |evt: Event<FormData>| {
+                        query.set(evt.value());
+                        active_idx.set(0);
+                    },
+                    onkeydown: {
+                        let entries_for_key = filtered.clone();
+                        move |evt: Event<KeyboardData>| {
+                            match evt.key() {
+                                Key::Escape => {
+                                    evt.prevent_default();
+                                    visible.set(false);
+                                }
+                                Key::ArrowDown => {
+                                    evt.prevent_default();
+                                    if !entries_for_key.is_empty() {
+                                        let next = (cur_idx + 1) % entries_for_key.len();
+                                        active_idx.set(next);
+                                    }
+                                }
+                                Key::ArrowUp => {
+                                    evt.prevent_default();
+                                    if !entries_for_key.is_empty() {
+                                        let prev = if cur_idx == 0 {
+                                            entries_for_key.len() - 1
+                                        } else {
+                                            cur_idx - 1
+                                        };
+                                        active_idx.set(prev);
+                                    }
+                                }
+                                Key::Enter => {
+                                    evt.prevent_default();
+                                    if let Some(entry) = entries_for_key.get(cur_idx).cloned() {
+                                        dispatch_entry(entry, visible);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    },
+                    autofocus: true,
+                }
+                if filtered.is_empty() {
+                    div { class: "palette-empty", "No matches." }
+                } else {
+                    div {
+                        class: "palette-list",
+                        for (i, entry) in filtered.iter().enumerate() {
+                            {
+                                let entry_for_click = entry.clone();
+                                let row_class = if i == cur_idx {
+                                    "palette-row palette-row-active"
+                                } else {
+                                    "palette-row"
+                                };
+                                rsx! {
+                                    button {
+                                        key: "{i}",
+                                        class: row_class,
+                                        r#type: "button",
+                                        onmouseenter: move |_| active_idx.set(i),
+                                        onclick: move |_| dispatch_entry(entry_for_click.clone(), visible),
+                                        span { class: "palette-row-kind", "{entry.kind_label()}" }
+                                        span { class: "palette-row-label", "{entry.primary_label()}" }
+                                        if let Some(meta) = entry.secondary_label() {
+                                            span { class: "palette-row-meta", "{meta}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                div {
+                    class: "palette-footnote",
+                    "↑↓ navigate · ↵ select · Esc close"
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PaletteEntry {
+    Folder {
+        account_id: AccountId,
+        folder_id: FolderId,
+        folder_label: String,
+        account_label: String,
+    },
+    Command(PaletteCommand),
+    RecentSearch(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteCommand {
+    Compose,
+    OpenSettings,
+    AddAccount,
+    ToggleHelp,
+    ClearReader,
+}
+
+impl PaletteEntry {
+    fn kind_label(&self) -> &'static str {
+        match self {
+            PaletteEntry::Folder { .. } => "jump",
+            PaletteEntry::Command(_) => "cmd",
+            PaletteEntry::RecentSearch(_) => "recent",
+        }
+    }
+
+    fn primary_label(&self) -> String {
+        match self {
+            PaletteEntry::Folder { folder_label, .. } => folder_label.clone(),
+            PaletteEntry::Command(cmd) => cmd.label().to_string(),
+            PaletteEntry::RecentSearch(q) => q.clone(),
+        }
+    }
+
+    fn secondary_label(&self) -> Option<String> {
+        match self {
+            PaletteEntry::Folder { account_label, .. } => Some(account_label.clone()),
+            PaletteEntry::Command(_) => None,
+            PaletteEntry::RecentSearch(_) => None,
+        }
+    }
+
+    /// Text the filter substring-matches against. Includes both the
+    /// primary label and the secondary so typing the account name
+    /// surfaces every folder under it.
+    fn search_text(&self) -> String {
+        match self {
+            PaletteEntry::Folder {
+                folder_label,
+                account_label,
+                ..
+            } => format!("{folder_label} {account_label}"),
+            PaletteEntry::Command(cmd) => cmd.label().to_string(),
+            PaletteEntry::RecentSearch(q) => q.clone(),
+        }
+    }
+}
+
+impl PaletteCommand {
+    fn label(&self) -> &'static str {
+        match self {
+            PaletteCommand::Compose => "Compose new message",
+            PaletteCommand::OpenSettings => "Open settings",
+            PaletteCommand::AddAccount => "Add account",
+            PaletteCommand::ToggleHelp => "Toggle keyboard shortcuts",
+            PaletteCommand::ClearReader => "Close reader",
         }
     }
 }
@@ -877,7 +1229,7 @@ fn short_folder_label(folder_id: &str) -> String {
 /// the chip opens a dropdown with the configured accounts plus an
 /// "all accounts" reset.
 #[component]
-fn TopBar(account_filter: Signal<Option<AccountId>>) -> Element {
+fn TopBar(account_filter: Signal<Option<AccountId>>, mut palette_visible: Signal<bool>) -> Element {
     let accounts = use_resource(|| async { invoke::<Vec<Account>>("accounts_list", ()).await });
     let mut chip_open: Signal<bool> = use_signal(|| false);
 
@@ -910,6 +1262,10 @@ fn TopBar(account_filter: Signal<Option<AccountId>>) -> Element {
                 class: "topbar-cmd-pill",
                 r#type: "button",
                 title: "Command palette (⌘K)",
+                onclick: move |_| {
+                    let cur = *palette_visible.read();
+                    palette_visible.set(!cur);
+                },
                 span { class: "topbar-cmd-key", "⌘K" }
                 span { "search · jump · command" }
             }
