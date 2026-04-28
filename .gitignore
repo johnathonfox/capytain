@@ -25,3 +25,7 @@ apps/desktop/ui/dist/
 # Local env
 .env
 .env.local
+
+# Local debug log emitted by ad-hoc `cargo run -p qsl-desktop > qsl-launch.log`
+# launches.
+qsl-launch.log
