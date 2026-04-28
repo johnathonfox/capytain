@@ -19,6 +19,8 @@ mod app;
 #[cfg(target_arch = "wasm32")]
 mod format;
 #[cfg(target_arch = "wasm32")]
+mod keyboard;
+#[cfg(target_arch = "wasm32")]
 mod reader_only;
 #[cfg(target_arch = "wasm32")]
 mod reply;
@@ -30,11 +32,13 @@ fn main() {
     dioxus::launch(app::App);
 }
 
-// `format`, `reply`, and `threading` are plain `chrono` / IPC-type
-// logic with no wasm-only deps, so keep their tests reachable from
-// `cargo test` on the host.
+// `format`, `reply`, `threading`, and `keyboard` are plain
+// `chrono` / IPC-type / pure-fn logic with no wasm-only deps, so
+// keep their tests reachable from `cargo test` on the host.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod format;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod keyboard;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod reply;
 #[cfg(all(test, not(target_arch = "wasm32")))]
