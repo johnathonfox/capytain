@@ -454,6 +454,51 @@ ul {
   color: #7c8290;
 }
 
+/* Bulk action bar — overlays the top of the message list when at
+ * least one row is checked. Sits above the scroll region so the
+ * actions stay reachable while the user scrolls through results. */
+.bulk-action-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: rgba(86, 142, 235, 0.10);
+  border-bottom: 1px solid #20242e;
+}
+
+.bulk-action-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: #cfd3da;
+  margin-right: 4px;
+}
+
+.bulk-action {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  border: 1px solid #2a3242;
+  background: #1c202a;
+  color: #cfd3da;
+  cursor: pointer;
+}
+
+.bulk-action:hover {
+  background: #232936;
+  border-color: #3a4252;
+}
+
+.bulk-action-delete:hover {
+  border-color: #b8534b;
+  color: #f3a39c;
+}
+
+.bulk-action-clear {
+  margin-left: auto;
+  color: #7c8290;
+}
+
 .msglist-empty {
   padding: 24px 16px;
   font-size: 12px;
@@ -467,7 +512,8 @@ ul {
 
 .msg-row {
   display: grid;
-  grid-template-columns: 32px 1fr;
+  /* checkbox | avatar | content */
+  grid-template-columns: 22px 32px 1fr;
   gap: 10px;
   padding: 10px 16px;
   border-bottom: 1px solid #1c202a;
@@ -485,8 +531,40 @@ ul {
   border-left-color: #568eeb;
 }
 
+/* `.checked` is the bulk-select tint, distinct from `.selected` (which
+ * means "opened in the reader"). A row can be both — `.selected`
+ * styles win because they paint via background+border-left, while
+ * `.checked` only tints the background. */
+.msg-row.checked {
+  background: rgba(86, 142, 235, 0.06);
+}
+
+.msg-row-check {
+  grid-row: 1 / span 3;
+  grid-column: 1;
+  width: 22px;
+  height: 22px;
+  margin-top: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.msg-row-check input[type="checkbox"] {
+  margin: 0;
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  accent-color: #568eeb;
+  /* The wrapping div is the click target — letting the input itself
+   * react would race the wrapper's `bulk_selected.with_mut` and
+   * desync the visual state for one frame. */
+  pointer-events: none;
+}
+
 .msg-row-avatar {
   grid-row: 1 / span 3;
+  grid-column: 2;
   width: 32px;
   height: 32px;
   border-radius: 50%;
