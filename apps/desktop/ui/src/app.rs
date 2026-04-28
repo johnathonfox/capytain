@@ -20,8 +20,9 @@ use std::collections::{HashMap, HashSet};
 
 use dioxus::prelude::*;
 use qsl_ipc::{
-    Account, AccountId, Attachment, Contact, Draft, DraftBodyKind, DraftId, EmailAddress, Folder,
-    FolderId, MessageHeaders, MessageId, MessagePage, RenderedMessage, SortOrder, SyncEvent,
+    Account, AccountId, Attachment, Contact, Draft, DraftAttachment, DraftBodyKind, DraftId,
+    EmailAddress, Folder, FolderId, MessageHeaders, MessageId, MessagePage, RenderedMessage,
+    SortOrder, SyncEvent,
 };
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -330,6 +331,19 @@ pub type SyncTick = Signal<u64>;
 /// matching event triggers work.
 pub type FolderTokens = Signal<HashMap<FolderId, u64>>;
 
+/// Open context-menu state. `Some` while the right-click popover is
+/// shown. The pixel coords are viewport-relative; the popover renders
+/// itself with `position: fixed` at those coordinates. `is_unread`
+/// drives the Mark read / Mark unread label without re-fetching the
+/// flag.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MessageContextMenu {
+    pub x: f64,
+    pub y: f64,
+    pub message_id: MessageId,
+    pub is_unread: bool,
+}
+
 // ---------- Root ----------
 
 #[component]
@@ -401,6 +415,25 @@ fn full_app_shell() -> Element {
     // palette can pull across pane boundaries on open.
     let palette_visible: Signal<bool> = use_signal(|| false);
     let mut recent_searches: Signal<Vec<String>> = use_signal(Vec::new);
+
+    // Undo-send deadline (epoch ms). `Some(t)` means a Send click is
+    // armed but holding for the configured undo window; `None` means
+    // no pending send. Lives at App root so the global Esc handler
+    // (which doesn't see ComposePane's locals) can clear it on Cancel
+    // — unwinding pending sends takes priority over closing compose.
+    let undo_send_pending: Signal<Option<f64>> = use_signal(|| None);
+
+    // Right-click context menu state. `Some` while the popover is
+    // visible. Lives at App root so a single popover element renders
+    // over the whole shell and dismiss-on-outside-click stays simple
+    // (no per-row click-outside listeners). Both `MessageRowV2` and
+    // `ThreadRow` write to it on right-click.
+    let context_menu: Signal<Option<MessageContextMenu>> = use_signal(|| None);
+    // Expose the context-menu signal to nested rows without threading
+    // it through every intermediate list component (SearchList,
+    // UnifiedInbox, MessageListV2, ThreadRow). The rows reach for it
+    // via `use_context::<Signal<Option<MessageContextMenu>>>()`.
+    use_context_provider(|| context_menu);
 
     // Capture cleared search queries into the recent ring buffer.
     // Watching the transition non-empty → empty avoids polluting the
@@ -619,7 +652,14 @@ fn full_app_shell() -> Element {
             // and must work even when focus is in the search bar or
             // compose body. Without this exemption Ctrl+K silently
             // dropped on every focused input.
-            if !ctrl_or_meta && is_typing_in_field() {
+            //
+            // Escape during a pending undo-send is also exempted: it's
+            // a modal-cancel keystroke, never typed text, and the user
+            // expects "Esc cancels" to work even with focus in the
+            // body textarea where they clicked Send from.
+            let allow_through =
+                ctrl_or_meta || (key == "Escape" && undo_send_pending.read().is_some());
+            if !allow_through && is_typing_in_field() {
                 return;
             }
             let Some(cmd) = crate::keyboard::parse(&key, ctrl_or_meta) else {
@@ -635,6 +675,8 @@ fn full_app_shell() -> Element {
                 search_query,
                 visible_messages,
                 palette_visible,
+                undo_send_pending,
+                context_menu,
             );
         });
         if let Some(window) = web_sys::window() {
@@ -717,7 +759,7 @@ fn full_app_shell() -> Element {
             div {
                 class: "shell-pane shell-pane-reader",
                 if compose.read().is_some() {
-                    ComposePane { compose, sync_tick }
+                    ComposePane { compose, sync_tick, undo_send_pending }
                 } else {
                     ReaderPaneV2 { selection, sync_tick, compose }
                 }
@@ -743,6 +785,9 @@ fn full_app_shell() -> Element {
                     recent_searches,
                     help_visible,
                 }
+            }
+            if context_menu.read().is_some() {
+                MessageContextPopover { context_menu, compose, sync_tick, selection }
             }
         }
     }
@@ -811,6 +856,7 @@ fn is_typing_in_field() -> bool {
 /// against the App-root signals. Pulled out of the listener closure
 /// for readability — the closure can stay tightly scoped to "parse +
 /// guard," and this function owns the per-command dispatch.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_keyboard_command(
     cmd: crate::keyboard::KeyboardCommand,
     mut selection: Signal<Selection>,
@@ -820,6 +866,8 @@ fn dispatch_keyboard_command(
     mut search_query: Signal<String>,
     visible_messages: Signal<Vec<MessageId>>,
     mut palette_visible: Signal<bool>,
+    mut undo_send_pending: Signal<Option<f64>>,
+    mut context_menu: Signal<Option<MessageContextMenu>>,
 ) {
     use crate::keyboard::KeyboardCommand;
 
@@ -835,10 +883,17 @@ fn dispatch_keyboard_command(
             }));
         }
         KeyboardCommand::Cancel => {
-            // Priority: dismiss palette → help → compose → search →
-            // selection. One press unwinds one layer — matches Gmail /
-            // native dialog behaviour.
-            if *palette_visible.read() {
+            // Priority: pending undo-send → context menu → palette →
+            // help → compose → search → selection. One press unwinds
+            // one layer — matches Gmail / native dialog behaviour.
+            // Pending undo-send sits above compose so Esc cancels the
+            // in-flight send before it closes the pane (closing alone
+            // wouldn't cancel — the pending future is decoupled).
+            if undo_send_pending.read().is_some() {
+                undo_send_pending.set(None);
+            } else if context_menu.read().is_some() {
+                context_menu.set(None);
+            } else if *palette_visible.read() {
                 palette_visible.set(false);
             } else if *help_visible.read() {
                 help_visible.set(false);
@@ -964,6 +1019,224 @@ fn dispatch_keyboard_command(
 /// Modal cheatsheet shown over the app shell when `?` is pressed.
 /// Closing is via either pressing `?` or `Esc` (both routed through
 /// the keyboard dispatcher) or clicking the backdrop.
+/// Right-click popover anchored at the cursor coordinates carried by
+/// `context_menu`. Operates on the single `message_id` that opened it
+/// (NOT on the bulk selection — right-click is single-target by
+/// convention; bulk lives in the `bulk-action-bar`). Dismisses on:
+///   - any item click (after the action fires),
+///   - clicking the transparent backdrop,
+///   - Esc (handled by `dispatch_keyboard_command`'s Cancel arm; this
+///     popover takes priority over palette / compose / search).
+///
+/// Reply / Reply-all / Forward fetch the `RenderedMessage` on demand
+/// (one IPC round-trip) and call `open_reply` — the same path the
+/// keyboard `r` / `a` / `f` shortcuts use, so the resulting compose
+/// pane has identical headers + quoted-body.
+#[component]
+fn MessageContextPopover(
+    mut context_menu: Signal<Option<MessageContextMenu>>,
+    compose: Signal<Option<ComposeState>>,
+    sync_tick: SyncTick,
+    selection: Signal<Selection>,
+) -> Element {
+    let Some(state) = context_menu.read().clone() else {
+        return rsx! {};
+    };
+    let MessageContextMenu {
+        x,
+        y,
+        message_id,
+        is_unread,
+    } = state;
+    // Pin to the viewport. The backdrop catches outside-clicks; the
+    // popover stops propagation so clicking inside doesn't dismiss.
+    let style = format!("position: fixed; left: {x}px; top: {y}px;");
+
+    let mut dismiss = move || context_menu.set(None);
+
+    let on_reply = {
+        let id = message_id.clone();
+        let compose_signal = compose;
+        let mut menu = context_menu;
+        move |_| {
+            menu.set(None);
+            let id = id.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let payload = serde_json::json!({
+                    "input": { "id": id.clone(), "force_trusted": false }
+                });
+                match invoke::<RenderedMessage>("messages_get", payload).await {
+                    Ok(rendered) => open_reply(rendered, compose_signal, ReplyKind::Reply),
+                    Err(e) => web_sys_log(&format!("messages_get for context reply: {e}")),
+                }
+            });
+        }
+    };
+
+    let on_reply_all = {
+        let id = message_id.clone();
+        let compose_signal = compose;
+        let mut menu = context_menu;
+        move |_| {
+            menu.set(None);
+            let id = id.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let payload = serde_json::json!({
+                    "input": { "id": id.clone(), "force_trusted": false }
+                });
+                match invoke::<RenderedMessage>("messages_get", payload).await {
+                    Ok(rendered) => open_reply(rendered, compose_signal, ReplyKind::ReplyAll),
+                    Err(e) => web_sys_log(&format!("messages_get for context reply-all: {e}")),
+                }
+            });
+        }
+    };
+
+    let on_forward = {
+        let id = message_id.clone();
+        let compose_signal = compose;
+        let mut menu = context_menu;
+        move |_| {
+            menu.set(None);
+            let id = id.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let payload = serde_json::json!({
+                    "input": { "id": id.clone(), "force_trusted": false }
+                });
+                match invoke::<RenderedMessage>("messages_get", payload).await {
+                    Ok(rendered) => open_reply(rendered, compose_signal, ReplyKind::Forward),
+                    Err(e) => web_sys_log(&format!("messages_get for context forward: {e}")),
+                }
+            });
+        }
+    };
+
+    let on_archive = {
+        let id = message_id.clone();
+        let mut sync_tick = sync_tick;
+        let mut selection = selection;
+        let mut menu = context_menu;
+        move |_| {
+            menu.set(None);
+            let id = id.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let payload = serde_json::json!({ "input": { "ids": [id.clone()] } });
+                if let Err(e) = invoke::<()>("messages_archive", payload).await {
+                    web_sys_log(&format!("context archive: {e}"));
+                    return;
+                }
+                selection.with_mut(|s| {
+                    if s.message.as_ref().is_some_and(|m| m.0 == id.0) {
+                        s.message = None;
+                    }
+                });
+                sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+            });
+        }
+    };
+
+    let on_delete = {
+        let id = message_id.clone();
+        let mut sync_tick = sync_tick;
+        let mut selection = selection;
+        let mut menu = context_menu;
+        move |_| {
+            menu.set(None);
+            let id = id.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let payload = serde_json::json!({ "input": { "ids": [id.clone()] } });
+                if let Err(e) = invoke::<()>("messages_delete", payload).await {
+                    web_sys_log(&format!("context delete: {e}"));
+                    return;
+                }
+                selection.with_mut(|s| {
+                    if s.message.as_ref().is_some_and(|m| m.0 == id.0) {
+                        s.message = None;
+                    }
+                });
+                sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+            });
+        }
+    };
+
+    // The toggle: if currently unread, mark read; if currently read,
+    // mark unread. `is_unread` is captured at right-click time so the
+    // label matches what the user saw on the row.
+    let toggle_label = if is_unread {
+        "Mark as read"
+    } else {
+        "Mark as unread"
+    };
+    let on_toggle_read = {
+        let id = message_id.clone();
+        let mut sync_tick = sync_tick;
+        let mut menu = context_menu;
+        let target_seen = is_unread; // unread → set seen=true
+        move |_| {
+            menu.set(None);
+            let id = id.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let payload = serde_json::json!({
+                    "input": { "ids": [id.clone()], "seen": target_seen }
+                });
+                if let Err(e) = invoke::<()>("messages_mark_read", payload).await {
+                    web_sys_log(&format!("context mark_read: {e}"));
+                    return;
+                }
+                sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+            });
+        }
+    };
+
+    let on_open_window = {
+        let id = message_id.clone();
+        let mut menu = context_menu;
+        move |_| {
+            menu.set(None);
+            let id = id.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Err(e) = invoke::<()>(
+                    "messages_open_in_window",
+                    serde_json::json!({ "input": { "id": id } }),
+                )
+                .await
+                {
+                    web_sys_log(&format!("context open_in_window: {e}"));
+                }
+            });
+        }
+    };
+
+    rsx! {
+        div {
+            class: "ctx-menu-backdrop",
+            onclick: move |_| dismiss(),
+            oncontextmenu: move |evt: Event<MouseData>| {
+                // Right-click on the backdrop also dismisses, and we
+                // suppress the browser's native menu so it doesn't
+                // pile up on top of ours.
+                evt.prevent_default();
+                dismiss();
+            },
+            div {
+                class: "ctx-menu",
+                style: "{style}",
+                onclick: |evt: Event<MouseData>| evt.stop_propagation(),
+                oncontextmenu: |evt: Event<MouseData>| evt.prevent_default(),
+                button { class: "ctx-menu-item", r#type: "button", onclick: on_reply, "Reply" }
+                button { class: "ctx-menu-item", r#type: "button", onclick: on_reply_all, "Reply all" }
+                button { class: "ctx-menu-item", r#type: "button", onclick: on_forward, "Forward" }
+                div { class: "ctx-menu-sep" }
+                button { class: "ctx-menu-item", r#type: "button", onclick: on_toggle_read, "{toggle_label}" }
+                button { class: "ctx-menu-item", r#type: "button", onclick: on_archive, "Archive" }
+                button { class: "ctx-menu-item ctx-menu-item-danger", r#type: "button", onclick: on_delete, "Delete" }
+                div { class: "ctx-menu-sep" }
+                button { class: "ctx-menu-item", r#type: "button", onclick: on_open_window, "Open in new window" }
+            }
+        }
+    }
+}
+
 #[component]
 fn ShortcutsOverlay(mut visible: Signal<bool>) -> Element {
     rsx! {
@@ -1049,14 +1322,14 @@ fn CommandPalette(
     // Build the entry list. Filter happens against the lowercase
     // search-text of each entry; substring is good enough for v0.1.
     let q = query.read().to_lowercase();
-    let mut entries: Vec<PaletteEntry> = Vec::new();
-
     // Static commands always appear so users can discover them.
-    entries.push(PaletteEntry::Command(PaletteCommand::Compose));
-    entries.push(PaletteEntry::Command(PaletteCommand::OpenSettings));
-    entries.push(PaletteEntry::Command(PaletteCommand::AddAccount));
-    entries.push(PaletteEntry::Command(PaletteCommand::ToggleHelp));
-    entries.push(PaletteEntry::Command(PaletteCommand::ClearReader));
+    let mut entries: Vec<PaletteEntry> = vec![
+        PaletteEntry::Command(PaletteCommand::Compose),
+        PaletteEntry::Command(PaletteCommand::OpenSettings),
+        PaletteEntry::Command(PaletteCommand::AddAccount),
+        PaletteEntry::Command(PaletteCommand::ToggleHelp),
+        PaletteEntry::Command(PaletteCommand::ClearReader),
+    ];
 
     if let Some(Ok(account_groups)) = folders.read_unchecked().as_ref() {
         for (account, folder_list) in account_groups {
@@ -1590,7 +1863,11 @@ fn format_bytes(bytes: u64) -> String {
 // ---------- Middle pane: compose ----------
 
 #[component]
-fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> Element {
+fn ComposePane(
+    compose: Signal<Option<ComposeState>>,
+    sync_tick: SyncTick,
+    undo_send_pending: Signal<Option<f64>>,
+) -> Element {
     let initial = compose.read().clone();
     let Some(initial) = initial else {
         return rsx! { p { class: "hint", "No compose state — this shouldn't render." } };
@@ -1610,9 +1887,34 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
     let mut subject = use_signal(String::new);
     let mut body = use_signal(String::new);
     let mut loaded = use_signal(|| initial.draft_id.is_none());
+    // Bcc starts hidden: most outgoing mail doesn't use it, so the
+    // dense compose chrome shouldn't reserve a row by default. The
+    // user reveals it via the `+bcc` link in the Cc row, OR a draft
+    // hydration that finds non-empty bcc content auto-reveals it
+    // (carrying over from a saved draft or a future reply-with-bcc
+    // flow). Once shown in this compose session, stays shown.
+    let mut bcc_revealed = use_signal(|| false);
+
+    // Once-per-mount guard for "did we already append the signature?"
+    // Without it the signature effect would re-run on every account
+    // switch and stack copies into the body, or worse, append over a
+    // user's edits. We append on first observation of a non-empty
+    // account_id when the body is empty, then never again.
+    let mut signature_applied = use_signal(|| false);
     let mut last_change = use_signal(|| 0u64);
     let mut save_status: Signal<SaveStatus> = use_signal(|| SaveStatus::Idle);
     let send_in_flight: Signal<bool> = use_signal(|| false);
+    // Drives the countdown banner re-render. Updated by the timer in
+    // `send_now` while `undo_send_pending` is `Some`. Local because
+    // the App-level Cancel handler doesn't need to read it — only
+    // `undo_send_pending` (the deadline) is the cross-component
+    // contract; this is just for display.
+    let undo_send_now_ms = use_signal(|| 0.0_f64);
+    // Attachments. Populated either by the file picker (`+ Attach`
+    // button) or rehydrated from the loaded draft. Round-trips through
+    // every `drafts_save` call so the persisted draft row matches the
+    // editor state.
+    let mut attachments: Signal<Vec<DraftAttachment>> = use_signal(Vec::new);
     // Reply context from the original draft (when opened via Reply /
     // Reply-All / Forward). Not edited by the user but must survive
     // every save round-trip so the eventual `messages_send` call
@@ -1637,11 +1939,16 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
                             account_id.set(Some(d.account_id));
                             to_str.set(format_addrs(&d.to));
                             cc_str.set(format_addrs(&d.cc));
-                            bcc_str.set(format_addrs(&d.bcc));
+                            let bcc_loaded = format_addrs(&d.bcc);
+                            if !bcc_loaded.trim().is_empty() {
+                                bcc_revealed.set(true);
+                            }
+                            bcc_str.set(bcc_loaded);
                             subject.set(d.subject);
                             body.set(d.body);
                             in_reply_to.set(d.in_reply_to);
                             references.set(d.references);
+                            attachments.set(d.attachments);
                             loaded.set(true);
                         }
                         Err(e) => {
@@ -1653,6 +1960,52 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
             }
         }
     });
+
+    // Append the per-account signature on the first compose mount
+    // for a fresh draft. Reads `compose.signature.<account_id>` from
+    // app_settings; if non-empty, appends `\n\n-- \n<sig>` to the
+    // body. RFC 3676 §4.3 sig delimiter (`-- ` with trailing space
+    // and a literal newline) is what every modern client expects.
+    // Skipped when:
+    //   - draft was hydrated from disk (existing draft already has
+    //     the user's prior body, including any earlier signature),
+    //   - body already has content (user pasted before the
+    //     signature lookup landed), or
+    //   - this compose session has already applied a signature.
+    {
+        let initial_had_draft = initial.draft_id.is_some();
+        let acc = account_id.read().clone();
+        use_effect(use_reactive!(|acc| {
+            if initial_had_draft {
+                return;
+            }
+            if *signature_applied.read() {
+                return;
+            }
+            let Some(account) = acc.as_ref() else {
+                return;
+            };
+            if !body.read().is_empty() {
+                return;
+            }
+            let key = crate::settings::compose_signature_key(account);
+            wasm_bindgen_futures::spawn_local(async move {
+                let payload = serde_json::json!({ "input": { "key": key } });
+                match invoke::<Option<String>>("app_settings_get", payload).await {
+                    Ok(Some(sig)) if !sig.trim().is_empty() => {
+                        let mut current = body.read().clone();
+                        if current.is_empty() && !*signature_applied.read() {
+                            current.push_str("\n\n-- \n");
+                            current.push_str(&sig);
+                            body.set(current);
+                            signature_applied.set(true);
+                        }
+                    }
+                    _ => {}
+                }
+            });
+        }));
+    }
 
     // Auto-save: every change bumps `last_change`. A spawned future
     // sleeps 5s, then checks whether `last_change` advanced; if not,
@@ -1667,6 +2020,7 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
         let body_signal = body;
         let in_reply_to_signal = in_reply_to;
         let references_signal = references;
+        let attachments_signal = attachments;
         let mut draft_signal = draft_id;
         let last_change_signal = last_change;
         let mut status_signal = save_status;
@@ -1686,6 +2040,7 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
             let id = draft_signal.read().clone();
             let in_reply_to_val = in_reply_to_signal.read().clone();
             let references_val = references_signal.read().clone();
+            let attachments_val = attachments_signal.read().clone();
 
             wasm_bindgen_futures::spawn_local(async move {
                 gloo_timers::future::sleep(std::time::Duration::from_secs(5)).await;
@@ -1703,7 +2058,7 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
                             "subject": subject_text,
                             "body": body_text,
                             "body_kind": DraftBodyKind::Plain,
-                            "attachments": Vec::<()>::new(),
+                            "attachments": attachments_val,
                             "in_reply_to": in_reply_to_val,
                             "references": references_val,
                         }
@@ -1735,6 +2090,7 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
         let body_signal = body;
         let in_reply_to_signal = in_reply_to;
         let references_signal = references;
+        let attachments_signal = attachments;
         let mut draft_signal = draft_id;
         let mut status_signal = save_status;
         let mut sync_tick = sync_tick;
@@ -1749,6 +2105,7 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
             let id = draft_signal.read().clone();
             let in_reply_to_val = in_reply_to_signal.read().clone();
             let references_val = references_signal.read().clone();
+            let attachments_val = attachments_signal.read().clone();
             status_signal.set(SaveStatus::Saving);
             wasm_bindgen_futures::spawn_local(async move {
                 let payload = serde_json::json!({
@@ -1762,7 +2119,7 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
                             "subject": subject_text,
                             "body": body_text,
                             "body_kind": DraftBodyKind::Plain,
-                            "attachments": Vec::<()>::new(),
+                            "attachments": attachments_val,
                             "in_reply_to": in_reply_to_val,
                             "references": references_val,
                         }
@@ -1787,6 +2144,17 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
     // editor state), then enqueue an `OP_SUBMIT_MESSAGE` outbox row
     // via `messages_send`. On success, close the compose pane —
     // the drain worker takes over from there.
+    //
+    // Undo-send: when `compose.undo_send` is `5` / `10` / `30` (sec),
+    // the click instead arms a banner with a deadline. The body of
+    // this closure spawns a 250 ms tick loop that watches for the
+    // user (or the Esc handler in `dispatch_keyboard_command`) clearing
+    // `undo_send_pending`. If the deadline arrives with the same
+    // pending value, we proceed to save + submit; if it changed, we
+    // bail. Equality on the deadline (as opposed to a separate
+    // generation counter) is what makes external cancellation work
+    // without extra plumbing — the App-level Cancel handler just sets
+    // the signal to `None` and our loop notices.
     let mut send_now = {
         let acc_signal = account_id;
         let to_signal = to_str;
@@ -1796,17 +2164,23 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
         let body_signal = body;
         let in_reply_to_signal = in_reply_to;
         let references_signal = references;
+        let attachments_signal = attachments;
         let mut draft_signal = draft_id;
         let mut status_signal = save_status;
         let mut sync_tick = sync_tick;
         let mut compose_signal = compose;
         let mut sending = send_in_flight;
+        let mut undo_pending = undo_send_pending;
+        let mut undo_now_ms = undo_send_now_ms;
         move || {
             if *sending.read() {
                 return;
             }
+            if undo_pending.read().is_some() {
+                return;
+            }
             let acc = acc_signal.read().clone();
-            let Some(acc) = acc else { return };
+            let Some(_) = acc else { return };
             let to = parse_addrs(&to_signal.read());
             let cc = parse_addrs(&cc_signal.read());
             let bcc = parse_addrs(&bcc_signal.read());
@@ -1814,14 +2188,70 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
                 status_signal.set(SaveStatus::Error("Add at least one recipient".into()));
                 return;
             }
-            let subject_text = subject_signal.read().clone();
-            let body_text = body_signal.read().clone();
-            let id = draft_signal.read().clone();
-            let in_reply_to_val = in_reply_to_signal.read().clone();
-            let references_val = references_signal.read().clone();
-            sending.set(true);
-            status_signal.set(SaveStatus::Saving);
             wasm_bindgen_futures::spawn_local(async move {
+                // Read the undo-send setting once per click. `off`
+                // (or unset) means "send immediately"; otherwise we
+                // hold the click for the configured number of seconds.
+                let setting = invoke::<Option<String>>(
+                    "app_settings_get",
+                    serde_json::json!({ "input": { "key": "compose.undo_send" } }),
+                )
+                .await
+                .ok()
+                .flatten();
+                let hold_secs: u64 = match setting.as_deref() {
+                    Some("5") => 5,
+                    Some("10") => 10,
+                    Some("30") => 30,
+                    _ => 0,
+                };
+
+                if hold_secs > 0 {
+                    let now_ms = js_sys::Date::now();
+                    let deadline_ms = now_ms + (hold_secs as f64) * 1000.0;
+                    undo_pending.set(Some(deadline_ms));
+                    undo_now_ms.set(now_ms);
+                    loop {
+                        gloo_timers::future::sleep(std::time::Duration::from_millis(250)).await;
+                        let cur = *undo_pending.read();
+                        if cur != Some(deadline_ms) {
+                            // Cancelled (set to None) or replaced
+                            // (deadline rearmed by another click).
+                            return;
+                        }
+                        let now = js_sys::Date::now();
+                        undo_now_ms.set(now);
+                        if now >= deadline_ms {
+                            break;
+                        }
+                    }
+                    let cur = *undo_pending.read();
+                    if cur != Some(deadline_ms) {
+                        return;
+                    }
+                    undo_pending.set(None);
+                }
+
+                // Re-snapshot the form. Edits during the hold window
+                // are intentionally honored — "send in 30s, fix typos
+                // in the meantime" is part of the value of undo-send.
+                let acc = match acc_signal.read().clone() {
+                    Some(a) => a,
+                    None => return,
+                };
+                let to = parse_addrs(&to_signal.read());
+                let cc = parse_addrs(&cc_signal.read());
+                let bcc = parse_addrs(&bcc_signal.read());
+                let subject_text = subject_signal.read().clone();
+                let body_text = body_signal.read().clone();
+                let id = draft_signal.read().clone();
+                let in_reply_to_val = in_reply_to_signal.read().clone();
+                let references_val = references_signal.read().clone();
+                let attachments_val = attachments_signal.read().clone();
+
+                sending.set(true);
+                status_signal.set(SaveStatus::Saving);
+
                 let save_payload = serde_json::json!({
                     "input": {
                         "draft": {
@@ -1833,7 +2263,7 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
                             "subject": subject_text,
                             "body": body_text,
                             "body_kind": DraftBodyKind::Plain,
-                            "attachments": Vec::<()>::new(),
+                            "attachments": attachments_val,
                             "in_reply_to": in_reply_to_val,
                             "references": references_val,
                         }
@@ -1864,6 +2294,21 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
                     }
                 }
             });
+        }
+    };
+
+    // Cancel a pending undo-send. Idempotent — clicking when nothing
+    // is pending is a no-op. Used by the on-screen Undo button; the
+    // global Esc handler in `dispatch_keyboard_command` clears the
+    // signal directly.
+    let mut cancel_undo_send = {
+        let mut undo_pending = undo_send_pending;
+        let mut status = save_status;
+        move || {
+            if undo_pending.read().is_some() {
+                undo_pending.set(None);
+                status.set(SaveStatus::Idle);
+            }
         }
     };
 
@@ -1989,15 +2434,34 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
                         value: to_str,
                         on_change: bump,
                     }
-                    AddressField {
-                        label: "Cc",
-                        value: cc_str,
-                        on_change: bump,
+                    // Cc row: full AddressField, plus a `+bcc` reveal
+                    // link inline when Bcc is still hidden. Once Bcc is
+                    // showing, the link is gone — there's no need to
+                    // re-hide it for the duration of this compose
+                    // session.
+                    div {
+                        class: "compose-cc-row",
+                        AddressField {
+                            label: "Cc",
+                            value: cc_str,
+                            on_change: bump,
+                        }
+                        if !*bcc_revealed.read() {
+                            button {
+                                r#type: "button",
+                                class: "compose-bcc-reveal",
+                                title: "Show the Bcc field",
+                                onclick: move |_| bcc_revealed.set(true),
+                                "+bcc"
+                            }
+                        }
                     }
-                    AddressField {
-                        label: "Bcc",
-                        value: bcc_str,
-                        on_change: bump,
+                    if *bcc_revealed.read() {
+                        AddressField {
+                            label: "Bcc",
+                            value: bcc_str,
+                            on_change: bump,
+                        }
                     }
                     div {
                         class: "field-row",
@@ -2015,6 +2479,14 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
                                 }
                             }
                         }
+                    }
+                    // Attachments row. The chip list mirrors the
+                    // `attachments` signal — picking files via the
+                    // button appends; clicking × removes. Empty list
+                    // collapses to just the button.
+                    AttachmentsRow {
+                        attachments,
+                        on_change: bump,
                     }
                     textarea {
                         class: "compose-body",
@@ -2065,15 +2537,41 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
                 }
                 div {
                     class: "compose-statusline-right",
-                    button {
-                        class: "compose-statusline-send",
-                        r#type: "button",
-                        title: "Send (⌘↵)",
-                        disabled: *send_in_flight.read(),
-                        onclick: move |_| send_now(),
-                        span { class: "compose-statusline-key", "⌘↵" }
-                        " "
-                        if *send_in_flight.read() { "sending…" } else { "send" }
+                    if let Some(deadline) = *undo_send_pending.read() {
+                        // Pending undo-send. Replace the Send button
+                        // with Undo + countdown. The button gets
+                        // `autofocus` so Esc on it (without leaving
+                        // the pane) cancels — the document-level
+                        // Cancel handler also clears the signal, so
+                        // any-focus Esc still works.
+                        {
+                            let now = *undo_send_now_ms.read();
+                            let remaining_ms = (deadline - now).max(0.0);
+                            let secs = (remaining_ms / 1000.0).ceil() as i64;
+                            rsx! {
+                                span { class: "compose-undo-countdown", "Sending in {secs}s" }
+                                button {
+                                    class: "compose-statusline-send danger",
+                                    r#type: "button",
+                                    title: "Cancel send (Esc)",
+                                    autofocus: true,
+                                    onclick: move |_| cancel_undo_send(),
+                                    span { class: "compose-statusline-key", "Esc" }
+                                    " undo"
+                                }
+                            }
+                        }
+                    } else {
+                        button {
+                            class: "compose-statusline-send",
+                            r#type: "button",
+                            title: "Send (⌘↵)",
+                            disabled: *send_in_flight.read(),
+                            onclick: move |_| send_now(),
+                            span { class: "compose-statusline-key", "⌘↵" }
+                            " "
+                            if *send_in_flight.read() { "sending…" } else { "send" }
+                        }
                     }
                 }
             }
@@ -2088,6 +2586,110 @@ enum SaveStatus {
     Saving,
     Saved,
     Error(String),
+}
+
+/// Compose-pane attachments row: a list of attachment chips plus an
+/// "Attach" button that opens the OS file picker via
+/// `compose_pick_attachments`. The picker returns one
+/// [`DraftAttachment`] per chosen file; the list is appended (existing
+/// attachments are preserved) and `on_change` fires so the auto-save
+/// effect bumps `last_change` for the next save round-trip.
+///
+/// File size is rendered as a humanized string (KB/MB) so the user
+/// sees that "they're about to send a 14 MB attachment" before
+/// hitting Send.
+#[component]
+fn AttachmentsRow(
+    mut attachments: Signal<Vec<DraftAttachment>>,
+    on_change: EventHandler<()>,
+) -> Element {
+    let pick = move |_| {
+        let mut atts = attachments;
+        let on_change = on_change;
+        wasm_bindgen_futures::spawn_local(async move {
+            let payload = serde_json::json!({ "input": { "title": "Attach files" } });
+            match invoke::<Vec<DraftAttachment>>("compose_pick_attachments", payload).await {
+                Ok(picked) if picked.is_empty() => {
+                    // User cancelled the dialog. No-op.
+                }
+                Ok(picked) => {
+                    atts.with_mut(|v| v.extend(picked));
+                    on_change.call(());
+                }
+                Err(e) => {
+                    web_sys_log(&format!("compose_pick_attachments: {e}"));
+                }
+            }
+        });
+    };
+
+    let items = attachments.read().clone();
+
+    rsx! {
+        div {
+            class: "compose-attachments-row",
+            label { class: "label", "Files" }
+            div {
+                class: "compose-attachments-list",
+                for (idx, att) in items.iter().enumerate().map(|(i, a)| (i, a.clone())) {
+                    {
+                        let on_change_remove = on_change;
+                        let label = format!(
+                            "{} ({})",
+                            att.filename,
+                            humanize_bytes(att.size_bytes)
+                        );
+                        rsx! {
+                            span {
+                                key: "{idx}-{att.path}",
+                                class: "compose-attachment-chip",
+                                title: "{att.path}",
+                                "{label}"
+                                button {
+                                    class: "compose-attachment-remove",
+                                    r#type: "button",
+                                    title: "Remove this attachment",
+                                    onclick: move |_| {
+                                        attachments.with_mut(|v| {
+                                            if idx < v.len() {
+                                                v.remove(idx);
+                                            }
+                                        });
+                                        on_change_remove.call(());
+                                    },
+                                    "×"
+                                }
+                            }
+                        }
+                    }
+                }
+                button {
+                    class: "compose-attachment-add",
+                    r#type: "button",
+                    title: "Attach files (opens file picker)",
+                    onclick: pick,
+                    "+ Attach"
+                }
+            }
+        }
+    }
+}
+
+/// Render a byte count as a short, humanized string. Approximate — the
+/// goal is "user sees that this is small/big" not exact accounting.
+fn humanize_bytes(n: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if n >= GB {
+        format!("{:.1} GB", n as f64 / GB as f64)
+    } else if n >= MB {
+        format!("{:.1} MB", n as f64 / MB as f64)
+    } else if n >= KB {
+        format!("{:.0} KB", n as f64 / KB as f64)
+    } else {
+        format!("{n} B")
+    }
 }
 
 #[component]
@@ -3425,6 +4027,20 @@ fn MessageRowV2(
         });
     };
 
+    let mut context_menu = use_context::<Signal<Option<MessageContextMenu>>>();
+    let id_for_ctx = msg.id.clone();
+    let oncontextmenu = move |evt: Event<MouseData>| {
+        evt.prevent_default();
+        evt.stop_propagation();
+        let coords = evt.client_coordinates();
+        context_menu.set(Some(MessageContextMenu {
+            x: coords.x,
+            y: coords.y,
+            message_id: id_for_ctx.clone(),
+            is_unread: unread,
+        }));
+    };
+
     rsx! {
         div {
             class: row_class,
@@ -3433,6 +4049,7 @@ fn MessageRowV2(
                 move |_| selection.write().message = Some(mid.clone())
             },
             ondoubleclick: ondoubleclick,
+            oncontextmenu: oncontextmenu,
             // Checkbox sits where the avatar normally lives. Click is
             // stop-propagation'd so checking a row doesn't also open
             // the reader (and vice-versa: clicking elsewhere on the
@@ -3557,6 +4174,21 @@ fn ThreadRow(
         });
     };
 
+    let mut context_menu = use_context::<Signal<Option<MessageContextMenu>>>();
+    let id_for_ctx = head.id.clone();
+    let head_unread = !head.flags.seen;
+    let oncontextmenu = move |evt: Event<MouseData>| {
+        evt.prevent_default();
+        evt.stop_propagation();
+        let coords = evt.client_coordinates();
+        context_menu.set(Some(MessageContextMenu {
+            x: coords.x,
+            y: coords.y,
+            message_id: id_for_ctx.clone(),
+            is_unread: head_unread,
+        }));
+    };
+
     rsx! {
         div {
             class: group_class,
@@ -3568,6 +4200,7 @@ fn ThreadRow(
                     move |_| selection.write().message = Some(mid.clone())
                 },
                 ondoubleclick: ondoubleclick,
+                oncontextmenu: oncontextmenu,
                 div {
                     class: "msg-row-check",
                     onclick: {

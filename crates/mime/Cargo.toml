@@ -21,5 +21,8 @@ mail-parser = { workspace = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+base64 = { workspace = true }
+
 [lints]
 workspace = true
