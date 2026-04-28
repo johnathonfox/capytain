@@ -102,8 +102,23 @@ where
         &challenge,
         email_hint,
     )?;
-    info!(provider = profile.slug, "opening browser for authorization");
-    debug!(%auth_url);
+    // The auth_url carries one-time CSRF state + PKCE challenge as
+    // query params. PKCE means the URL alone is useless without our
+    // private code_verifier (which never leaves this process), so
+    // it isn't a credential leak per se — but it's still cryptographic
+    // material and bad hygiene to splat into shared logs. Log the
+    // structured shape instead so debugging stays useful.
+    info!(
+        provider = profile.slug,
+        scopes = profile.scopes.len(),
+        has_email_hint = email_hint.is_some(),
+        "opening browser for authorization"
+    );
+    debug!(
+        provider = profile.slug,
+        host = auth_url.host_str().unwrap_or("?"),
+        "auth URL prepared (state + PKCE challenge redacted)"
+    );
 
     open_browser(auth_url.as_str())?;
 

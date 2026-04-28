@@ -591,32 +591,32 @@ impl MailBackend for ImapBackend {
                     "UIDVALIDITY changed for {folder} ({uidvalidity} → {current_uv}); refetch"
                 )));
             }
-            let uid_set = uids
-                .iter()
-                .map(|u| u.to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            if !add_flags.is_empty() {
-                let q = format!("+FLAGS ({add_flags})");
-                let mut stream = session
-                    .uid_store(&uid_set, &q)
-                    .await
-                    .map_err(|e| MailError::Protocol(format!("STORE {q}: {e}")))?;
-                while let Some(r) = stream.next().await {
-                    r.map_err(|e| MailError::Protocol(format!("STORE response: {e}")))?;
+            // Chunk the UID set so a bulk action on thousands of
+            // messages doesn't blow IMAP server command-line limits
+            // (audit P1 #1). Each chunk emits its own STORE call.
+            for uid_set in uid_chunks(&uids) {
+                if !add_flags.is_empty() {
+                    let q = format!("+FLAGS ({add_flags})");
+                    let mut stream = session
+                        .uid_store(&uid_set, &q)
+                        .await
+                        .map_err(|e| MailError::Protocol(format!("STORE {q}: {e}")))?;
+                    while let Some(r) = stream.next().await {
+                        r.map_err(|e| MailError::Protocol(format!("STORE response: {e}")))?;
+                    }
+                    drop(stream);
                 }
-                drop(stream);
-            }
-            if !rem_flags.is_empty() {
-                let q = format!("-FLAGS ({rem_flags})");
-                let mut stream = session
-                    .uid_store(&uid_set, &q)
-                    .await
-                    .map_err(|e| MailError::Protocol(format!("STORE {q}: {e}")))?;
-                while let Some(r) = stream.next().await {
-                    r.map_err(|e| MailError::Protocol(format!("STORE response: {e}")))?;
+                if !rem_flags.is_empty() {
+                    let q = format!("-FLAGS ({rem_flags})");
+                    let mut stream = session
+                        .uid_store(&uid_set, &q)
+                        .await
+                        .map_err(|e| MailError::Protocol(format!("STORE {q}: {e}")))?;
+                    while let Some(r) = stream.next().await {
+                        r.map_err(|e| MailError::Protocol(format!("STORE response: {e}")))?;
+                    }
+                    drop(stream);
                 }
-                drop(stream);
             }
         }
         Ok(())
@@ -661,53 +661,55 @@ impl MailBackend for ImapBackend {
                     "UIDVALIDITY changed for {folder} ({uidvalidity} → {current_uv}); refetch"
                 )));
             }
-            let uid_set = uids
-                .iter()
-                .map(|u| u.to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            // Try MOVE first. Errors that look like "BAD command"
-            // fall back to COPY+STORE+EXPUNGE; everything else
-            // propagates.
-            match session.uid_mv(&uid_set, &target.0).await {
-                Ok(()) => continue,
-                Err(e) => {
-                    let msg = e.to_string();
-                    if !msg.contains("BAD") && !msg.to_ascii_lowercase().contains("not enabled") {
-                        return Err(MailError::Protocol(format!(
-                            "UID MOVE {uid_set} {}: {e}",
-                            target.0
-                        )));
+            // Chunk the UID set so a bulk move on thousands of
+            // messages doesn't blow IMAP server command-line limits
+            // (audit P1 #1). Each chunk runs its own MOVE (with
+            // COPY+STORE+EXPUNGE fallback if MOVE isn't supported).
+            for uid_set in uid_chunks(&uids) {
+                // Try MOVE first. Errors that look like "BAD command"
+                // fall back to COPY+STORE+EXPUNGE; everything else
+                // propagates.
+                match session.uid_mv(&uid_set, &target.0).await {
+                    Ok(()) => continue,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if !msg.contains("BAD") && !msg.to_ascii_lowercase().contains("not enabled")
+                        {
+                            return Err(MailError::Protocol(format!(
+                                "UID MOVE {uid_set} {}: {e}",
+                                target.0
+                            )));
+                        }
+                        debug!(error = %msg, "UID MOVE not supported; falling back to COPY+STORE+EXPUNGE");
                     }
-                    debug!(error = %msg, "UID MOVE not supported; falling back to COPY+STORE+EXPUNGE");
                 }
+                session.uid_copy(&uid_set, &target.0).await.map_err(|e| {
+                    MailError::Protocol(format!("UID COPY {uid_set} {}: {e}", target.0))
+                })?;
+                let mut store_stream = session
+                    .uid_store(&uid_set, "+FLAGS (\\Deleted)")
+                    .await
+                    .map_err(|e| MailError::Protocol(format!("STORE \\Deleted {uid_set}: {e}")))?;
+                while let Some(r) = store_stream.next().await {
+                    r.map_err(|e| MailError::Protocol(format!("STORE response: {e}")))?;
+                }
+                drop(store_stream);
+                // UID EXPUNGE (RFC 4315) targets just the UIDs we just
+                // marked. Plain `EXPUNGE` would also pick up any other
+                // already-`\Deleted` messages in the folder, which is
+                // unsafe in a shared-mailbox scenario.
+                let expunge_stream = session
+                    .uid_expunge(&uid_set)
+                    .await
+                    .map_err(|e| MailError::Protocol(format!("UID EXPUNGE {uid_set}: {e}")))?;
+                // The stream returned by uid_expunge is `!Unpin`, so
+                // pin it on the heap before driving with `.next()`.
+                let mut expunge_stream = Box::pin(expunge_stream);
+                while let Some(r) = expunge_stream.next().await {
+                    r.map_err(|e| MailError::Protocol(format!("UID EXPUNGE response: {e}")))?;
+                }
+                drop(expunge_stream);
             }
-            session.uid_copy(&uid_set, &target.0).await.map_err(|e| {
-                MailError::Protocol(format!("UID COPY {uid_set} {}: {e}", target.0))
-            })?;
-            let mut store_stream = session
-                .uid_store(&uid_set, "+FLAGS (\\Deleted)")
-                .await
-                .map_err(|e| MailError::Protocol(format!("STORE \\Deleted {uid_set}: {e}")))?;
-            while let Some(r) = store_stream.next().await {
-                r.map_err(|e| MailError::Protocol(format!("STORE response: {e}")))?;
-            }
-            drop(store_stream);
-            // UID EXPUNGE (RFC 4315) targets just the UIDs we just
-            // marked. Plain `EXPUNGE` would also pick up any other
-            // already-`\Deleted` messages in the folder, which is
-            // unsafe in a shared-mailbox scenario.
-            let expunge_stream = session
-                .uid_expunge(&uid_set)
-                .await
-                .map_err(|e| MailError::Protocol(format!("UID EXPUNGE {uid_set}: {e}")))?;
-            // The stream returned by uid_expunge is `!Unpin`, so
-            // pin it on the heap before driving with `.next()`.
-            let mut expunge_stream = Box::pin(expunge_stream);
-            while let Some(r) = expunge_stream.next().await {
-                r.map_err(|e| MailError::Protocol(format!("UID EXPUNGE response: {e}")))?;
-            }
-            drop(expunge_stream);
         }
         Ok(())
     }
@@ -744,30 +746,30 @@ impl MailBackend for ImapBackend {
                     "UIDVALIDITY changed for {folder} ({uidvalidity} → {current_uv}); refetch"
                 )));
             }
-            let uid_set = uids
-                .iter()
-                .map(|u| u.to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            let mut store_stream = session
-                .uid_store(&uid_set, "+FLAGS (\\Deleted)")
-                .await
-                .map_err(|e| MailError::Protocol(format!("STORE \\Deleted {uid_set}: {e}")))?;
-            while let Some(r) = store_stream.next().await {
-                r.map_err(|e| MailError::Protocol(format!("STORE response: {e}")))?;
+            // Chunk the UID set so a bulk delete on thousands of
+            // messages doesn't blow IMAP server command-line limits
+            // (audit P1 #1). Each chunk runs its own STORE+EXPUNGE.
+            for uid_set in uid_chunks(&uids) {
+                let mut store_stream = session
+                    .uid_store(&uid_set, "+FLAGS (\\Deleted)")
+                    .await
+                    .map_err(|e| MailError::Protocol(format!("STORE \\Deleted {uid_set}: {e}")))?;
+                while let Some(r) = store_stream.next().await {
+                    r.map_err(|e| MailError::Protocol(format!("STORE response: {e}")))?;
+                }
+                drop(store_stream);
+                let expunge_stream = session
+                    .uid_expunge(&uid_set)
+                    .await
+                    .map_err(|e| MailError::Protocol(format!("UID EXPUNGE {uid_set}: {e}")))?;
+                // The stream returned by uid_expunge is `!Unpin`, so
+                // pin it on the heap before driving with `.next()`.
+                let mut expunge_stream = Box::pin(expunge_stream);
+                while let Some(r) = expunge_stream.next().await {
+                    r.map_err(|e| MailError::Protocol(format!("UID EXPUNGE response: {e}")))?;
+                }
+                drop(expunge_stream);
             }
-            drop(store_stream);
-            let expunge_stream = session
-                .uid_expunge(&uid_set)
-                .await
-                .map_err(|e| MailError::Protocol(format!("UID EXPUNGE {uid_set}: {e}")))?;
-            // The stream returned by uid_expunge is `!Unpin`, so
-            // pin it on the heap before driving with `.next()`.
-            let mut expunge_stream = Box::pin(expunge_stream);
-            while let Some(r) = expunge_stream.next().await {
-                r.map_err(|e| MailError::Protocol(format!("UID EXPUNGE response: {e}")))?;
-            }
-            drop(expunge_stream);
         }
         Ok(())
     }
@@ -1189,6 +1191,70 @@ pub fn handles(kind: &BackendKind) -> bool {
     matches!(kind, BackendKind::ImapSmtp)
 }
 
+// ---------- UID chunking ----------
+
+/// Maximum number of UIDs in a single `UID STORE` / `UID MOVE` /
+/// `UID EXPUNGE` command. RFC 3501 doesn't fix a command length but
+/// most production IMAP servers cap at ~8 KB; staying at 1000 UIDs
+/// keeps each command's bytes well below that even with 7-digit UIDs
+/// (~8 KB worst case for the UID set alone). Combined with
+/// [`UID_BATCH_BYTES_LIMIT`] this protects bulk operations on
+/// thousands of messages from running into server-side rejection.
+const UID_BATCH_LIMIT: usize = 1000;
+
+/// Maximum bytes (digits + commas) in one comma-joined UID set.
+/// Tighter than the typical 8 KB server limit so the surrounding
+/// `UID STORE <set> +FLAGS (\\Seen)` envelope has room without ever
+/// approaching overflow.
+const UID_BATCH_BYTES_LIMIT: usize = 4096;
+
+/// Split `uids` into IMAP-friendly comma-joined batches.
+///
+/// Each emitted string is at most [`UID_BATCH_LIMIT`] UIDs and
+/// [`UID_BATCH_BYTES_LIMIT`] bytes. Order within each batch matches
+/// the input slice; UIDs are not deduplicated. Empty input yields
+/// an empty Vec.
+///
+/// Background: the audit found `UID STORE` / `UID MOVE` building one
+/// massive set via `.join(",")` regardless of `messages.len()`. Bulk
+/// actions on thousands of rows could overflow server command-line
+/// limits. Chunking yields one command per ~1000 UIDs; partial
+/// failures surface visibly per chunk rather than as a silent
+/// dropped sync.
+fn uid_chunks(uids: &[u32]) -> Vec<String> {
+    let mut out = Vec::new();
+    if uids.is_empty() {
+        return out;
+    }
+    let mut current = String::new();
+    let mut count = 0usize;
+    for &u in uids {
+        let s = u.to_string();
+        // Bytes this UID would add (comma + digits, or just digits
+        // when the chunk is empty).
+        let needed = if current.is_empty() {
+            s.len()
+        } else {
+            1 + s.len()
+        };
+        let count_full = count >= UID_BATCH_LIMIT;
+        let bytes_full = !current.is_empty() && current.len() + needed > UID_BATCH_BYTES_LIMIT;
+        if count_full || bytes_full {
+            out.push(std::mem::take(&mut current));
+            count = 0;
+        }
+        if !current.is_empty() {
+            current.push(',');
+        }
+        current.push_str(&s);
+        count += 1;
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1226,5 +1292,67 @@ mod tests {
     fn handles_imapsmtp_only() {
         assert!(handles(&BackendKind::ImapSmtp));
         assert!(!handles(&BackendKind::Jmap));
+    }
+
+    #[test]
+    fn uid_chunks_empty_input_yields_no_batches() {
+        assert!(uid_chunks(&[]).is_empty());
+    }
+
+    #[test]
+    fn uid_chunks_small_input_collapses_to_one_batch() {
+        let batches = uid_chunks(&[1, 2, 3, 4, 5]);
+        assert_eq!(batches, vec!["1,2,3,4,5".to_string()]);
+    }
+
+    #[test]
+    fn uid_chunks_caps_at_count_limit() {
+        // 1500 UIDs → two batches: 1000 + 500.
+        let uids: Vec<u32> = (1..=1500).collect();
+        let batches = uid_chunks(&uids);
+        assert_eq!(
+            batches.len(),
+            2,
+            "expected 2 batches, got {}",
+            batches.len()
+        );
+        let first_count = batches[0].split(',').count();
+        let second_count = batches[1].split(',').count();
+        assert_eq!(first_count, UID_BATCH_LIMIT);
+        assert_eq!(second_count, 1500 - UID_BATCH_LIMIT);
+    }
+
+    #[test]
+    fn uid_chunks_caps_at_byte_limit() {
+        // Use UIDs that are 7 digits each so we hit the 4096-byte cap
+        // before the 1000-count cap. 4096 / 8 ≈ 512 per batch, so
+        // 1000 UIDs straddles two batches by bytes alone.
+        let uids: Vec<u32> = (1_000_000..1_001_000).collect();
+        let batches = uid_chunks(&uids);
+        assert!(
+            batches.len() >= 2,
+            "expected ≥2 batches by byte cap, got {}",
+            batches.len()
+        );
+        for b in &batches {
+            assert!(
+                b.len() <= UID_BATCH_BYTES_LIMIT,
+                "batch overshot byte cap: {} bytes",
+                b.len()
+            );
+        }
+    }
+
+    #[test]
+    fn uid_chunks_preserves_order_across_batches() {
+        let uids: Vec<u32> = (1..=2500).collect();
+        let batches = uid_chunks(&uids);
+        let mut rebuilt: Vec<u32> = Vec::new();
+        for b in batches {
+            for tok in b.split(',') {
+                rebuilt.push(tok.parse().expect("digits"));
+            }
+        }
+        assert_eq!(rebuilt, uids, "uid_chunks reordered the input");
     }
 }

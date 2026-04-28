@@ -419,6 +419,27 @@ fn full_app_shell() -> Element {
             }
         }));
     }
+    // Same problem for the command palette: it's a CSS-level overlay
+    // rendered inside the Tauri webview, but Servo's GTK widget paints
+    // *above* the webview surface, so without intervention the
+    // rendered email body shows through (and over) the palette wherever
+    // the two intersect. Clear the overlay on open; force the JS-side
+    // tracker to re-push the bounding rect on close so the overlay
+    // reappears in its previous slot. Closing the palette doesn't
+    // reflow `.reader-body-fill`, so the natural ResizeObserver fire
+    // never happens — we have to nudge it.
+    {
+        let palette_open = *palette_visible.read();
+        use_effect(use_reactive!(|palette_open| {
+            if palette_open {
+                wasm_bindgen_futures::spawn_local(async {
+                    let _ = invoke::<()>("reader_clear", serde_json::json!({})).await;
+                });
+            } else {
+                push_reader_body_rect();
+            }
+        }));
+    }
     // Most recent sync_event payload, rendered in the bottom status
     // bar. `None` means we haven't seen any events yet — the bar
     // shows "Initializing…" / "Syncing…" until the first event lands.
@@ -499,11 +520,19 @@ fn full_app_shell() -> Element {
             let Ok(event) = event_js.dyn_into::<web_sys::KeyboardEvent>() else {
                 return;
             };
-            if is_typing_in_field() {
-                return;
-            }
             let key = event.key();
             let ctrl_or_meta = event.ctrl_key() || event.meta_key();
+            // Apply the typing-guard ONLY to unmodified keystrokes —
+            // a bare `j` / `k` / `r` while focused in an input is the
+            // user typing those letters, not a command. Modifier-
+            // prefixed shortcuts like Ctrl+K are intentional commands
+            // in every context (the keystroke produces no text input)
+            // and must work even when focus is in the search bar or
+            // compose body. Without this exemption Ctrl+K silently
+            // dropped on every focused input.
+            if !ctrl_or_meta && is_typing_in_field() {
+                return;
+            }
             let Some(cmd) = crate::keyboard::parse(&key, ctrl_or_meta) else {
                 return;
             };
@@ -639,6 +668,33 @@ fn full_app_shell() -> Element {
 /// shortcuts work — never `true` (the safe-against-misfire bias is
 /// to *fire* the shortcut, since the user's intent is "act on this
 /// app," and the shortcut is a no-op when no message is selected).
+/// Best-effort detection of "this is a Mac" so the topbar pill and any
+/// other shortcut hint can render `⌘K` on macOS and `Ctrl K` on
+/// Linux / Windows. The shortcut binding is the same conceptually
+/// (`event.metaKey || event.ctrlKey` is what `parse()` checks) but
+/// users see different keycap glyphs on different keyboards.
+///
+/// Reads `navigator.platform` — deprecated by the spec but still
+/// populated by every shipping browser engine, including Servo's
+/// embedded webview. Falls back to `userAgent` substring sniff if
+/// `platform` is absent. Falls back to "Ctrl K" if neither is
+/// available — better to show the binding that actually works on the
+/// platform we're most likely running on (Linux desktop) than to
+/// confidently lie with `⌘K`.
+fn palette_shortcut_label() -> &'static str {
+    let Some(window) = web_sys::window() else {
+        return "Ctrl K";
+    };
+    let nav = window.navigator();
+    let platform = nav.platform().unwrap_or_default().to_ascii_lowercase();
+    let ua = nav.user_agent().unwrap_or_default().to_ascii_lowercase();
+    if platform.contains("mac") || ua.contains("mac os x") {
+        "⌘K"
+    } else {
+        "Ctrl K"
+    }
+}
+
 fn is_typing_in_field() -> bool {
     let Some(window) = web_sys::window() else {
         return false;
@@ -1267,12 +1323,12 @@ fn TopBar(account_filter: Signal<Option<AccountId>>, mut palette_visible: Signal
             button {
                 class: "topbar-cmd-pill",
                 r#type: "button",
-                title: "Command palette (⌘K)",
+                title: "Command palette ({palette_shortcut_label()})",
                 onclick: move |_| {
                     let cur = *palette_visible.read();
                     palette_visible.set(!cur);
                 },
-                span { class: "topbar-cmd-key", "⌘K" }
+                span { class: "topbar-cmd-key", "{palette_shortcut_label()}" }
                 span { "search · jump · command" }
             }
             div {
