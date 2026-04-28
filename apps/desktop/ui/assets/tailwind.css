@@ -2092,3 +2092,116 @@ ul {
   font-size: var(--fs-11);
   color: var(--text-tertiary);
 }
+
+/* ---------- Command palette (⌘K) ---------- */
+
+.palette-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 14vh;
+  z-index: 2100;
+}
+
+.palette-shell {
+  width: 560px;
+  max-width: calc(100vw - 64px);
+  max-height: 60vh;
+  background: var(--bg-primary);
+  border: 0.5px solid var(--border-secondary);
+  border-radius: var(--radius-window);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.palette-input {
+  flex: 0 0 auto;
+  padding: 12px 16px;
+  background: transparent;
+  border: 0;
+  border-bottom: var(--hairline);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-13);
+  outline: none;
+  caret-color: var(--accent-amber);
+}
+
+.palette-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.palette-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.palette-row {
+  display: grid;
+  grid-template-columns: 56px 1fr auto;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 16px;
+  background: transparent;
+  border: 0;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  font-size: var(--fs-12);
+  color: var(--text-secondary);
+}
+
+.palette-row-active {
+  background: var(--bg-secondary);
+  border-left-color: var(--accent-amber);
+  color: var(--text-primary);
+}
+
+.palette-row-kind {
+  font-size: var(--fs-11);
+  color: var(--text-tertiary);
+  text-transform: lowercase;
+}
+
+.palette-row-active .palette-row-kind {
+  color: var(--accent-amber);
+}
+
+.palette-row-label {
+  font-size: var(--fs-12);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.palette-row-meta {
+  font-size: var(--fs-11);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+.palette-empty {
+  padding: 14px 16px;
+  font-size: var(--fs-11);
+  color: var(--text-tertiary);
+}
+
+.palette-footnote {
+  flex: 0 0 auto;
+  padding: 6px 16px;
+  border-top: var(--hairline);
+  background: var(--bg-tertiary);
+  font-size: var(--fs-11);
+  color: var(--text-tertiary);
+  user-select: none;
+}
