@@ -64,6 +64,31 @@ No action required until someone's sitting in front of the app and paying attent
 
 ---
 
+## Reader-pane flicker on window resize (residual)
+
+**State:** PR #88 partially mitigated this — the JS `ResizeObserver` callback now `requestAnimationFrame`-coalesces, and Rust's `reader_set_position` skips `renderer.resize()` when `(w, h)` is unchanged so pure-position pushes (splitter drag, scroll-induced rect shift) no longer poke Servo every frame. **Visible flicker still happens during continuous window resize** — the Servo overlay surface and the GTK host widget can't change size atomically, so during a drag there's a perceptible mismatch frame between the host shrinking/growing and Servo's WebView re-laying out.
+
+**Why it's residual rather than fixed:** the flicker we have left isn't from over-firing the position push; it's structural. The GTK overlay is positioned + sized in CSS-pixel space pushed from JS, but Servo's WebView paints into its own offscreen surface and the surface size is what `renderer.resize` controls. A drag step looks like:
+
+1. User drags window edge → KWin resizes the X11/Wayland surface → GTK lays out the host widget at new size.
+2. Browser fires `resize` → `ResizeObserver` → JS `push()` (rAF-deferred) → Tauri `reader_set_position`.
+3. Rust dispatches `parent.set_position(x, y, w, h)` to the GTK main thread → GTK overlay moves/resizes.
+4. Rust calls `renderer.resize(w, h)` → Servo schedules a relayout/repaint.
+5. Some number of frames later, Servo's compositor blits the new-size frame into the overlay surface.
+
+Between (1) and (5) the user sees the *previous* Servo frame stretched / clipped against the new host widget bounds. That's the flicker.
+
+**Possible fixes (none cheap):**
+
+- Pause Servo paint output during resize and freeze the last good frame in the GTK overlay until Servo catches up. Requires either an explicit `WebView::pause_paint`-shaped knob (not currently exposed by Servo's public API as of 0.1.0) or a snapshot-blit shim in `qsl_renderer`.
+- Drop the host widget's `clear` background to a content-derived color so the gap frame is visually less jarring (cosmetic, not a real fix).
+- Throttle the `renderer.resize` call to rAF on the Rust side so we don't cascade Servo relayouts during a drag — but Servo's offscreen surface size lags more than its viewport handle, so this might just shift the visible frame rather than eliminate it.
+- Move to Servo's upstream `WindowRenderingContext` once it supports synchronous resize-with-repaint primitives (open question whether 0.1.x ever exposes that; track upstream).
+
+**Acceptance criteria:** during a 1-second continuous window-edge drag, the reader pane shows no perceptible content-shift / blank-frame flash. Currently it shows ~3–6 visible mismatched frames during a fast drag.
+
+---
+
 ## Remote-content gating: dimension-preserving placeholders (optional)
 
 **State:** Sanitizer-side blocking + reader-pane UI banner ("Load images" / "Always load from this sender") landed in the backlog item 4 follow-up. `messages_get` accepts `force_trusted: bool` for one-shot loads; `messages_trust_sender` persists the opt-in row.
