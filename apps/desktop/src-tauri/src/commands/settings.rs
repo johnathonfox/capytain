@@ -19,9 +19,21 @@
 use qsl_ipc::IpcResult;
 use qsl_storage::repos::app_settings as app_settings_repo;
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::state::AppState;
+
+/// Tauri event name emitted whenever `app_settings_set` writes a
+/// value. Payload is `AppSettingsChangedPayload`. The main-window UI
+/// subscribes so theme / density / privacy radio flips in the
+/// Settings window apply live without a restart.
+const APP_SETTINGS_CHANGED_EVENT: &str = "app_settings_changed";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AppSettingsChangedPayload {
+    pub key: String,
+    pub value: String,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct AppSettingsGetInput {
@@ -47,15 +59,29 @@ pub struct AppSettingsSetInput {
     pub value: String,
 }
 
-/// `app_settings_set` — upsert a global setting key.
+/// `app_settings_set` — upsert a global setting key, then broadcast
+/// the change to every Tauri window so live consumers (theme + density
+/// on the main pane, etc.) can re-read without polling.
 #[tauri::command]
-pub async fn app_settings_set(
+pub async fn app_settings_set<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     state: State<'_, AppState>,
     input: AppSettingsSetInput,
 ) -> IpcResult<()> {
-    let db = state.db.lock().await;
-    app_settings_repo::set(&*db, &input.key, &input.value).await?;
+    {
+        let db = state.db.lock().await;
+        app_settings_repo::set(&*db, &input.key, &input.value).await?;
+    }
     tracing::info!(key = %input.key, "app_settings_set");
+    let payload = AppSettingsChangedPayload {
+        key: input.key,
+        value: input.value,
+    };
+    if let Err(e) = app.emit(APP_SETTINGS_CHANGED_EVENT, payload) {
+        // Emit failure shouldn't block the write — we already
+        // persisted; the next consumer will read on next mount.
+        tracing::warn!(error = %e, "app_settings_set: emit failed");
+    }
     Ok(())
 }
 

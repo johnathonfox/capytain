@@ -184,6 +184,29 @@ pub(crate) const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
         }
     }
 
+    // Set the `data-theme` attribute on `<html>` so the CSS rules in
+    // `tailwind.css` (the `:root[data-theme="light"]` block + the
+    // `prefers-color-scheme` block for `data-theme="system"`) flip
+    // tokens. Pass one of "system", "dark", "light"; anything else
+    // is treated as "system" so a corrupt setting doesn't lock the
+    // user out of the theme they expect.
+    export function setRootTheme(theme) {
+        const root = document.documentElement;
+        if (!root) return;
+        const t = (theme === "dark" || theme === "light") ? theme : "system";
+        root.setAttribute("data-theme", t);
+    }
+
+    // Set the `data-density` attribute on `<html>` so the
+    // `:root[data-density="compact"]` block in tailwind.css tightens
+    // the row tokens. Default is "comfortable".
+    export function setRootDensity(density) {
+        const root = document.documentElement;
+        if (!root) return;
+        const d = density === "compact" ? "compact" : "comfortable";
+        root.setAttribute("data-density", d);
+    }
+
     // Returns the secondary-window route this Dioxus instance should
     // mount: `'settings'`, `'oauth-add'`, etc. `null` for the main
     // three-pane window (the global isn't set there). Set by the
@@ -205,6 +228,12 @@ extern "C" {
 
     #[wasm_bindgen(js_name = pushReaderBodyRect)]
     pub(crate) fn push_reader_body_rect();
+
+    #[wasm_bindgen(js_name = setRootTheme)]
+    pub(crate) fn set_root_theme(theme: &str);
+
+    #[wasm_bindgen(js_name = setRootDensity)]
+    pub(crate) fn set_root_density(density: &str);
 
     /// Returns the message id this popup window is for, set by the
     /// Tauri `WebviewWindowBuilder::initialization_script` in
@@ -493,6 +522,66 @@ fn full_app_shell() -> Element {
     // so we no longer need the iframe-side postMessage bridge.
     use_hook(|| {
         start_reader_body_tracker();
+    });
+
+    // Theme + density: read both from `app_settings` at boot and
+    // apply to `<html>` via `data-theme` / `data-density` so the CSS
+    // tokens flip. Subscribe to `app_settings_changed` so a flip in
+    // the Settings window applies live across all open windows.
+    // Default to "system" theme (follows `prefers-color-scheme`) and
+    // "comfortable" density when the keys haven't been written.
+    use_hook(|| {
+        wasm_bindgen_futures::spawn_local(async {
+            // `app_settings_get` returns Option<String> — `None` when
+            // the user hasn't picked a value yet; default in that case.
+            let theme = invoke::<Option<String>>(
+                "app_settings_get",
+                serde_json::json!({ "input": { "key": "appearance.theme" } }),
+            )
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "system".to_string());
+            set_root_theme(&theme);
+
+            let density = invoke::<Option<String>>(
+                "app_settings_get",
+                serde_json::json!({ "input": { "key": "appearance.density" } }),
+            )
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "comfortable".to_string());
+            set_root_density(&density);
+        });
+    });
+    // Listen for live changes from the Settings window. The Tauri
+    // `app_settings_set` command emits `app_settings_changed` after
+    // every successful write — payload is `{ key, value }`. We only
+    // act on the two keys we care about; anything else falls through.
+    use_hook(|| {
+        let cb = Closure::<dyn FnMut(JsValue)>::new(move |payload: JsValue| {
+            #[derive(serde::Deserialize)]
+            struct Changed {
+                key: String,
+                value: String,
+            }
+            let Ok(evt) = serde_wasm_bindgen::from_value::<Changed>(payload) else {
+                return;
+            };
+            match evt.key.as_str() {
+                "appearance.theme" => set_root_theme(&evt.value),
+                "appearance.density" => set_root_density(&evt.value),
+                _ => {}
+            }
+        });
+        wasm_bindgen_futures::spawn_local(async move {
+            let func = cb.as_ref().unchecked_ref::<js_sys::Function>();
+            if let Err(e) = tauri_listen("app_settings_changed", func).await {
+                web_sys_log(&format!("app_settings_changed listen failed: {e:?}"));
+            }
+            Box::leak(Box::new(cb));
+        });
     });
 
     // Tell the Rust side the UI is mounted so the sync engine can
