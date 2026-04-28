@@ -84,6 +84,16 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"
 # `qsl-desktop`. We keep `sync` because `qsl-storage` drives
 # the sync SDK. See docs/week-6-day-2-notes.md.
 turso = { version = "0.5", default-features = false, features = ["sync"] }
+# `turso_core` is pulled in transitively via `turso` → `turso_sdk_kit` →
+# `turso_core`; we declare it here as a sibling dep purely to opt into
+# the `fts` feature flag (Tantivy-backed full-text search,
+# experimental in 0.5.3 — see docs/dependencies/turso.md). Cargo
+# unifies features additively across all consumers, so this turns
+# `fts` on without disturbing the feature set turso_sdk_kit already
+# requested. The crate isn't imported directly from any code; the
+# `CREATE INDEX … USING fts(...)` syntax used in the search migration
+# is what surfaces the feature.
+turso_core = { version = "0.5", features = ["fts"] }
 url = { version = "2", features = ["serde"] }
 webbrowser = "1"
 webpki-roots = "1"

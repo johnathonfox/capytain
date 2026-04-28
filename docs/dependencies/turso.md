@@ -59,3 +59,4 @@ Calling `Connection::execute(sql, ())` with multi-statement SQL (`CREATE …; CR
 ## Change log
 
 - **2026-04-18** — Initial file. Pinned `turso = "0.5"` (resolving to 0.5.3). Documented the transaction placeholder and multi-statement-in-transaction bugs as worked-around locally. N=14.
+- **2026-04-27** — Adopted Turso's experimental Tantivy-backed FTS for QSL search (PR-S1). Required (a) opting into the `fts` cargo feature on a sibling `turso_core` workspace dep, and (b) calling `Builder::experimental_index_method(true)` on every connection open in `crates/storage/src/turso_conn.rs`. Migration `0005_search_fts.sql` indexes `subject` / `from_json` / `to_json` / `snippet` on the `messages` table; the engine auto-tracks inserts / updates / deletes, so no write-side hooks were needed. Note: SQLite's `WHERE table MATCH 'q'` is unsupported — query through the `fts_match()` / `fts_score()` table functions instead.

@@ -725,3 +725,97 @@ fn update_preserves_thread_id_against_wire_none() {
         );
     });
 }
+
+/// PR-S1 smoke. Insert three messages with distinct subjects /
+/// senders, then run a Tantivy FTS query and verify only the
+/// matching id comes back. Locks down two things at once:
+///
+///   1. The migration's `CREATE INDEX … USING fts(...)` actually
+///      created a usable index (parser parsed it, runtime accepted
+///      it under `experimental_index_method(true)`).
+///   2. `repos::search::search_ids` finds rows by subject / sender
+///      tokens after auto-indexing on `messages::insert` — no
+///      manual write hooks required, which is what the experimental
+///      Turso FTS feature promises.
+#[test]
+fn search_ids_finds_messages_by_subject_and_sender() {
+    let rt = rt();
+    rt.block_on(async move {
+        let conn = fresh_conn().await;
+        let acct = Account {
+            id: AccountId("search-acct".into()),
+            kind: BackendKind::ImapSmtp,
+            display_name: "Work".into(),
+            email_address: "me@example.com".into(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        };
+        repos::accounts::insert(&conn, &acct).await.expect("acct");
+        let folder = Folder {
+            id: FolderId("INBOX".into()),
+            account_id: acct.id.clone(),
+            name: "Inbox".into(),
+            path: "INBOX".into(),
+            role: Some(FolderRole::Inbox),
+            unread_count: 0,
+            total_count: 0,
+            parent: None,
+        };
+        repos::folders::insert(&conn, &folder)
+            .await
+            .expect("folder");
+
+        let mk = |id: &str, subject: &str, from_addr: &str, snippet: &str| MessageHeaders {
+            id: MessageId(id.into()),
+            account_id: acct.id.clone(),
+            folder_id: folder.id.clone(),
+            thread_id: None,
+            rfc822_message_id: None,
+            in_reply_to: None,
+            references: vec![],
+            from: vec![EmailAddress {
+                address: from_addr.into(),
+                display_name: None,
+            }],
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            reply_to: vec![],
+            subject: subject.into(),
+            snippet: snippet.into(),
+            date: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            flags: MessageFlags::default(),
+            labels: vec![],
+            size: 0,
+            has_attachments: false,
+        };
+
+        let invoice = mk("m1", "Q1 invoice attached", "alice@example.com", "");
+        let lunch = mk("m2", "Lunch tomorrow?", "bob@example.com", "");
+        let release = mk("m3", "Release notes for v0.1", "carol@example.com", "");
+        for h in [&invoice, &lunch, &release] {
+            repos::messages::insert(&conn, h, None)
+                .await
+                .expect("insert");
+        }
+
+        // Subject-token match.
+        let hits = repos::search::search_ids(&conn, "invoice", 10, 0)
+            .await
+            .expect("search invoice");
+        assert_eq!(hits, vec![MessageId("m1".into())]);
+
+        // Sender-token match — `alice` lives inside the
+        // `from_json` blob and Tantivy's default tokenizer splits
+        // punctuation, so the literal token shows up in the index.
+        let hits = repos::search::search_ids(&conn, "alice", 10, 0)
+            .await
+            .expect("search alice");
+        assert_eq!(hits, vec![MessageId("m1".into())]);
+
+        // Non-matching query returns empty, not an error.
+        let hits = repos::search::search_ids(&conn, "xylophone", 10, 0)
+            .await
+            .expect("search xylophone");
+        assert!(hits.is_empty());
+    });
+}

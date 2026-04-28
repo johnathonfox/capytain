@@ -22,6 +22,12 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 turso = { workspace = true }
+# `turso_core` is reached transitively via `turso` already; the
+# explicit dep here exists to opt the workspace into the `fts`
+# feature (Tantivy-backed full-text search). Cargo unifies feature
+# sets across the dependency graph, so the additional flag flows
+# through to the actual turso_core build at link time.
+turso_core = { workspace = true }
 zstd = { workspace = true }
 
 [dev-dependencies]
