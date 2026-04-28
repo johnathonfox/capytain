@@ -692,6 +692,85 @@ button to `accounts_add_oauth` open call.
     first-run; new account appears in the list when done
 - Est. size: S
 
+### UI overhaul
+
+**PR-U series — monospace, density-first, warm-dark chrome**
+
+Direction-shift refresh of every chrome surface per
+[`docs/ui-direction.md`](../ui-direction.md). Read that file before
+opening any PR in this series. Acceptance criteria are mirrored in
+`docs/QSL_BACKLOG_FIXES.md` §13.
+
+Treated as **active work** alongside the v0.1 feature bundles, not
+deferred. Every chrome surface needs to flip in tandem to avoid a
+half-and-half look, so the sequencing puts the cross-cutting tokens
++ typography pass first; subsequent bundles can land in any order
+because they touch disjoint files.
+
+- **PR-U1 — design tokens + typography (M).**
+  Rewrite `apps/desktop/ui/assets/tailwind.css` token block: warm
+  palette (`#1a1817` primary, `#252321` raised, `#d4a05a` accent
+  amber, `#7ba968` success green, `#e8e3d8` text-primary). Bundle
+  JetBrains Mono via `asset!` (or wire a CDN/system fallback) and
+  set it as the chrome font. Two weights only (400 / 500); never
+  600/700. `font-variant-numeric: tabular-nums` on every numeric
+  field. Drop drop-shadows / glows / gradients / blur globally. 4px
+  outer radius cap, 0px on rows/dividers.
+
+- **PR-U2 — top bar + sidebar (M).**
+  Top bar: `qsl 0.1.0-dev` wordmark left, command-palette pill
+  centered (no-op until PR-U7), account count right; remove the
+  capybara icon and "QSL" uppercase. Sidebar: drop the blue Compose
+  button, mailbox icons, and avatar circle; tighten to ~124px;
+  active-mailbox 2px amber left rail; user-label color bullets stay,
+  system-mailbox bullets removed.
+
+- **PR-U3 — message list rebuild (M).**
+  Tab strip (`all / unread / flagged`); 26–28px dense rows with the
+  IMAP flag-glyph column (`!` unread amber, `·` read tertiary, `F`
+  flagged amber, `R` replied green, `D` draft secondary); single-
+  line truncate layout (`[flag][sender][subject · preview][time]`);
+  selected-row 2px amber rail; no avatars; tabular-num timestamps
+  in the formats from `ui-direction.md` (Today `14:23`, Yesterday
+  `yest`, this week weekday short, this year `Apr 23`, older
+  `Mar '25`).
+
+- **PR-U4 — message view + toolbar (S–M).**
+  Replace pill action buttons with the keyboard-hint toolbar
+  (`[r] reply  [a] reply-all  [f] forward  [e] archive  [s] flag`).
+  Header block: subject 13px/500 at top, then `From / To / Cc / Date`
+  rows with tertiary 56px label column. Two collapsed-by-default
+  rows below standard headers — raw header expansion + IMAP flags —
+  click to expand. Body HTML rendering untouched.
+
+- **PR-U5 — compose redesign (M).**
+  Drop the formatting toolbar and the rendered Send button.
+  `⌘↵ send` in the bottom status line **is** the send affordance.
+  Recipients as small 2px-radius pills on `bg-secondary`. Mono cursor
+  block. Thread-context strip at the top on replies. Auto-insert
+  `-- ` (RFC sig delimiter) before the user's signature.
+
+- **PR-U6 — status bar expansion (S–M).**
+  Expand from "Synced INBOX · 1 updated" to the three-zone layout:
+  `<account> · <folder> · <total> / <unread> unread` left;
+  `CONDSTORE · QRESYNC · IDLE` capabilities center with IDLE in
+  `success-green` when active; `synced 12s · ⌘? help` right.
+  Sourcing the capability flags requires plumbing the negotiated
+  `Capability` set from `ImapBackend` / `JmapBackend` through to
+  `AppState` and emitting it on `sync_event` (or a new
+  `connection_state` event); the storage layer doesn't know it.
+
+- **PR-U7 — command palette (⌘K) (M).**
+  Centered overlay, sharp corners, mono input, fuzzy-match against
+  mailboxes (jump-to), labels, commands (compose, archive, flag,
+  …), and recent searches. ESC closes, arrow keys navigate, Enter
+  confirms. No animation. Defer if it grows past one bundle —
+  the pill in PR-U2 stays a no-op until then.
+
+**Out of scope for this series:** light mode (defer until dark ships
+clean), custom wordmark typeface, HTML email body styling
+(rendered author content stays untouched).
+
 ---
 
 ## Total scope
@@ -706,6 +785,10 @@ That's roughly 4–6 weeks of solo work at the pace Phase 2 was
 hitting (1–2 PRs per evening for S/M). The regression sweep
 (PR-R1 / R2 / R3) lands first since it blocks several downstream
 PRs from delivering on a working sidebar / reader.
+
+The UI overhaul (PR-U1 through PR-U7) is sequenced after the
+feature set above lands; it adds 6–7 PRs (mostly M, U7 may slip)
+on top of the 18 above.
 
 ---
 
