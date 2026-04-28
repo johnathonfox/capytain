@@ -2101,14 +2101,19 @@ fn ReaderPaneV2(
             class: "reader-pane",
             match message_id {
                 None => rsx! { div { class: "reader-empty", "Select a message to read." } },
-                Some(id) => rsx! { ReaderV2 { id, sync_tick, compose } },
+                Some(id) => rsx! { ReaderV2 { id, selection, sync_tick, compose } },
             }
         }
     }
 }
 
 #[component]
-fn ReaderV2(id: MessageId, sync_tick: SyncTick, compose: Signal<Option<ComposeState>>) -> Element {
+fn ReaderV2(
+    id: MessageId,
+    selection: Signal<Selection>,
+    sync_tick: SyncTick,
+    compose: Signal<Option<ComposeState>>,
+) -> Element {
     // `force_trusted` is the one-shot "Load images" override. Resets
     // to false when the user navigates to a different message — see
     // the use_effect below — so a previously-loaded message doesn't
@@ -2274,6 +2279,48 @@ fn ReaderV2(id: MessageId, sync_tick: SyncTick, compose: Signal<Option<ComposeSt
                                         move |_| open_reply(r.clone(), compose, ReplyKind::Forward)
                                     },
                                     "Forward"
+                                }
+                                button {
+                                    class: "reader-action reader-action-archive",
+                                    r#type: "button",
+                                    title: "Archive (move to All Mail / Archive)",
+                                    onclick: {
+                                        let id = rendered.headers.id.clone();
+                                        let mut selection = selection;
+                                        let mut sync_tick = sync_tick;
+                                        move |_| {
+                                            let id = id.clone();
+                                            spawn(async move {
+                                                let payload = serde_json::json!({
+                                                    "input": { "ids": [id.clone()] }
+                                                });
+                                                if let Err(e) = invoke::<()>(
+                                                    "messages_archive",
+                                                    payload,
+                                                )
+                                                .await
+                                                {
+                                                    web_sys_log(&format!(
+                                                        "messages_archive: {e}"
+                                                    ));
+                                                    return;
+                                                }
+                                                // Optimistic UI: clear the
+                                                // reader (the archived row
+                                                // disappears from this folder)
+                                                // and bump sync_tick so the
+                                                // sidebar + message list
+                                                // refetch immediately.
+                                                selection.with_mut(|sel| {
+                                                    sel.message = None;
+                                                });
+                                                sync_tick.with_mut(|t| {
+                                                    *t = t.wrapping_add(1)
+                                                });
+                                            });
+                                        }
+                                    },
+                                    "Archive"
                                 }
                             }
                         }
