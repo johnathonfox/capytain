@@ -42,6 +42,9 @@ web-sys = { version = "0.3", features = [
     "Document",
     "Element",
     "KeyboardEvent",
+    # `Navigator::platform()` + `user_agent()` drive `palette_shortcut_label`
+    # so the topbar pill renders `⌘K` on macOS and `Ctrl K` everywhere else.
+    "Navigator",
 ] }
 # Used by the compose pane's 5s auto-save debounce. Pulls only the
 # `futures` feature so we get `gloo_timers::future::sleep` and
