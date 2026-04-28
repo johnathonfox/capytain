@@ -20,6 +20,7 @@ pub mod drafts;
 pub mod folders;
 pub mod messages;
 pub mod reader;
+pub mod settings;
 
 use qsl_ipc::IpcResult;
 use tauri::State;

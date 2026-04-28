@@ -247,6 +247,8 @@ async fn auth_add(provider_slug: &str, email: &str, paths: &DataPaths) -> Result
         display_name: email.to_string(),
         email_address: email.to_string(),
         created_at: Utc::now(),
+        signature: None,
+        notify_enabled: true,
     };
 
     let conn = paths.open_db().await?;

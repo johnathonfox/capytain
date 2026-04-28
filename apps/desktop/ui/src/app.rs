@@ -183,6 +183,15 @@ pub(crate) const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
             window.__qslReaderTracker.push();
         }
     }
+
+    // Returns the secondary-window route this Dioxus instance should
+    // mount: `'settings'`, `'oauth-add'`, etc. `null` for the main
+    // three-pane window (the global isn't set there). Set by the
+    // host's `initialization_script` before wasm boots so the root
+    // component can branch synchronously without a flash.
+    export function readerWindowView() {
+        return window.__QSL_VIEW__ || null;
+    }
 "#)]
 extern "C" {
     #[wasm_bindgen(catch, js_name = coreInvoke)]
@@ -211,6 +220,13 @@ extern "C" {
     /// follow-up `messages_get` IPC round-trip.
     #[wasm_bindgen(js_name = readerWindowPreload)]
     pub(crate) fn reader_window_preload() -> JsValue;
+
+    /// Returns the value of `window.__QSL_VIEW__` (`"settings"`,
+    /// `"oauth-add"`, etc.), set by `WebviewWindowBuilder::
+    /// initialization_script` in the corresponding open-window
+    /// command. `JsValue::null` for the main three-pane window.
+    #[wasm_bindgen(js_name = readerWindowView)]
+    pub(crate) fn reader_window_view() -> JsValue;
 }
 
 /// Thin wrapper around the Tauri `invoke` bridge. Serializes `args` to
@@ -289,10 +305,11 @@ pub type FolderTokens = Signal<HashMap<FolderId, u64>>;
 
 #[component]
 pub fn App() -> Element {
-    // Popup mode detection: the Tauri popup window's
-    // `initialization_script` injects `window.__QSL_READER_ID__`
-    // before the wasm bundle boots. When that's set, mount the
-    // standalone reader instead of the three-pane shell.
+    // Secondary-window detection: the Tauri popup `initialization_script`
+    // injects either `window.__QSL_READER_ID__` (popup reader) or
+    // `window.__QSL_VIEW__` ('settings', 'oauth-add', …) before the
+    // wasm bundle boots. Branch synchronously so the wrong shell
+    // never paints.
     let popup_id_js: JsValue = reader_window_message_id();
     if !popup_id_js.is_null() && !popup_id_js.is_undefined() {
         if let Some(id_str) = popup_id_js.as_string() {
@@ -301,6 +318,17 @@ pub fn App() -> Element {
                     message_id: MessageId(id_str)
                 }
             };
+        }
+    }
+    let view_js: JsValue = reader_window_view();
+    if let Some(view) = view_js.as_string() {
+        match view.as_str() {
+            "settings" => return rsx! { crate::settings::SettingsApp {} },
+            other => {
+                web_sys_log(&format!(
+                    "App: unknown __QSL_VIEW__ = {other}; falling through"
+                ));
+            }
         }
     }
     full_app_shell()
@@ -1791,6 +1819,23 @@ fn SidebarV2(
                             SidebarAccountBlock { account: a, selection, sync_tick }
                         }
                     },
+                }
+            }
+            div {
+                class: "sidebar-footer",
+                button {
+                    class: "sidebar-settings-btn",
+                    r#type: "button",
+                    title: "Open settings",
+                    onclick: |_| {
+                        spawn(async {
+                            if let Err(e) = invoke::<()>("settings_open", serde_json::json!({})).await {
+                                web_sys_log(&format!("settings_open: {e}"));
+                            }
+                        });
+                    },
+                    span { class: "sidebar-settings-icon", "⚙" }
+                    span { "Settings" }
                 }
             }
         }

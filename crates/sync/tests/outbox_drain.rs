@@ -144,6 +144,8 @@ async fn seed_account(conn: &TursoConn) -> AccountId {
         display_name: "x".into(),
         email_address: "x@example.com".into(),
         created_at: Utc::now(),
+        signature: None,
+        notify_enabled: true,
     };
     qsl_storage::repos::accounts::insert(conn, &acct)
         .await

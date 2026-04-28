@@ -131,6 +131,13 @@ fn main() {
             commands::reader::reader_clear,
             commands::reader::open_external_url,
             commands::contacts::contacts_query,
+            commands::accounts::accounts_set_display_name,
+            commands::accounts::accounts_set_signature,
+            commands::accounts::accounts_set_notify_enabled,
+            commands::accounts::accounts_remove,
+            commands::settings::settings_open,
+            commands::settings::app_settings_get,
+            commands::settings::app_settings_set,
         ])
         .run(tauri::generate_context!())
         .expect("error while running QSL");

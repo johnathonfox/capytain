@@ -25,6 +25,8 @@ mod reader_only;
 #[cfg(target_arch = "wasm32")]
 mod reply;
 #[cfg(target_arch = "wasm32")]
+mod settings;
+#[cfg(target_arch = "wasm32")]
 mod threading;
 
 #[cfg(target_arch = "wasm32")]

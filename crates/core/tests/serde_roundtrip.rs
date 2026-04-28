@@ -52,6 +52,8 @@ fn account_roundtrips() {
         display_name: "Work".into(),
         email_address: "me@example.com".into(),
         created_at: Utc.with_ymd_and_hms(2026, 4, 18, 12, 0, 0).unwrap(),
+        signature: None,
+        notify_enabled: true,
     };
     assert_roundtrips(&account);
 }

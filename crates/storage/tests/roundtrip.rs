@@ -91,14 +91,23 @@ fn account_strategy() -> impl Strategy<Value = Account> {
         small_text(),
         "[a-z0-9._-]{1,16}@[a-z0-9.-]{1,16}",
         utc_datetime(),
+        prop::option::of("[A-Za-z0-9 \n]{0,32}"),
+        any::<bool>(),
     )
         .prop_map(
-            |(id, kind, display_name, email_address, created_at)| Account {
-                id: AccountId(id),
-                kind,
-                display_name,
-                email_address,
-                created_at,
+            |(id, kind, display_name, email_address, created_at, signature, notify_enabled)| {
+                Account {
+                    id: AccountId(id),
+                    kind,
+                    display_name,
+                    email_address,
+                    created_at,
+                    // The repo treats Some("") as None on insert, so
+                    // strip empties here too — the round-trip would
+                    // otherwise compare Some("") against None and fail.
+                    signature: signature.filter(|s| !s.is_empty()),
+                    notify_enabled,
+                }
             },
         )
 }
@@ -243,6 +252,8 @@ proptest! {
             prop_assert_eq!(back.display_name, account.display_name);
             prop_assert_eq!(back.email_address, account.email_address);
             prop_assert_eq!(back.created_at, account.created_at);
+            prop_assert_eq!(back.signature, account.signature);
+            prop_assert_eq!(back.notify_enabled, account.notify_enabled);
             Ok(())
         })?;
     }
@@ -336,6 +347,8 @@ proptest! {
                 display_name: "Work".into(),
                 email_address: "me@example.com".into(),
                 created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+                signature: None,
+                notify_enabled: true,
             };
             repos::accounts::insert(&conn, &acct).await.expect("insert acct");
             let folder = Folder {
@@ -459,6 +472,8 @@ fn remote_content_opt_in_add_check_remove() {
             display_name: "x".into(),
             email_address: "me@example.com".into(),
             created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            signature: None,
+            notify_enabled: true,
         };
         repos::accounts::insert(&conn, &acct).await.expect("acct");
 
@@ -526,6 +541,8 @@ fn count_unread_by_folder_matches_seen_flag_state() {
             display_name: "x".into(),
             email_address: "me@example.com".into(),
             created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            signature: None,
+            notify_enabled: true,
         };
         repos::accounts::insert(&conn, &acct).await.expect("acct");
         let folder = Folder {
@@ -616,6 +633,8 @@ fn transaction_rollback_reverts_writes() {
             display_name: "x".into(),
             email_address: "x@example.com".into(),
             created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            signature: None,
+            notify_enabled: true,
         };
         {
             let mut tx = conn.begin().await.expect("begin");
@@ -662,6 +681,8 @@ fn update_preserves_thread_id_against_wire_none() {
             display_name: "Work".into(),
             email_address: "me@example.com".into(),
             created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            signature: None,
+            notify_enabled: true,
         };
         repos::accounts::insert(&conn, &acct).await.expect("acct");
         let folder = Folder {
@@ -748,6 +769,8 @@ fn search_ids_finds_messages_by_subject_and_sender() {
             display_name: "Work".into(),
             email_address: "me@example.com".into(),
             created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            signature: None,
+            notify_enabled: true,
         };
         repos::accounts::insert(&conn, &acct).await.expect("acct");
         let folder = Folder {
@@ -839,6 +862,8 @@ fn search_with_query_combines_fts_and_filters() {
             display_name: "Work".into(),
             email_address: "me@example.com".into(),
             created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            signature: None,
+            notify_enabled: true,
         };
         repos::accounts::insert(&conn, &acct).await.expect("acct");
         let folder = Folder {

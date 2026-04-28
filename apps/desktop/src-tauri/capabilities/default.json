@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default permissions granted to the main QSL window. Locked down to the qsl-defined commands only — no ambient filesystem, shell, or OS access.",
-  "windows": ["main"],
+  "windows": ["main", "settings", "reader-*", "oauth-add"],
   "permissions": [
     "core:default",
     "core:window:allow-close",
