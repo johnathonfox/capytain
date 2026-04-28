@@ -2010,6 +2010,22 @@ fn ThreadRow(
         "thread-group"
     };
 
+    let id_for_popup = head.id.clone();
+    let ondoubleclick = move |evt: Event<MouseData>| {
+        evt.stop_propagation();
+        let id = id_for_popup.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = invoke::<()>(
+                "messages_open_in_window",
+                serde_json::json!({ "input": { "id": id } }),
+            )
+            .await
+            {
+                web_sys_log(&format!("messages_open_in_window: {e}"));
+            }
+        });
+    };
+
     rsx! {
         div {
             class: group_class,
@@ -2020,6 +2036,7 @@ fn ThreadRow(
                     let mut selection = selection;
                     move |_| selection.write().message = Some(mid.clone())
                 },
+                ondoubleclick: ondoubleclick,
                 div { class: "msg-row-avatar", "{avatar_initials}" }
                 div {
                     class: "msg-row-line1",
