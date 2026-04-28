@@ -181,6 +181,50 @@ If not this pass: ship the rest, leave threading for after MCP. The MCP spec alr
 
 **Verification:** Time between `Servo install completed` and the first visible body paint should drop from ~250 ms to <50 ms.
 
+## 13. UI overhaul — monospace, density-first, single-accent chrome
+
+**Status: Open.** Direction-shift refresh of the entire app chrome. Source of truth: [`docs/ui-direction.md`](ui-direction.md). Read that file before touching any visual code.
+
+**Symptom:** The current chrome leans Spark/Hey (avatar circles, large blue Compose, sans-serif rows, pill-shaped buttons, ~60px message rows, generic mailbox icons). The product identity is closer to aerc/mutt territory — terminal-native, dense, monospace, warm-dark with a single amber accent. UI changes touch every chrome surface but no backend behavior.
+
+**Scope (from `docs/ui-direction.md`):**
+
+- **Tokens:** warm-dark palette (`#1a1817` primary, `#252321` raised, `#d4a05a` accent amber, `#7ba968` success green, `#e8e3d8` text-primary, etc.). Single mono face throughout chrome (JetBrains Mono ship-default). Two weights only (400 / 500). Tabular numerics on every count/timestamp.
+- **Top bar:** `qsl 0.1.0-dev` wordmark left, command-palette pill centered (`⌘K  search · jump · command`), account count right. Drop the capybara icon and "QSL" uppercase from chrome (icon stays as dock/tray asset).
+- **Sidebar:** drop the blue Compose button, mailbox icons, and avatar circle. Width 124px. Active mailbox: `bg-secondary` + 2px amber left rail. User-label color bullets stay (they carry IMAP/Gmail data); system-mailbox bullets removed.
+- **Message list:** dense rows (26–28px), single-line layout, IMAP flag glyph in column 1 (`!` unread amber, `·` read tertiary, `F` flagged amber, `R` replied green, `D` draft secondary). Tab strip at top (`all / unread / flagged`). Active selection: `bg-secondary` + 2px amber left rail. No avatars.
+- **Message view:** keyboard-hint toolbar (`[r] reply  [a] reply-all  [f] forward  [e] archive  [s] flag`) replaces pill buttons. Dense headers with collapsed-by-default raw-headers / IMAP-flags rows. Body HTML rendering unchanged.
+- **Compose:** no formatting toolbar, no rendered Send button. `⌘↵ send` in the status bar **is** the send affordance. Recipients as small pills (2px radius), thread-context strip on replies, mono cursor block.
+- **Status bar:** account · folder · counts on the left, protocol capabilities (`CONDSTORE · QRESYNC · IDLE`, IDLE green when active) center, `synced 12s · ⌘? help` right.
+- **Removed everywhere:** avatar circles, pill-shaped action buttons, drop shadows / glows / gradients / blur, sans-serif chrome fonts, radii > 4px.
+- **HTML email body rendering, IPC commands, IMAP/sync logic, OAuth, search functionality** — all out of scope. Behavior is unchanged; only the chrome that frames it changes.
+
+**Expected shape:** big enough that splitting into bundles is necessary. Suggested grouping (each independently mergeable):
+
+1. **Design tokens + typography** — wire the warm palette + JetBrains Mono into `tailwind.css`, add SPDX attribution for the bundled font, update token names where they conflict.
+2. **Top bar + sidebar pass** — wordmark, command-palette pill (no-op for now), drop avatars + icons, density tightening.
+3. **Message list rebuild** — flag-glyph column, dense rows, tab strip, single-line layout.
+4. **Message view + toolbar** — keyboard-hint toolbar, header restructure, collapsed-meta rows.
+5. **Compose redesign** — strip toolbar, status-line send affordance, recipient pills, thread-context strip.
+6. **Status bar expansion** — surface protocol capabilities + sync state, IDLE indicator.
+7. **Command palette (⌘K)** — separate task; the pill in the top bar can no-op until this lands.
+
+**Acceptance criteria** (mirrored from `ui-direction.md` §Acceptance criteria):
+
+1. Chrome uses one monospace face throughout. Sans-serif appears only inside rendered HTML email bodies.
+2. Dark palette uses the warm tokens above; cool blue-gray + blue-accent surfaces are gone.
+3. Message list shows ≥10 rows in the same vertical space that currently shows ~5–6.
+4. Every message row has an IMAP flag glyph in column 1 reflecting actual flag state.
+5. Status bar shows account · folder · counts · protocol capabilities · last sync time, with IDLE green when active.
+6. Message view toolbar shows keyboard hints, not pill buttons.
+7. Compose has no formatting toolbar and no rendered Send button.
+8. No avatar circles anywhere in chrome.
+9. Top bar: `qsl` wordmark left, palette pill center, account count right.
+
+**Verification:** for each bundle, manually compare against the layout sketch in `ui-direction.md`. Treat density as an objective check — if a row feels generous, tighten until it's closer to aerc/mutt than to Apple Mail. Amber should appear only for unread state, active rail, send action, active tab underline, and the compose cursor block; if it shows up in five places on one screen, something is over-applied.
+
+**Out of scope:** light mode (defer until dark ships clean), custom wordmark typeface, command-palette implementation if it grows past one bundle.
+
 ## Suggested order
 
 Updated to reflect status. Strikethrough = nothing to do.
@@ -197,6 +241,8 @@ Updated to reflect status. Strikethrough = nothing to do.
 10. ~~Load-more-on-scroll~~ — Done (PR #60, 2026-04-26)
 
 **Active work this pass:** items 1, 2, 3, 4 (sanitizer half), 7. Five commits. After this pass, MCP server per `QSL_MCP_SERVER_SPEC.md`.
+
+**Active follow-up work:** **#13 UI overhaul** — monospace / density / warm-dark refresh per `docs/ui-direction.md`. Sequenced after the v0.1 feature set (search / settings / OAuth bundles) lands. Bundle by surface area, not by week, because every chrome surface needs to flip in tandem to avoid a half-and-half look.
 
 **Deferred to a follow-up PR:** the UI banner + Load-images / Allow-from-sender buttons for #4. Tracked in `docs/KNOWN_ISSUES.md`.
 
