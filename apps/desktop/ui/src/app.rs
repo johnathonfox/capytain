@@ -528,6 +528,7 @@ fn full_app_shell() -> Element {
             onmousemove: onmousemove_shell,
             onmouseup: onmouseup_shell,
             onmouseleave: onmouseup_shell,
+            TopBar {}
             div {
                 class: "shell-pane shell-pane-sidebar",
                 SidebarV2 { selection, sync_tick, compose }
@@ -822,6 +823,49 @@ fn short_folder_label(folder_id: &str) -> String {
         .unwrap_or_else(|| folder_id.to_string())
 }
 
+/// Top bar above the three-pane shell. Renders the `qsl` wordmark,
+/// version, a `⌘K` command-palette pill (no-op until the palette
+/// lands), and an account-count indicator on the right. Mono +
+/// dense per `docs/ui-direction.md` § Top bar.
+#[component]
+fn TopBar() -> Element {
+    let accounts = use_resource(|| async { invoke::<Vec<Account>>("accounts_list", ()).await });
+    let count = match &*accounts.read_unchecked() {
+        Some(Ok(list)) => list.len(),
+        _ => 0,
+    };
+    let count_label = match count {
+        0 => "0 accounts".to_string(),
+        1 => "1 account".to_string(),
+        n => format!("{n} accounts"),
+    };
+
+    rsx! {
+        header {
+            class: "topbar",
+            div {
+                class: "topbar-left",
+                span { class: "topbar-wordmark", "qsl" }
+                span {
+                    class: "topbar-version",
+                    {env!("CARGO_PKG_VERSION")}
+                }
+            }
+            button {
+                class: "topbar-cmd-pill",
+                r#type: "button",
+                title: "Command palette (⌘K)",
+                span { class: "topbar-cmd-key", "⌘K" }
+                span { "search · jump · command" }
+            }
+            div {
+                class: "topbar-right",
+                span { class: "topbar-account-count", "{count_label}" }
+            }
+        }
+    }
+}
+
 #[component]
 fn StatusBar(status: Signal<SyncStatus>) -> Element {
     let snapshot = status.read().clone();
@@ -854,8 +898,22 @@ fn StatusBar(status: Signal<SyncStatus>) -> Element {
     rsx! {
         footer {
             class: "status-bar",
-            span { class: "{dot_class}" }
-            span { class: "status-label", "{label}" }
+            div {
+                class: "status-left",
+                span { class: "{dot_class}" }
+                span { class: "status-label", "{label}" }
+            }
+            div {
+                class: "status-center",
+                // Capability flags (CONDSTORE / QRESYNC / IDLE) land here
+                // once the connection-level negotiation surfaces in the
+                // sync events. Phase 2 placeholder: blank center column
+                // keeps the 3-column grid stable.
+            }
+            div {
+                class: "status-right",
+                span { "? help" }
+            }
         }
     }
 }
@@ -988,24 +1046,6 @@ fn minimal_escape(s: &str) -> String {
         }
     }
     out
-}
-
-/// Two-letter initials for an avatar circle, mirroring
-/// `account_initials` but pulled from a free-form display name +
-/// fallback address.
-fn address_initials(name: &str, addr: &str) -> String {
-    let mut chars: Vec<char> = name
-        .split_whitespace()
-        .filter_map(|w| w.chars().next())
-        .map(|c| c.to_ascii_uppercase())
-        .take(2)
-        .collect();
-    if chars.is_empty() {
-        if let Some(first) = addr.chars().next() {
-            chars.push(first.to_ascii_uppercase());
-        }
-    }
-    chars.iter().collect()
 }
 
 /// Compact byte-size formatter for attachment chips. Uses
@@ -1335,38 +1375,45 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
         save_status.set(SaveStatus::Dirty);
     };
 
+    let subject_label = {
+        let s = subject.read().clone();
+        if s.is_empty() {
+            "(no subject)".to_string()
+        } else {
+            s
+        }
+    };
+    let body_chars = body.read().chars().count();
+    let body_words = body.read().split_whitespace().count();
+
     rsx! {
         section {
             class: "compose-pane",
             header {
                 class: "compose-head",
-                strong { "New message" }
+                strong { "qsl" }
+                span { class: "compose-statusline-key", "//" }
+                span { "compose · {subject_label}" }
                 span { class: "compose-spacer" }
                 ComposeStatusLabel { status: save_status }
-                button {
-                    class: "compose-action secondary",
-                    r#type: "button",
-                    onclick: move |_| close_compose(),
-                    "Close"
-                }
                 button {
                     class: "compose-action danger",
                     r#type: "button",
                     onclick: move |_| discard(),
-                    "Discard"
+                    "discard"
                 }
                 button {
                     class: "compose-action secondary",
                     r#type: "button",
                     onclick: move |_| manual_save(),
-                    "Save"
+                    "save"
                 }
                 button {
-                    class: "compose-action primary",
+                    class: "compose-action secondary",
                     r#type: "button",
-                    disabled: *send_in_flight.read(),
-                    onclick: move |_| send_now(),
-                    if *send_in_flight.read() { "Sending…" } else { "Send" }
+                    onclick: move |_| close_compose(),
+                    span { class: "compose-statusline-key", "⌘W" }
+                    " close"
                 }
             }
             if !*loaded.read() {
@@ -1460,7 +1507,53 @@ fn ComposePane(compose: Signal<Option<ComposeState>>, sync_tick: SyncTick) -> El
                                 body.set(evt.value());
                                 bump();
                             }
+                        },
+                        // Ctrl/Cmd+Enter sends. The document-level
+                        // keyboard parser is bypassed inside textareas
+                        // (see `is_typing_in_field`), so this handler
+                        // owns the send shortcut for the compose pane.
+                        onkeydown: {
+                            let mut send_now_kbd = send_now;
+                            move |evt: Event<KeyboardData>| {
+                                if (evt.modifiers().contains(Modifiers::CONTROL)
+                                    || evt.modifiers().contains(Modifiers::META))
+                                    && evt.key() == Key::Enter
+                                {
+                                    evt.prevent_default();
+                                    send_now_kbd();
+                                }
+                            }
                         }
+                    }
+                }
+            }
+            // Status line — the ⌘↵ send affordance is the only send
+            // surface in the new design (ui-direction.md § Compose).
+            // Click triggers send_now; ⌘↵ on the textarea above does
+            // the same. No button-shaped Send element appears anywhere.
+            footer {
+                class: "compose-statusline",
+                div {
+                    class: "compose-statusline-left",
+                    span { "plain" }
+                    span { class: "status-sep", "·" }
+                    span { "{body_words}w / {body_chars}c" }
+                }
+                div {
+                    class: "compose-statusline-center",
+                    ComposeStatusLabel { status: save_status }
+                }
+                div {
+                    class: "compose-statusline-right",
+                    button {
+                        class: "compose-statusline-send",
+                        r#type: "button",
+                        title: "Send (⌘↵)",
+                        disabled: *send_in_flight.read(),
+                        onclick: move |_| send_now(),
+                        span { class: "compose-statusline-key", "⌘↵" }
+                        " "
+                        if *send_in_flight.read() { "sending…" } else { "send" }
                     }
                 }
             }
@@ -1782,36 +1875,16 @@ fn SidebarV2(
         invoke::<Vec<Account>>("accounts_list", ()).await
     }));
 
-    let open_compose = {
-        let mut compose = compose;
-        move |_| {
-            // Default the From account: prefer whatever's currently
-            // selected, otherwise fall back to the first configured
-            // account so the form has a sensible value on open.
-            let default_account = selection.read().account.clone().or_else(|| {
-                accounts
-                    .read_unchecked()
-                    .as_ref()
-                    .and_then(|r| r.as_ref().ok())
-                    .and_then(|list| list.first().map(|a| a.id.clone()))
-            });
-            compose.set(Some(ComposeState {
-                default_account,
-                draft_id: None,
-            }));
-        }
-    };
+    // The sidebar's compose button is gone in the new design — compose
+    // is keyboard-driven via `c` (KeyboardCommand::Compose, dispatched
+    // by `dispatch_keyboard_command`) per `docs/ui-direction.md` § Sidebar.
+    // The `compose` signal is still threaded through for the empty-state
+    // CTA (see SidebarAccountBlock's "Add account" button).
+    let _ = compose;
 
     rsx! {
         aside {
             class: "sidebar",
-            button {
-                class: "sidebar-compose-btn",
-                r#type: "button",
-                onclick: open_compose,
-                span { class: "sidebar-compose-plus", "+" }
-                span { "Compose" }
-            }
             div {
                 class: "sidebar-scroll",
                 match &*accounts.read_unchecked() {
@@ -2692,10 +2765,6 @@ fn MessageRowV2(
                 .unwrap_or_else(|| a.address.clone())
         })
         .unwrap_or_default();
-    let avatar_initials = address_initials(
-        &from_name,
-        from_addr.map(|a| a.address.as_str()).unwrap_or(""),
-    );
     let date = crate::format::format_relative_date(msg.date, chrono::Utc::now());
     let subject = if msg.subject.is_empty() {
         "(no subject)".to_string()
@@ -2703,6 +2772,14 @@ fn MessageRowV2(
         msg.subject.clone()
     };
     let snippet = msg.snippet.clone();
+    let (flag_glyph, flag_class) = crate::format::flag_glyph(&msg.flags);
+    let flag_div_class = format!("msg-row-flag {flag_class}");
+    // Subject + preview render on a single line per ui-direction.md.
+    let subject_line = if snippet.is_empty() {
+        subject.clone()
+    } else {
+        format!("{subject} · {snippet}")
+    };
     // `checked` is its own row state — the row stays a `selected` row
     // only when *opened* in the reader; bulk-checking just adds a
     // visual marker without taking over reader focus.
@@ -2768,19 +2845,10 @@ fn MessageRowV2(
                     readonly: true,
                 }
             }
-            div { class: "msg-row-avatar", "{avatar_initials}" }
-            div {
-                class: "msg-row-line1",
-                span { class: "msg-row-from", "{from_name}" }
-                if unread {
-                    span { class: "msg-row-unread-dot" }
-                }
-                span { class: "msg-row-time", "{date}" }
-            }
-            div { class: "msg-row-subject", "{subject}" }
-            if !snippet.is_empty() {
-                div { class: "msg-row-snippet", "{snippet}" }
-            }
+            div { class: "{flag_div_class}", "{flag_glyph}" }
+            div { class: "msg-row-from", "{from_name}" }
+            div { class: "msg-row-subject", "{subject_line}" }
+            div { class: "msg-row-time", "{date}" }
         }
     }
 }
@@ -2827,10 +2895,6 @@ fn ThreadRow(
                 .unwrap_or_else(|| a.address.clone())
         })
         .unwrap_or_default();
-    let avatar_initials = address_initials(
-        &from_name,
-        from_addr.map(|a| a.address.as_str()).unwrap_or(""),
-    );
     let date = crate::format::format_relative_date(head.date, chrono::Utc::now());
     let subject = if head.subject.is_empty() {
         "(no subject)".to_string()
@@ -2838,6 +2902,13 @@ fn ThreadRow(
         head.subject.clone()
     };
     let snippet = head.snippet.clone();
+    let (head_glyph, head_flag_class) = crate::format::flag_glyph(&head.flags);
+    let head_flag_div_class = format!("msg-row-flag {head_flag_class}");
+    let head_subject_line = if snippet.is_empty() {
+        subject.clone()
+    } else {
+        format!("{subject} · {snippet}")
+    };
     let is_expanded = expanded();
     let row_class = match (is_head_selected, all_checked, any_unread) {
         (true, _, true) => "msg-row thread-row selected unread",
@@ -2908,19 +2979,20 @@ fn ThreadRow(
                         readonly: true,
                     }
                 }
-                div { class: "msg-row-avatar", "{avatar_initials}" }
+                div { class: "{head_flag_div_class}", "{head_glyph}" }
                 div {
-                    class: "msg-row-line1",
-                    span { class: "msg-row-from", "{from_name}" }
+                    class: "msg-row-from",
+                    "{from_name}"
                     span {
                         class: "thread-count",
                         title: "{count} messages in thread",
                         "{count}"
                     }
-                    if any_unread {
-                        span { class: "msg-row-unread-dot" }
-                    }
-                    span { class: "msg-row-time", "{date}" }
+                }
+                div { class: "msg-row-subject", "{head_subject_line}" }
+                div {
+                    class: "msg-row-time",
+                    "{date}"
                     button {
                         class: "thread-toggle",
                         r#type: "button",
@@ -2932,10 +3004,6 @@ fn ThreadRow(
                         },
                         if is_expanded { "▾" } else { "▸" }
                     }
-                }
-                div { class: "msg-row-subject", "{subject}" }
-                if !snippet.is_empty() {
-                    div { class: "msg-row-snippet", "{snippet}" }
                 }
             }
             if is_expanded {
@@ -3208,7 +3276,6 @@ fn ReaderV2(
                     })
                     .unwrap_or_default();
                 let from_addr = primary.map(|a| a.address.clone()).unwrap_or_default();
-                let initials = address_initials(&from_name, &from_addr);
                 let date = crate::format::format_relative_date(
                     rendered.headers.date,
                     chrono::Utc::now(),
@@ -3241,12 +3308,170 @@ fn ReaderV2(
                 });
 
                 rsx! {
+                    // Toolbar above the header — keyboard hints replace
+                    // the old pill action buttons (ui-direction.md §
+                    // "Message view"). Clicking still triggers the
+                    // action; the visible `[k]` reads as the canonical
+                    // shortcut so the chrome reinforces the keyboard
+                    // language instead of competing with it.
+                    div {
+                        class: "reader-toolbar",
+                        button {
+                            class: "reader-hint",
+                            r#type: "button",
+                            title: "Reply (r)",
+                            onclick: {
+                                let r = rendered.clone();
+                                move |_| open_reply(r.clone(), compose, ReplyKind::Reply)
+                            },
+                            span { class: "reader-hint-key", "[r]" }
+                            " reply"
+                        }
+                        button {
+                            class: "reader-hint",
+                            r#type: "button",
+                            title: "Reply to all (a)",
+                            onclick: {
+                                let r = rendered.clone();
+                                move |_| open_reply(r.clone(), compose, ReplyKind::ReplyAll)
+                            },
+                            span { class: "reader-hint-key", "[a]" }
+                            " reply-all"
+                        }
+                        button {
+                            class: "reader-hint",
+                            r#type: "button",
+                            title: "Forward (f)",
+                            onclick: {
+                                let r = rendered.clone();
+                                move |_| open_reply(r.clone(), compose, ReplyKind::Forward)
+                            },
+                            span { class: "reader-hint-key", "[f]" }
+                            " forward"
+                        }
+                        button {
+                            class: "reader-hint",
+                            r#type: "button",
+                            title: "Archive (e)",
+                            onclick: {
+                                let id = rendered.headers.id.clone();
+                                let mut selection = selection;
+                                let mut sync_tick = sync_tick;
+                                move |_| {
+                                    let id = id.clone();
+                                    spawn(async move {
+                                        let payload = serde_json::json!({
+                                            "input": { "ids": [id.clone()] }
+                                        });
+                                        if let Err(e) =
+                                            invoke::<()>("messages_archive", payload).await
+                                        {
+                                            web_sys_log(&format!("messages_archive: {e}"));
+                                            return;
+                                        }
+                                        selection.with_mut(|sel| sel.message = None);
+                                        sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+                                    });
+                                }
+                            },
+                            span { class: "reader-hint-key", "[e]" }
+                            " archive"
+                        }
+                        button {
+                            class: "reader-hint",
+                            r#type: "button",
+                            title: if rendered.headers.flags.flagged { "Unflag (s)" } else { "Flag (s)" },
+                            onclick: {
+                                let id = rendered.headers.id.clone();
+                                let next_flagged = !rendered.headers.flags.flagged;
+                                let mut sync_tick = sync_tick;
+                                move |_| {
+                                    let id = id.clone();
+                                    spawn(async move {
+                                        let payload = serde_json::json!({
+                                            "input": {
+                                                "ids": [id.clone()],
+                                                "flagged": next_flagged,
+                                            }
+                                        });
+                                        if let Err(e) =
+                                            invoke::<()>("messages_flag", payload).await
+                                        {
+                                            web_sys_log(&format!("messages_flag: {e}"));
+                                            return;
+                                        }
+                                        sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+                                    });
+                                }
+                            },
+                            span { class: "reader-hint-key", "[s]" }
+                            if rendered.headers.flags.flagged { " unflag" } else { " flag" }
+                        }
+                        span { class: "reader-hint-spacer" }
+                        button {
+                            class: "reader-hint",
+                            r#type: "button",
+                            title: if rendered.headers.flags.seen { "Mark unread (u)" } else { "Mark read (u)" },
+                            onclick: {
+                                let id = rendered.headers.id.clone();
+                                let next_seen = !rendered.headers.flags.seen;
+                                let mut sync_tick = sync_tick;
+                                move |_| {
+                                    let id = id.clone();
+                                    spawn(async move {
+                                        let payload = serde_json::json!({
+                                            "input": {
+                                                "ids": [id.clone()],
+                                                "seen": next_seen,
+                                            }
+                                        });
+                                        if let Err(e) =
+                                            invoke::<()>("messages_mark_read", payload).await
+                                        {
+                                            web_sys_log(&format!("messages_mark_read: {e}"));
+                                            return;
+                                        }
+                                        sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+                                    });
+                                }
+                            },
+                            span { class: "reader-hint-key", "[u]" }
+                            if rendered.headers.flags.seen { " unread" } else { " read" }
+                        }
+                        button {
+                            class: "reader-hint",
+                            r#type: "button",
+                            title: "Delete (#)",
+                            onclick: {
+                                let id = rendered.headers.id.clone();
+                                let mut selection = selection;
+                                let mut sync_tick = sync_tick;
+                                move |_| {
+                                    let id = id.clone();
+                                    spawn(async move {
+                                        let payload = serde_json::json!({
+                                            "input": { "ids": [id.clone()] }
+                                        });
+                                        if let Err(e) =
+                                            invoke::<()>("messages_delete", payload).await
+                                        {
+                                            web_sys_log(&format!("messages_delete: {e}"));
+                                            return;
+                                        }
+                                        selection.with_mut(|sel| sel.message = None);
+                                        sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+                                    });
+                                }
+                            },
+                            span { class: "reader-hint-key", "[#]" }
+                            " delete"
+                        }
+                    }
                     div {
                         class: "reader-header-block",
                         h1 { class: "reader-subject", "{subject}" }
                         div {
                             class: "reader-sender-card",
-                            div { class: "reader-sender-avatar", "{initials}" }
                             div {
                                 class: "reader-sender-meta",
                                 span { class: "reader-sender-name", "{from_name}" }
@@ -3256,205 +3481,6 @@ fn ReaderV2(
                                 class: "reader-sender-date",
                                 title: "{date_full}",
                                 "{date}"
-                            }
-                            div {
-                                class: "reader-actions",
-                                button {
-                                    class: "reader-action",
-                                    r#type: "button",
-                                    title: "Reply",
-                                    onclick: {
-                                        let r = rendered.clone();
-                                        move |_| open_reply(r.clone(), compose, ReplyKind::Reply)
-                                    },
-                                    "Reply"
-                                }
-                                button {
-                                    class: "reader-action",
-                                    r#type: "button",
-                                    title: "Reply to all",
-                                    onclick: {
-                                        let r = rendered.clone();
-                                        move |_| open_reply(r.clone(), compose, ReplyKind::ReplyAll)
-                                    },
-                                    "Reply All"
-                                }
-                                button {
-                                    class: "reader-action",
-                                    r#type: "button",
-                                    title: "Forward",
-                                    onclick: {
-                                        let r = rendered.clone();
-                                        move |_| open_reply(r.clone(), compose, ReplyKind::Forward)
-                                    },
-                                    "Forward"
-                                }
-                                button {
-                                    class: "reader-action reader-action-archive",
-                                    r#type: "button",
-                                    title: "Archive (move to All Mail / Archive)",
-                                    onclick: {
-                                        let id = rendered.headers.id.clone();
-                                        let mut selection = selection;
-                                        let mut sync_tick = sync_tick;
-                                        move |_| {
-                                            let id = id.clone();
-                                            spawn(async move {
-                                                let payload = serde_json::json!({
-                                                    "input": { "ids": [id.clone()] }
-                                                });
-                                                if let Err(e) = invoke::<()>(
-                                                    "messages_archive",
-                                                    payload,
-                                                )
-                                                .await
-                                                {
-                                                    web_sys_log(&format!(
-                                                        "messages_archive: {e}"
-                                                    ));
-                                                    return;
-                                                }
-                                                // Optimistic UI: clear the
-                                                // reader (the archived row
-                                                // disappears from this folder)
-                                                // and bump sync_tick so the
-                                                // sidebar + message list
-                                                // refetch immediately.
-                                                selection.with_mut(|sel| {
-                                                    sel.message = None;
-                                                });
-                                                sync_tick.with_mut(|t| {
-                                                    *t = t.wrapping_add(1)
-                                                });
-                                            });
-                                        }
-                                    },
-                                    "Archive"
-                                }
-                                button {
-                                    class: "reader-action",
-                                    r#type: "button",
-                                    title: if rendered.headers.flags.seen {
-                                        "Mark as unread"
-                                    } else {
-                                        "Mark as read"
-                                    },
-                                    onclick: {
-                                        let id = rendered.headers.id.clone();
-                                        let next_seen = !rendered.headers.flags.seen;
-                                        let mut sync_tick = sync_tick;
-                                        move |_| {
-                                            let id = id.clone();
-                                            spawn(async move {
-                                                let payload = serde_json::json!({
-                                                    "input": {
-                                                        "ids": [id.clone()],
-                                                        "seen": next_seen,
-                                                    }
-                                                });
-                                                if let Err(e) = invoke::<()>(
-                                                    "messages_mark_read",
-                                                    payload,
-                                                )
-                                                .await
-                                                {
-                                                    web_sys_log(&format!(
-                                                        "messages_mark_read: {e}"
-                                                    ));
-                                                    return;
-                                                }
-                                                sync_tick.with_mut(|t| {
-                                                    *t = t.wrapping_add(1)
-                                                });
-                                            });
-                                        }
-                                    },
-                                    if rendered.headers.flags.seen {
-                                        "Mark unread"
-                                    } else {
-                                        "Mark read"
-                                    }
-                                }
-                                button {
-                                    class: if rendered.headers.flags.flagged {
-                                        "reader-action reader-action-flagged"
-                                    } else {
-                                        "reader-action"
-                                    },
-                                    r#type: "button",
-                                    title: if rendered.headers.flags.flagged {
-                                        "Unstar"
-                                    } else {
-                                        "Star"
-                                    },
-                                    onclick: {
-                                        let id = rendered.headers.id.clone();
-                                        let next_flagged = !rendered.headers.flags.flagged;
-                                        let mut sync_tick = sync_tick;
-                                        move |_| {
-                                            let id = id.clone();
-                                            spawn(async move {
-                                                let payload = serde_json::json!({
-                                                    "input": {
-                                                        "ids": [id.clone()],
-                                                        "flagged": next_flagged,
-                                                    }
-                                                });
-                                                if let Err(e) = invoke::<()>(
-                                                    "messages_flag",
-                                                    payload,
-                                                )
-                                                .await
-                                                {
-                                                    web_sys_log(&format!(
-                                                        "messages_flag: {e}"
-                                                    ));
-                                                    return;
-                                                }
-                                                sync_tick.with_mut(|t| {
-                                                    *t = t.wrapping_add(1)
-                                                });
-                                            });
-                                        }
-                                    },
-                                    if rendered.headers.flags.flagged { "★" } else { "☆" }
-                                }
-                                button {
-                                    class: "reader-action reader-action-delete",
-                                    r#type: "button",
-                                    title: "Delete (move to Trash on Gmail; permanent on JMAP)",
-                                    onclick: {
-                                        let id = rendered.headers.id.clone();
-                                        let mut selection = selection;
-                                        let mut sync_tick = sync_tick;
-                                        move |_| {
-                                            let id = id.clone();
-                                            spawn(async move {
-                                                let payload = serde_json::json!({
-                                                    "input": { "ids": [id.clone()] }
-                                                });
-                                                if let Err(e) = invoke::<()>(
-                                                    "messages_delete",
-                                                    payload,
-                                                )
-                                                .await
-                                                {
-                                                    web_sys_log(&format!(
-                                                        "messages_delete: {e}"
-                                                    ));
-                                                    return;
-                                                }
-                                                selection.with_mut(|sel| {
-                                                    sel.message = None;
-                                                });
-                                                sync_tick.with_mut(|t| {
-                                                    *t = t.wrapping_add(1)
-                                                });
-                                            });
-                                        }
-                                    },
-                                    "Delete"
-                                }
                             }
                         }
                         if !rendered.headers.to.is_empty() {
