@@ -524,7 +524,7 @@ pub async fn sync_one_folder(
 /// emits one `SyncEvent::FolderSynced` per outcome — same shape the
 /// IMAP per-folder path produces, so the UI doesn't have to care
 /// which adapter pushed.
-async fn sync_one_account(app: &AppHandle, blobs: &BlobStore, account_id: &AccountId) {
+pub(crate) async fn sync_one_account(app: &AppHandle, blobs: &BlobStore, account_id: &AccountId) {
     let state: tauri::State<'_, AppState> = app.state();
     let backend = match backend_factory::get_or_open(&state, account_id).await {
         Ok(b) => b,

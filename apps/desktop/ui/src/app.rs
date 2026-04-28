@@ -324,6 +324,7 @@ pub fn App() -> Element {
     if let Some(view) = view_js.as_string() {
         match view.as_str() {
             "settings" => return rsx! { crate::settings::SettingsApp {} },
+            "oauth-add" => return rsx! { crate::oauth_add::OAuthAddApp {} },
             other => {
                 web_sys_log(&format!(
                     "App: unknown __QSL_VIEW__ = {other}; falling through"
@@ -1770,7 +1771,16 @@ fn SidebarV2(
     sync_tick: SyncTick,
     compose: Signal<Option<ComposeState>>,
 ) -> Element {
-    let accounts = use_resource(|| async { invoke::<Vec<Account>>("accounts_list", ()).await });
+    // Refetch on every sync_event tick so a brand-new account from
+    // `accounts_add_oauth` appears in the sidebar without requiring
+    // the user to restart. The bootstrap-sync started inside
+    // `accounts_add_oauth` emits per-folder sync_events; the first
+    // bumps `sync_tick` here.
+    let tick_value = sync_tick();
+    let accounts = use_resource(use_reactive!(|tick_value| async move {
+        let _ = tick_value;
+        invoke::<Vec<Account>>("accounts_list", ()).await
+    }));
 
     let open_compose = {
         let mut compose = compose;
@@ -1808,10 +1818,24 @@ fn SidebarV2(
                     None => rsx! {},
                     Some(Err(e)) => rsx! { p { class: "sidebar-account-email", "Error: {e}" } },
                     Some(Ok(list)) if list.is_empty() => rsx! {
-                        p {
-                            class: "sidebar-account-email",
-                            style: "padding: 14px 16px;",
-                            "No accounts configured."
+                        div {
+                            class: "sidebar-empty-state",
+                            p {
+                                class: "sidebar-empty-blurb",
+                                "No accounts configured yet."
+                            }
+                            button {
+                                class: "sidebar-empty-add",
+                                r#type: "button",
+                                onclick: |_| {
+                                    spawn(async {
+                                        if let Err(e) = invoke::<()>("oauth_add_open", serde_json::json!({})).await {
+                                            web_sys_log(&format!("oauth_add_open: {e}"));
+                                        }
+                                    });
+                                },
+                                "Add an account"
+                            }
                         }
                     },
                     Some(Ok(list)) => rsx! {
