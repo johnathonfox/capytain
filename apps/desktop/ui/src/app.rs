@@ -2443,6 +2443,130 @@ fn ReaderV2(
                                     },
                                     "Archive"
                                 }
+                                button {
+                                    class: "reader-action",
+                                    r#type: "button",
+                                    title: if rendered.headers.flags.seen {
+                                        "Mark as unread"
+                                    } else {
+                                        "Mark as read"
+                                    },
+                                    onclick: {
+                                        let id = rendered.headers.id.clone();
+                                        let next_seen = !rendered.headers.flags.seen;
+                                        let mut sync_tick = sync_tick;
+                                        move |_| {
+                                            let id = id.clone();
+                                            spawn(async move {
+                                                let payload = serde_json::json!({
+                                                    "input": {
+                                                        "ids": [id.clone()],
+                                                        "seen": next_seen,
+                                                    }
+                                                });
+                                                if let Err(e) = invoke::<()>(
+                                                    "messages_mark_read",
+                                                    payload,
+                                                )
+                                                .await
+                                                {
+                                                    web_sys_log(&format!(
+                                                        "messages_mark_read: {e}"
+                                                    ));
+                                                    return;
+                                                }
+                                                sync_tick.with_mut(|t| {
+                                                    *t = t.wrapping_add(1)
+                                                });
+                                            });
+                                        }
+                                    },
+                                    if rendered.headers.flags.seen {
+                                        "Mark unread"
+                                    } else {
+                                        "Mark read"
+                                    }
+                                }
+                                button {
+                                    class: if rendered.headers.flags.flagged {
+                                        "reader-action reader-action-flagged"
+                                    } else {
+                                        "reader-action"
+                                    },
+                                    r#type: "button",
+                                    title: if rendered.headers.flags.flagged {
+                                        "Unstar"
+                                    } else {
+                                        "Star"
+                                    },
+                                    onclick: {
+                                        let id = rendered.headers.id.clone();
+                                        let next_flagged = !rendered.headers.flags.flagged;
+                                        let mut sync_tick = sync_tick;
+                                        move |_| {
+                                            let id = id.clone();
+                                            spawn(async move {
+                                                let payload = serde_json::json!({
+                                                    "input": {
+                                                        "ids": [id.clone()],
+                                                        "flagged": next_flagged,
+                                                    }
+                                                });
+                                                if let Err(e) = invoke::<()>(
+                                                    "messages_flag",
+                                                    payload,
+                                                )
+                                                .await
+                                                {
+                                                    web_sys_log(&format!(
+                                                        "messages_flag: {e}"
+                                                    ));
+                                                    return;
+                                                }
+                                                sync_tick.with_mut(|t| {
+                                                    *t = t.wrapping_add(1)
+                                                });
+                                            });
+                                        }
+                                    },
+                                    if rendered.headers.flags.flagged { "★" } else { "☆" }
+                                }
+                                button {
+                                    class: "reader-action reader-action-delete",
+                                    r#type: "button",
+                                    title: "Delete (move to Trash on Gmail; permanent on JMAP)",
+                                    onclick: {
+                                        let id = rendered.headers.id.clone();
+                                        let mut selection = selection;
+                                        let mut sync_tick = sync_tick;
+                                        move |_| {
+                                            let id = id.clone();
+                                            spawn(async move {
+                                                let payload = serde_json::json!({
+                                                    "input": { "ids": [id.clone()] }
+                                                });
+                                                if let Err(e) = invoke::<()>(
+                                                    "messages_delete",
+                                                    payload,
+                                                )
+                                                .await
+                                                {
+                                                    web_sys_log(&format!(
+                                                        "messages_delete: {e}"
+                                                    ));
+                                                    return;
+                                                }
+                                                selection.with_mut(|sel| {
+                                                    sel.message = None;
+                                                });
+                                                sync_tick.with_mut(|t| {
+                                                    *t = t.wrapping_add(1)
+                                                });
+                                            });
+                                        }
+                                    },
+                                    "Delete"
+                                }
                             }
                         }
                         if !rendered.headers.to.is_empty() {

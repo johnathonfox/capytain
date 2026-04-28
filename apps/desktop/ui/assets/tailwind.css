@@ -793,6 +793,25 @@ ul {
   cursor: default;
 }
 
+/* Star button: hollow when off, gold when on. */
+.reader-action-flagged {
+  color: #d8a030;
+  border-color: #5a4a20;
+}
+
+.reader-action-flagged:hover:not(:disabled) {
+  color: #e6b450;
+  border-color: #6a5a30;
+}
+
+/* Delete reads as a destructive action — keep it red on hover so a
+ * mis-click stands out. */
+.reader-action-delete:hover:not(:disabled) {
+  color: #d85a30;
+  border-color: #d85a30;
+  background: rgba(216, 90, 48, 0.08);
+}
+
 .reader-recipients {
   display: flex;
   flex-wrap: wrap;
