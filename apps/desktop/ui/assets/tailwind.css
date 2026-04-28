@@ -84,7 +84,13 @@ html,
 body,
 #main {
   height: 100%;
+  width: 100%;
   margin: 0;
+  /* Backlog #2 — clamp overflow at the root so a stray 1px overrun
+   * inside any pane can't paint a vertical sliver past the window
+   * edge. `.app-shell` already clips internally; this is belt-and-
+   * suspenders for the html/body/#main chain Servo paints into. */
+  overflow: hidden;
 }
 
 body {

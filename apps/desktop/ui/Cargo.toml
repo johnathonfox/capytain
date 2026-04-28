@@ -16,6 +16,7 @@ name = "qsl-ui"
 path = "src/main.rs"
 
 [dependencies]
+qsl-core = { workspace = true }
 qsl-ipc = { workspace = true }
 chrono = { workspace = true }
 dioxus = { workspace = true }

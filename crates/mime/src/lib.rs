@@ -103,7 +103,7 @@ pub fn sanitize_email_html_trusted(raw_html: &str) -> String {
 
 fn sanitize(raw_html: &str, block_remote: bool) -> String {
     let engine = remote_content::default_engine();
-    ammonia::Builder::default()
+    let cleaned = ammonia::Builder::default()
         .add_generic_attributes(["style"])
         .rm_tags([
             "script", "iframe", "object", "embed", "form", "input", "button", "textarea", "select",
@@ -130,7 +130,138 @@ fn sanitize(raw_html: &str, block_remote: bool) -> String {
             }
         })
         .clean(raw_html)
-        .to_string()
+        .to_string();
+    // Element-level rewrite pass: tag every `<img>` whose `src` was
+    // dropped by the attribute filter (or was never present) with a
+    // `data-qsl-blocked` boolean attribute. The reader CSS frames
+    // these as same-dimension placeholder boxes so layout doesn't
+    // reflow when the user clicks "Load images". `ammonia::Builder`
+    // doesn't expose element-level rewriting, so this happens after
+    // the clean pass over the canonical output.
+    if block_remote {
+        mark_blocked_images(&cleaned)
+    } else {
+        cleaned
+    }
+}
+
+/// Walk an ammonia-cleaned HTML string and append `data-qsl-blocked`
+/// to every `<img>` tag that lacks a `src` attribute. Return the input
+/// unchanged when no rewrite is needed (avoids spurious diff churn).
+///
+/// The output pre-existing `width` / `height` attributes (and inline
+/// `style="width:..."`) are preserved by ammonia's default allowlist,
+/// so the placeholder reserves the original layout box; the reader
+/// stylesheet supplies a `min-width` / `min-height` fallback for tags
+/// missing dimensions entirely.
+fn mark_blocked_images(html: &str) -> String {
+    // Cheap fast-path: if the cleaned HTML has no `<img` tokens at all,
+    // there's nothing to do. ASCII match — safe even on UTF-8.
+    if !html.contains("<img") {
+        return html.to_string();
+    }
+    let bytes = html.as_bytes();
+    let mut out = String::with_capacity(html.len() + 32);
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        let Some(rel) = html[cursor..].find("<img") else {
+            break;
+        };
+        let img_open = cursor + rel;
+        let after_img = img_open + 4;
+        // Confirm `<img` is the start of an actual tag — the next byte
+        // must be whitespace, `/`, or `>`. Otherwise this is a partial
+        // match inside another token (e.g. `<image>`) — copy past and
+        // continue.
+        let is_tag = matches!(
+            bytes.get(after_img).copied(),
+            Some(b' ' | b'\t' | b'\n' | b'\r' | b'>' | b'/')
+        );
+        if !is_tag {
+            out.push_str(&html[cursor..=img_open]);
+            cursor = img_open + 1;
+            continue;
+        }
+        // Find the closing `>` of this tag.
+        let Some(end_rel) = html[after_img..].find('>') else {
+            // Unterminated tag — bail: copy the rest verbatim.
+            out.push_str(&html[cursor..]);
+            return out;
+        };
+        let tag_end = after_img + end_rel;
+        let attrs = &html[after_img..tag_end];
+        // Copy everything up to (but not including) the closing `>`.
+        out.push_str(&html[cursor..tag_end]);
+        if !img_attrs_have_src(attrs) {
+            out.push_str(" data-qsl-blocked");
+        }
+        out.push('>');
+        cursor = tag_end + 1;
+    }
+    out.push_str(&html[cursor..]);
+    out
+}
+
+/// Walk an `<img>` tag's attribute slice (between the `<img` opener
+/// and the closing `>`) and report whether a `src=` attribute is
+/// present. Avoids the substring-false-positive case of e.g.
+/// `<img title="src=here">`. ammonia normalizes its output enough
+/// that this hand-rolled walk is sufficient — we only need to handle
+/// canonically-emitted attribute syntax.
+fn img_attrs_have_src(attrs: &str) -> bool {
+    let bytes = attrs.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Skip leading whitespace.
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            return false;
+        }
+        // A trailing `/` before `>` (self-closing) ends the attr list.
+        if bytes[i] == b'/' {
+            return false;
+        }
+        // Read attribute name until `=`, whitespace, or end-of-attrs.
+        let name_start = i;
+        while i < bytes.len()
+            && !bytes[i].is_ascii_whitespace()
+            && bytes[i] != b'='
+            && bytes[i] != b'/'
+        {
+            i += 1;
+        }
+        if attrs[name_start..i].eq_ignore_ascii_case("src") {
+            return true;
+        }
+        // Skip whitespace between name and `=` (allowed by HTML spec).
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'=' {
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            // Quoted or unquoted value.
+            if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+                let quote = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            } else {
+                while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Walk a CSS inline-style declaration list, drop any declaration
@@ -728,6 +859,59 @@ caf"
             "benign src lost: {out}"
         );
         assert!(out.contains(r#"alt="logo""#), "alt lost: {out}");
+        // Benign image is not blocked → no placeholder marker.
+        assert!(
+            !out.contains("data-qsl-blocked"),
+            "benign img picked up a blocked marker: {out}"
+        );
+    }
+
+    #[test]
+    fn sanitize_marks_blocked_img_with_data_attribute() {
+        // Tracker host → src filtered out. The remaining `<img>`
+        // should pick up `data-qsl-blocked` so the reader CSS can
+        // render a same-dimension placeholder box.
+        let probe = r#"<img src="https://list-manage.com/track/open.gif" width="600" height="200" alt="hero">"#;
+        let out = sanitize_email_html(probe);
+        assert!(!out.contains("list-manage.com"), "tracker src kept: {out}");
+        assert!(
+            out.contains("data-qsl-blocked"),
+            "blocked marker missing: {out}"
+        );
+        // Width / height attributes are kept by ammonia's default
+        // allowlist, so the placeholder reserves the right box size.
+        assert!(out.contains(r#"width="600""#), "width attr lost: {out}");
+        assert!(out.contains(r#"height="200""#), "height attr lost: {out}");
+    }
+
+    #[test]
+    fn mark_blocked_images_pure_helper() {
+        // Tag without `src=` → mark.
+        let marked = mark_blocked_images("<p>hi</p><img alt=\"pic\"><p>bye</p>");
+        assert!(marked.contains(r#"<img alt="pic" data-qsl-blocked>"#));
+        // Tag with `src=` → leave alone.
+        let kept = mark_blocked_images(r#"<img src="x" alt="pic">"#);
+        assert!(!kept.contains("data-qsl-blocked"));
+        // No `<img>` at all → byte-identical output (fast path).
+        let neutral = "<p>only text</p>";
+        assert_eq!(mark_blocked_images(neutral), neutral);
+        // Substring `<img` inside another token must not be rewritten.
+        let other = "<imgx></imgx>";
+        assert_eq!(mark_blocked_images(other), other);
+    }
+
+    #[test]
+    fn img_attrs_have_src_does_not_match_attr_value() {
+        // Hand-rolled attribute walker must distinguish a real
+        // `src=...` attribute from a literal `src=` substring inside
+        // another attribute value (e.g. `title="see src=here"`).
+        assert!(!img_attrs_have_src(r#" title="see src=here" alt="x""#));
+        assert!(img_attrs_have_src(r#" alt="x" src="http://h/p""#));
+        assert!(img_attrs_have_src(r#" SRC="x""#));
+        assert!(img_attrs_have_src(r#" src=unquoted"#));
+        assert!(!img_attrs_have_src(r#" alt="x""#));
+        // Self-closing slash before `>` shouldn't trip the walker.
+        assert!(!img_attrs_have_src(r#" alt="x" /"#));
     }
 
     #[test]

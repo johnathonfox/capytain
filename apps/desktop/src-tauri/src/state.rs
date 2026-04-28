@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use qsl_core::{AccountId, EmailRenderer, MailBackend};
+use qsl_ipc::{MessageId, RenderedMessage};
 use qsl_storage::TursoConn;
 use tokio::sync::{Mutex, Notify};
 
@@ -76,6 +77,42 @@ pub struct AppState {
     /// window resize.
     pub last_reader_size: Mutex<HashMap<String, (u32, u32)>>,
 
+    /// Trailing-edge debounce handles for `renderer.resize`, keyed by
+    /// Tauri window label. `reader_set_position` schedules each new
+    /// size into a deferred tokio task and aborts the previous handle
+    /// for the same window — so a fast continuous drag fires a single
+    /// `resize` on the trailing edge instead of cascading Servo
+    /// relayouts at ~60 Hz. `set_position` itself stays unbatched
+    /// (it's cheap) so the GTK overlay tracks the cursor live.
+    ///
+    /// Experimental — the residual reader-pane flicker is partly
+    /// structural (Servo's offscreen surface size lags its viewport
+    /// handle, see `KNOWN_ISSUES.md`). This debounce caps the rate
+    /// at which we *ask* Servo to relayout but doesn't fix the
+    /// surface-vs-viewport mismatch frame; a follow-up pause-paint
+    /// approach would be needed for that.
+    pub resize_debounce: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
+
+    /// Single-entry cache of the most recently rendered message —
+    /// the `RenderedMessage` produced by the last `messages_get` call.
+    /// `messages_open_in_window` (popup-reader path) consults this
+    /// before re-issuing `messages_get`: when the user double-clicks
+    /// a row that's currently selected in the main reader pane, the
+    /// body has just been fetched, sanitized, and decoded, so paying
+    /// the lazy-fetch + sanitize cost a second time wastes ~50–500 ms.
+    /// We cache only the last one because the typical "select then
+    /// pop out" pattern hits exactly that — a multi-entry LRU would
+    /// pay more in eviction bookkeeping than the second-most-recent
+    /// hit rate is worth.
+    ///
+    /// Cache validity: the cached `RenderedMessage` may carry stale
+    /// flags if the user mutates them between the fetch and the
+    /// pop-out, but the popup body-render only consumes
+    /// `sanitized_html` / `body_text` (immutable after first parse)
+    /// so flag drift is not a correctness issue here. UI surfaces
+    /// that need fresh flags re-call `messages_get` regardless.
+    pub last_rendered: Mutex<Option<(MessageId, RenderedMessage)>>,
+
     /// Fired by the `ui_ready` IPC command once the Dioxus app has
     /// mounted in the webview. The sync engine awaits this (with a
     /// short safety timeout) before its bootstrap pass so the
@@ -99,6 +136,8 @@ impl AppState {
             data_dir,
             servo_renderers: Mutex::new(HashMap::new()),
             last_reader_size: Mutex::new(HashMap::new()),
+            last_rendered: Mutex::new(None),
+            resize_debounce: Mutex::new(HashMap::new()),
             ui_ready: Arc::new(Notify::new()),
         }
     }

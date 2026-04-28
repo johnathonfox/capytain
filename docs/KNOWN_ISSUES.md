@@ -66,7 +66,7 @@ No action required until someone's sitting in front of the app and paying attent
 
 ## Reader-pane flicker on window resize (residual)
 
-**State:** PR #88 partially mitigated this — the JS `ResizeObserver` callback now `requestAnimationFrame`-coalesces, and Rust's `reader_set_position` skips `renderer.resize()` when `(w, h)` is unchanged so pure-position pushes (splitter drag, scroll-induced rect shift) no longer poke Servo every frame. **Visible flicker still happens during continuous window resize** — the Servo overlay surface and the GTK host widget can't change size atomically, so during a drag there's a perceptible mismatch frame between the host shrinking/growing and Servo's WebView re-laying out.
+**State:** PR #88 partially mitigated this. The known-issues bundle adds a Rust-side trailing-edge debounce (~80 ms) on `renderer.resize` so a fast continuous drag fires a single resize on the trailing edge instead of cascading Servo relayouts at ~60 Hz. Positioning (`set_position`) stays unbatched. **Visible flicker still happens during continuous window resize** — the Servo overlay surface and the GTK host widget can't change size atomically, so during a drag there's a perceptible mismatch frame between the host shrinking/growing and Servo's WebView re-laying out. The debounce reduces relayout churn but doesn't fix the surface-vs-viewport-handle lag.
 
 **Why it's residual rather than fixed:** the flicker we have left isn't from over-firing the position push; it's structural. The GTK overlay is positioned + sized in CSS-pixel space pushed from JS, but Servo's WebView paints into its own offscreen surface and the surface size is what `renderer.resize` controls. A drag step looks like:
 
@@ -89,8 +89,11 @@ Between (1) and (5) the user sees the *previous* Servo frame stretched / clipped
 
 ---
 
-## Remote-content gating: dimension-preserving placeholders (optional)
+<!-- Remote-content placeholders shipped — see qsl_mime::sanitize +
+     reader CSS. Removed from this doc per the project rule: fix the
+     issue, delete the entry. Sanitizer now marks blocked `<img>`
+     tags with `data-qsl-blocked` and the reader CSS frames each as a
+     subtle dashed placeholder box; ammonia's default allowlist
+     preserves any `width`/`height` attributes so the layout footprint
+     is stable when the user clicks "Load images". -->
 
-**State:** Sanitizer-side blocking + reader-pane UI banner ("Load images" / "Always load from this sender") landed in the backlog item 4 follow-up. `messages_get` accepts `force_trusted: bool` for one-shot loads; `messages_trust_sender` persists the opt-in row.
-
-**What's still optional:** the dimension-preserving placeholder boxes — when an `<img>` is blocked the slot collapses to zero, so the layout reflows when "Load images" is clicked. A nicer experience would replace the blocked `<img>` with a same-dimension placeholder so the layout is stable. Low priority; requires reaching past `ammonia::Builder::attribute_filter` into element-level rewriting. See `docs/QSL_BACKLOG_FIXES.md` item 4 for the full original spec.

@@ -37,7 +37,7 @@ quick smoke pass before v0.1 cuts.
 
 ## 2. Right-edge sliver (overflow bug)
 
-**Status: Open.** No `overflow: hidden` on `.reader-pane` in `tailwind.css`; no other obvious culprit found in the survey.
+**Status: Done.** Root container clamp landed in the known-issues bundle: `html`, `body`, and `#main` now carry `width: 100%` + `overflow: hidden` so a stray 1px overrun in any pane can't paint past the window edge. `.app-shell` already clipped internally; this is the belt-and-suspenders chain Servo paints into.
 
 **Symptom:** Faint vertical band visible past the reader pane border, all the way down the window. Visible in every screenshot so far. May be a scrollbar gutter, a 1px overflow, or a sibling element peeking through.
 
@@ -158,7 +158,7 @@ If not this pass: ship the rest, leave threading for after MCP. The MCP spec alr
 
 ## 11. Popup reader: reuse the main pane's RenderedMessage cache
 
-**Status: Open.** `messages_open_in_window` always calls `messages_get` to build the popup preload. When the user double-clicks a message that's already selected in the main pane, we pay the lazy-fetch cost a second time — measured ~493 ms on a marketing email whose body wasn't yet on disk.
+**Status: Done.** `AppState` now holds a single-entry `last_rendered: Mutex<Option<(MessageId, RenderedMessage)>>` cache. `messages_get` populates it after every render; `messages_open_in_window` peeks the slot and reuses the hit when the popup id matches the cached id. Hits skip the body lazy-fetch + ammonia sanitize pass entirely (~50 ms warm-DB, ~500 ms cold-IMAP). Single-entry by design — the typical "select then pop out" flow hits exactly that one slot, and an LRU would pay more in bookkeeping than the second-most-recent hit rate is worth.
 
 **Symptom:** First popup open for a not-yet-cached message takes ~500 ms longer than subsequent opens of the same message, because the second open hits the warm body blob.
 
@@ -171,7 +171,7 @@ If not this pass: ship the rest, leave threading for after MCP. The MCP spec alr
 
 ## 12. Popup reader: reduce the install → first-paint gap
 
-**Status: Open.** Even with the GTK layout pump capped at 100 ms (commit `044d1cf`), there's still ~250 ms between Servo install completing and the first `reader_set_position` arriving. The popup's Servo overlay paints into its install-time off-screen rect until Dioxus boots, mounts `ReaderOnlyApp`, and the `ResizeObserver` pushes the real bounding rect.
+**Status: Done.** `compose_reader_html` moved into `qsl_core::reader_html` (zero dependencies — works on both wasm and native targets). `messages_open_in_window` now composes the body HTML from the pre-fetched `RenderedMessage` and calls `renderer.render(...)` immediately after Servo install completes, while the overlay is still in its install-time off-screen rect. Servo paints into that rect during the ~250 ms before Dioxus mounts and `reader_set_position` arrives, so the first frame that becomes visible already has body content.
 
 **Symptom:** Popup window visibly shows header-only chrome before the body appears, even on warm-cache opens.
 

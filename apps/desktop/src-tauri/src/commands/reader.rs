@@ -164,11 +164,17 @@ pub async fn reader_set_position(
         //
         // Skip when the size is unchanged: pure-position pushes
         // (splitter drag, window-edge move, scroll-induced rect
-        // shift) used to call `renderer.resize` on every event, and
-        // each Servo resize triggered a re-layout + repaint —
-        // visible as flicker in the reader pane during any
-        // continuous resize. We still always run `set_position`
-        // above so the GTK overlay tracks (x, y) per-event.
+        // shift) don't need Servo to re-layout. We still always run
+        // `set_position` above so the GTK overlay tracks (x, y) per-
+        // event.
+        //
+        // For *changed* sizes we defer the `renderer.resize` call by
+        // a short trailing-edge debounce — a fast continuous drag
+        // generates a flurry of distinct sizes at ~60 Hz, and
+        // cascading Servo relayouts at that rate is what caused the
+        // visible reflow flicker per frame. Debouncing fires the
+        // resize once after the drag stabilizes; positioning stays
+        // immediate so the overlay stays under the cursor.
         if w > 1 && h > 1 {
             let new_size = (w as u32, h as u32);
             let mut sizes = state.last_reader_size.lock().await;
@@ -176,10 +182,7 @@ pub async fn reader_set_position(
             if !unchanged {
                 sizes.insert(label.clone(), new_size);
                 drop(sizes);
-                let mut slot = state.servo_renderers.lock().await;
-                if let Some(renderer) = slot.get_mut(&label) {
-                    renderer.resize(::dpi::PhysicalSize::new(new_size.0, new_size.1));
-                }
+                schedule_debounced_resize(&app, &label, new_size);
             }
         }
     }
@@ -191,6 +194,55 @@ pub async fn reader_set_position(
         let _ = input;
     }
     Ok(())
+}
+
+/// Trailing-edge debounce delay before applying a deferred
+/// `renderer.resize`. ~80 ms is short enough that a stopped drag
+/// feels instant to the user but long enough that a continuous
+/// drag at typical 60-Hz event rates collapses into a single
+/// trailing resize call.
+#[cfg(all(target_os = "linux", feature = "servo"))]
+const RESIZE_DEBOUNCE_MS: u64 = 80;
+
+/// Cancel any pending deferred resize for `label` and schedule a new
+/// one. The deferred task waits `RESIZE_DEBOUNCE_MS` and then asks
+/// Servo to relayout to `size` — unless a newer schedule cancels it
+/// first. Always runs the actual `renderer.resize` call from a
+/// tokio worker (the renderer marshals to the GTK main thread
+/// internally).
+#[cfg(all(target_os = "linux", feature = "servo"))]
+fn schedule_debounced_resize<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    label: &str,
+    size: (u32, u32),
+) {
+    use tauri::Manager;
+    let app_fire = app.clone();
+    let app_swap = app.clone();
+    let label_fire = label.to_string();
+    let label_swap = label.to_string();
+    // Spawn the deferred fire and store its handle. Aborting the
+    // previous handle cancels the in-flight `tokio::time::sleep`
+    // before it elapses; if the previous task was already past the
+    // sleep and inside the resize call, abort is a no-op (the resize
+    // had already been dispatched), which is fine — at most one
+    // extra resize lands in that race.
+    let handle = tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(RESIZE_DEBOUNCE_MS)).await;
+        let state: tauri::State<AppState> = app_fire.state();
+        let mut slot = state.servo_renderers.lock().await;
+        if let Some(renderer) = slot.get_mut(&label_fire) {
+            tracing::debug!(window = %label_fire, w = size.0, h = size.1, "debounced renderer.resize");
+            renderer.resize(::dpi::PhysicalSize::new(size.0, size.1));
+        }
+    });
+    tauri::async_runtime::spawn(async move {
+        let state: tauri::State<AppState> = app_swap.state();
+        let mut pending = state.resize_debounce.lock().await;
+        if let Some(prev) = pending.insert(label_swap, handle) {
+            prev.abort();
+        }
+    });
 }
 
 /// `reader_clear` — move Servo's overlay surface off-screen.

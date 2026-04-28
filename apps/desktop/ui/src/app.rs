@@ -1410,121 +1410,17 @@ pub(crate) fn web_sys_log(msg: &str) {
 // ---------- Reader-pane HTML composer ----------
 
 /// Build the HTML document the Servo reader pane renders when a
-/// message is selected.
-///
-/// Preference order for the body section:
-///
-/// 1. `rendered.sanitized_html` — populated by `messages_get` via
-///    `qsl_mime::sanitize_email_html` (Phase 1 Week 7). This
-///    is the normal path for modern email and carries the original
-///    layout, tables, inline styles, etc.
-/// 2. `rendered.body_text` escaped through [`minimal_escape`] and
-///    wrapped in `<pre>` — fallback for messages that have no
-///    `text/html` alternative or whose sanitized HTML came back
-///    empty (very aggressive strip).
-/// 3. A small "no body cached yet" hint otherwise.
-///
-/// Headers (subject, from, date) are always escaped via
-/// `minimal_escape`; they never go through the ammonia pipeline
-/// because they're always plain text at source.
+/// message is selected. Thin wrapper around
+/// [`qsl_mime::compose_reader_html`] that translates from the IPC
+/// `RenderedMessage` shape — both this UI path and the desktop popup
+/// install path go through the same shared composer so the markup is
+/// byte-identical and the placeholder / theming rules live in one
+/// place.
 pub(crate) fn compose_reader_html(rendered: &RenderedMessage) -> String {
-    let body_section = render_body_section(rendered);
-
-    // Headers (subject / from / date / recipients) are rendered by
-    // the Dioxus side as a styled card; Servo's pane is body-only,
-    // so the user sees each piece of info exactly once whether
-    // Servo is reparented next to the webview (Linux) or running
-    // in a separate auxiliary window (macOS / Windows).
-    format!(
-        r#"<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <style>
-    body {{
-      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      color: #e6e8eb;
-      background: #0f1115;
-      margin: 0;
-      padding: 1.25rem;
-    }}
-    @media (prefers-color-scheme: light) {{
-      body {{ color: #14161a; background: #ffffff; }}
-    }}
-    .qsl-body {{ color: inherit; }}
-    .qsl-body pre {{ white-space: pre-wrap; word-wrap: break-word; margin: 0; font: inherit; }}
-    .qsl-body a {{ color: #74b4ff; }}
-    @media (prefers-color-scheme: light) {{
-      .qsl-body a {{ color: #2563eb; }}
-    }}
-  </style>
-</head>
-<body>
-  <div class="qsl-body">{body_section}</div>
-  <script>
-    // Click forwarder. Servo's `request_navigation` fires on every
-    // navigation Servo initiates, but plain anchor clicks inside a
-    // `data:` URL document don't always make it through Servo's
-    // input pipeline (GTK DrawingArea doesn't auto-forward mouse
-    // events to Servo's input system on Linux). Catching the click
-    // in JS and explicitly setting `window.location.href` triggers
-    // a navigation request that the renderer delegate intercepts
-    // and routes to `webbrowser::open`. The delegate denies the
-    // navigation in-page, so the email content stays put.
-    document.addEventListener('click', function(e) {{
-      var node = e.target;
-      while (node && node.nodeName !== 'A') node = node.parentNode;
-      if (node && node.href) {{
-        e.preventDefault();
-        try {{ window.location.href = node.href; }} catch (err) {{}}
-      }}
-    }}, true);
-  </script>
-</body>
-</html>"#
+    qsl_core::compose_reader_html(
+        rendered.sanitized_html.as_deref(),
+        rendered.body_text.as_deref(),
     )
-}
-
-/// Pick the right body rendering for the reader pane. Separated
-/// from `compose_reader_html` so the preference order is easy to
-/// read and test.
-fn render_body_section(rendered: &RenderedMessage) -> String {
-    // 1. Sanitized HTML if present and non-empty after trim.
-    if let Some(html) = rendered.sanitized_html.as_deref() {
-        if !html.trim().is_empty() {
-            return html.to_string();
-        }
-    }
-    // 2. Plaintext body through minimal_escape + <pre>.
-    if let Some(text) = rendered.body_text.as_deref() {
-        if !text.trim().is_empty() {
-            return format!("<pre>{}</pre>", minimal_escape(text));
-        }
-    }
-    // 3. "Nothing to show" — `messages_get` already lazy-fetches the
-    // body if it's missing locally, so reaching this branch means
-    // the message genuinely has no body content (headers-only, or
-    // a fetch error already surfaced).
-    "<em>No body content available for this message.</em>".to_string()
-}
-
-/// Minimal HTML escaping for text content. Not a full sanitizer —
-/// for Phase 0 it's only used on fields we *know* are plain text
-/// (subject, display-name, address, plaintext body). Phase 1's
-/// ammonia pass replaces this for anything that started as HTML.
-fn minimal_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(ch),
-        }
-    }
-    out
 }
 
 /// Compact byte-size formatter for attachment chips. Uses
