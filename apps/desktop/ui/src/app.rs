@@ -16,7 +16,7 @@
 //! over the `window.__TAURI_INTERNALS__.invoke` bridge; HTML
 //! rendering via Servo arrives in Week 6.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dioxus::prelude::*;
 use qsl_ipc::{
@@ -310,6 +310,12 @@ fn full_app_shell() -> Element {
     let mut folder_tokens: FolderTokens = use_signal(HashMap::new);
     let compose: Signal<Option<ComposeState>> = use_signal(|| None);
     let help_visible: Signal<bool> = use_signal(|| false);
+    // Multi-select state. `bulk_selected` carries the currently-checked
+    // message ids; the bulk-action bar reveals when it's non-empty and
+    // the per-row checkboxes paint a filled state when their id is in
+    // the set. Lives at App root so it survives folder switches and
+    // can be read from any pane that wants to act on the selection.
+    let bulk_selected: Signal<HashSet<MessageId>> = use_signal(HashSet::new);
 
     // ComposePane occupies the reader slot when active, so the Servo
     // overlay surface — which paints over `.reader-body-fill` and is
@@ -488,7 +494,7 @@ fn full_app_shell() -> Element {
             }
             div {
                 class: "shell-pane shell-pane-list",
-                MessageListPaneV2 { selection, sync_tick, folder_tokens }
+                MessageListPaneV2 { selection, sync_tick, folder_tokens, bulk_selected }
             }
             div {
                 class: "shell-splitter",
@@ -1838,14 +1844,19 @@ fn MessageListPaneV2(
     selection: Signal<Selection>,
     sync_tick: SyncTick,
     folder_tokens: FolderTokens,
+    bulk_selected: Signal<HashSet<MessageId>>,
 ) -> Element {
     let unified = selection.read().unified;
     let folder_id = selection.read().folder.clone();
+    let any_checked = !bulk_selected.read().is_empty();
     rsx! {
         section {
             class: "msglist",
+            if any_checked {
+                BulkActionBar { bulk_selected, sync_tick }
+            }
             if unified {
-                UnifiedMessageListV2 { selection, sync_tick }
+                UnifiedMessageListV2 { selection, sync_tick, bulk_selected }
             } else {
                 match folder_id {
                     None => rsx! {
@@ -1855,7 +1866,7 @@ fn MessageListPaneV2(
                         }
                     },
                     Some(fid) => rsx! {
-                        MessageListV2 { folder: fid, selection, folder_tokens }
+                        MessageListV2 { folder: fid, selection, folder_tokens, bulk_selected }
                     },
                 }
             }
@@ -1863,8 +1874,158 @@ fn MessageListPaneV2(
     }
 }
 
+/// Floating action bar that overlays the top of the message list when
+/// at least one row is checked. The selection lives at the App root,
+/// so checkboxes and the bar both follow folder switches; clearing
+/// happens explicitly via the "Clear" button or after a successful
+/// bulk action. All four IPC commands already accept arrays of ids,
+/// so each handler is a one-shot invoke + sync_tick bump.
 #[component]
-fn UnifiedMessageListV2(selection: Signal<Selection>, sync_tick: SyncTick) -> Element {
+fn BulkActionBar(bulk_selected: Signal<HashSet<MessageId>>, sync_tick: SyncTick) -> Element {
+    let count = bulk_selected.read().len();
+    let label = if count == 1 {
+        "1 selected".to_string()
+    } else {
+        format!("{count} selected")
+    };
+
+    // Snapshot the ids on click — `bulk_selected` is a signal, so
+    // reading it inside the spawned future would force the closure to
+    // capture a Signal (fine, but unnecessary) and risk reading after
+    // a concurrent toggle. Snapshotting keeps the bulk action atomic
+    // against the in-flight selection state at click time.
+    let snapshot_ids = move |bulk_selected: Signal<HashSet<MessageId>>| -> Vec<MessageId> {
+        bulk_selected.read().iter().cloned().collect()
+    };
+
+    rsx! {
+        div {
+            class: "bulk-action-bar",
+            span { class: "bulk-action-count", "{label}" }
+            button {
+                class: "bulk-action",
+                r#type: "button",
+                title: "Archive selected (move to All Mail / Archive)",
+                onclick: {
+                    let mut bulk_selected = bulk_selected;
+                    let mut sync_tick = sync_tick;
+                    move |_| {
+                        let ids = snapshot_ids(bulk_selected);
+                        if ids.is_empty() {
+                            return;
+                        }
+                        spawn(async move {
+                            let payload = serde_json::json!({ "input": { "ids": ids } });
+                            if let Err(e) = invoke::<()>("messages_archive", payload).await {
+                                web_sys_log(&format!("bulk messages_archive: {e}"));
+                                return;
+                            }
+                            bulk_selected.with_mut(|s| s.clear());
+                            sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+                        });
+                    }
+                },
+                "Archive"
+            }
+            button {
+                class: "bulk-action",
+                r#type: "button",
+                title: "Mark selected as read",
+                onclick: {
+                    let mut bulk_selected = bulk_selected;
+                    let mut sync_tick = sync_tick;
+                    move |_| {
+                        let ids = snapshot_ids(bulk_selected);
+                        if ids.is_empty() {
+                            return;
+                        }
+                        spawn(async move {
+                            let payload = serde_json::json!({
+                                "input": { "ids": ids, "seen": true },
+                            });
+                            if let Err(e) = invoke::<()>("messages_mark_read", payload).await {
+                                web_sys_log(&format!("bulk messages_mark_read: {e}"));
+                                return;
+                            }
+                            bulk_selected.with_mut(|s| s.clear());
+                            sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+                        });
+                    }
+                },
+                "Mark read"
+            }
+            button {
+                class: "bulk-action",
+                r#type: "button",
+                title: "Mark selected as unread",
+                onclick: {
+                    let mut bulk_selected = bulk_selected;
+                    let mut sync_tick = sync_tick;
+                    move |_| {
+                        let ids = snapshot_ids(bulk_selected);
+                        if ids.is_empty() {
+                            return;
+                        }
+                        spawn(async move {
+                            let payload = serde_json::json!({
+                                "input": { "ids": ids, "seen": false },
+                            });
+                            if let Err(e) = invoke::<()>("messages_mark_read", payload).await {
+                                web_sys_log(&format!("bulk messages_mark_read: {e}"));
+                                return;
+                            }
+                            bulk_selected.with_mut(|s| s.clear());
+                            sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+                        });
+                    }
+                },
+                "Mark unread"
+            }
+            button {
+                class: "bulk-action bulk-action-delete",
+                r#type: "button",
+                title: "Delete selected (move to Trash on Gmail; permanent on JMAP)",
+                onclick: {
+                    let mut bulk_selected = bulk_selected;
+                    let mut sync_tick = sync_tick;
+                    move |_| {
+                        let ids = snapshot_ids(bulk_selected);
+                        if ids.is_empty() {
+                            return;
+                        }
+                        spawn(async move {
+                            let payload = serde_json::json!({ "input": { "ids": ids } });
+                            if let Err(e) = invoke::<()>("messages_delete", payload).await {
+                                web_sys_log(&format!("bulk messages_delete: {e}"));
+                                return;
+                            }
+                            bulk_selected.with_mut(|s| s.clear());
+                            sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+                        });
+                    }
+                },
+                "Delete"
+            }
+            button {
+                class: "bulk-action bulk-action-clear",
+                r#type: "button",
+                title: "Clear selection",
+                onclick: {
+                    let mut bulk_selected = bulk_selected;
+                    move |_| bulk_selected.with_mut(|s| s.clear())
+                },
+                "Clear"
+            }
+        }
+    }
+}
+
+#[component]
+fn UnifiedMessageListV2(
+    selection: Signal<Selection>,
+    sync_tick: SyncTick,
+    bulk_selected: Signal<HashSet<MessageId>>,
+) -> Element {
     let tick_value = sync_tick();
     let page = use_resource(use_reactive!(|tick_value| async move {
         let _ = tick_value;
@@ -1893,7 +2054,7 @@ fn UnifiedMessageListV2(selection: Signal<Selection>, sync_tick: SyncTick) -> El
                         p { class: "msglist-empty", "No messages." }
                     } else {
                         for m in messages.iter().cloned() {
-                            MessageRowV2 { msg: m, selection }
+                            MessageRowV2 { msg: m, selection, bulk_selected }
                         }
                     }
                 }
@@ -1907,6 +2068,7 @@ fn MessageListV2(
     folder: FolderId,
     selection: Signal<Selection>,
     folder_tokens: FolderTokens,
+    bulk_selected: Signal<HashSet<MessageId>>,
 ) -> Element {
     let mut visible_limit = use_signal(|| 200u32);
     let folder_for_fetch = folder.clone();
@@ -2055,10 +2217,10 @@ fn MessageListV2(
                         for item in crate::threading::group_by_thread(messages.clone()) {
                             match item {
                                 crate::threading::MessageListItem::Single(m) => rsx! {
-                                    MessageRowV2 { msg: m, selection }
+                                    MessageRowV2 { msg: m, selection, bulk_selected }
                                 },
                                 crate::threading::MessageListItem::Thread { head, members } => rsx! {
-                                    ThreadRow { head, members, selection }
+                                    ThreadRow { head, members, selection, bulk_selected }
                                 },
                             }
                         }
@@ -2092,12 +2254,17 @@ fn MessageListHeader(title: String, shown: u32, total: u32, unread: u32) -> Elem
 }
 
 #[component]
-fn MessageRowV2(msg: MessageHeaders, selection: Signal<Selection>) -> Element {
+fn MessageRowV2(
+    msg: MessageHeaders,
+    selection: Signal<Selection>,
+    bulk_selected: Signal<HashSet<MessageId>>,
+) -> Element {
     let is_selected = selection
         .read()
         .message
         .as_ref()
         .is_some_and(|m| m.0 == msg.id.0);
+    let is_checked = bulk_selected.read().contains(&msg.id);
     let unread = !msg.flags.seen;
     let from_addr = msg.from.first();
     let from_name = from_addr
@@ -2119,11 +2286,16 @@ fn MessageRowV2(msg: MessageHeaders, selection: Signal<Selection>) -> Element {
         msg.subject.clone()
     };
     let snippet = msg.snippet.clone();
-    let row_class = match (is_selected, unread) {
-        (true, true) => "msg-row selected unread",
-        (true, false) => "msg-row selected",
-        (false, true) => "msg-row unread",
-        (false, false) => "msg-row",
+    // `checked` is its own row state — the row stays a `selected` row
+    // only when *opened* in the reader; bulk-checking just adds a
+    // visual marker without taking over reader focus.
+    let row_class = match (is_selected, is_checked, unread) {
+        (true, _, true) => "msg-row selected unread",
+        (true, _, false) => "msg-row selected",
+        (false, true, true) => "msg-row checked unread",
+        (false, true, false) => "msg-row checked",
+        (false, false, true) => "msg-row unread",
+        (false, false, false) => "msg-row",
     };
 
     let id_for_popup = msg.id.clone();
@@ -2150,6 +2322,35 @@ fn MessageRowV2(msg: MessageHeaders, selection: Signal<Selection>) -> Element {
                 move |_| selection.write().message = Some(mid.clone())
             },
             ondoubleclick: ondoubleclick,
+            // Checkbox sits where the avatar normally lives. Click is
+            // stop-propagation'd so checking a row doesn't also open
+            // the reader (and vice-versa: clicking elsewhere on the
+            // row never toggles the box).
+            div {
+                class: "msg-row-check",
+                onclick: {
+                    let mid = msg.id.clone();
+                    let mut bulk_selected = bulk_selected;
+                    move |evt: Event<MouseData>| {
+                        evt.stop_propagation();
+                        let id = mid.clone();
+                        bulk_selected.with_mut(|set| {
+                            if !set.remove(&id) {
+                                set.insert(id);
+                            }
+                        });
+                    }
+                },
+                input {
+                    r#type: "checkbox",
+                    checked: is_checked,
+                    // The wrapping div handles the click; the input
+                    // itself is non-interactive so the row keeps a
+                    // single source of truth for toggle behaviour.
+                    onclick: move |evt: Event<MouseData>| evt.stop_propagation(),
+                    readonly: true,
+                }
+            }
             div { class: "msg-row-avatar", "{avatar_initials}" }
             div {
                 class: "msg-row-line1",
@@ -2178,6 +2379,7 @@ fn ThreadRow(
     head: MessageHeaders,
     members: Vec<MessageHeaders>,
     selection: Signal<Selection>,
+    bulk_selected: Signal<HashSet<MessageId>>,
 ) -> Element {
     let mut expanded = use_signal(|| false);
     let count = members.len();
@@ -2191,6 +2393,13 @@ fn ThreadRow(
         .message
         .as_ref()
         .is_some_and(|m| m.0 == head.id.0);
+    // Thread "checked" means every member is in the bulk set. Toggling
+    // the head's checkbox flips that all-or-nothing — bulk archive of
+    // a thread therefore archives the whole conversation, not just
+    // the head. Dragging individual members out of the set requires
+    // expanding the thread.
+    let all_checked =
+        !members.is_empty() && members.iter().all(|m| bulk_selected.read().contains(&m.id));
 
     let from_addr = head.from.first();
     let from_name = from_addr
@@ -2213,11 +2422,13 @@ fn ThreadRow(
     };
     let snippet = head.snippet.clone();
     let is_expanded = expanded();
-    let row_class = match (is_head_selected, any_unread) {
-        (true, true) => "msg-row thread-row selected unread",
-        (true, false) => "msg-row thread-row selected",
-        (false, true) => "msg-row thread-row unread",
-        (false, false) => "msg-row thread-row",
+    let row_class = match (is_head_selected, all_checked, any_unread) {
+        (true, _, true) => "msg-row thread-row selected unread",
+        (true, _, false) => "msg-row thread-row selected",
+        (false, true, true) => "msg-row thread-row checked unread",
+        (false, true, false) => "msg-row thread-row checked",
+        (false, false, true) => "msg-row thread-row unread",
+        (false, false, false) => "msg-row thread-row",
     };
     let group_class = if is_expanded {
         "thread-group expanded"
@@ -2252,6 +2463,35 @@ fn ThreadRow(
                     move |_| selection.write().message = Some(mid.clone())
                 },
                 ondoubleclick: ondoubleclick,
+                div {
+                    class: "msg-row-check",
+                    onclick: {
+                        let member_ids: Vec<MessageId> =
+                            members.iter().map(|m| m.id.clone()).collect();
+                        let mut bulk_selected = bulk_selected;
+                        let all_checked = all_checked;
+                        move |evt: Event<MouseData>| {
+                            evt.stop_propagation();
+                            bulk_selected.with_mut(|set| {
+                                if all_checked {
+                                    for id in &member_ids {
+                                        set.remove(id);
+                                    }
+                                } else {
+                                    for id in &member_ids {
+                                        set.insert(id.clone());
+                                    }
+                                }
+                            });
+                        }
+                    },
+                    input {
+                        r#type: "checkbox",
+                        checked: all_checked,
+                        onclick: move |evt: Event<MouseData>| evt.stop_propagation(),
+                        readonly: true,
+                    }
+                }
                 div { class: "msg-row-avatar", "{avatar_initials}" }
                 div {
                     class: "msg-row-line1",
@@ -2290,7 +2530,7 @@ fn ThreadRow(
                     // them as-is makes "click to select" feel like
                     // walking the conversation backwards in time.
                     for m in members.iter().skip(1).cloned() {
-                        MessageRowV2 { msg: m, selection }
+                        MessageRowV2 { msg: m, selection, bulk_selected }
                     }
                 }
             }
