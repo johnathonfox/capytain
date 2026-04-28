@@ -2803,7 +2803,7 @@ fn SearchResults(
     selection: Signal<Selection>,
     bulk_selected: Signal<HashSet<MessageId>>,
     account_filter: Signal<Option<AccountId>>,
-    mut visible_messages: Signal<Vec<MessageId>>,
+    visible_messages: Signal<Vec<MessageId>>,
 ) -> Element {
     let q_for_fetch = query.clone();
     let page = use_resource(use_reactive!(|q_for_fetch| async move {
@@ -2815,6 +2815,31 @@ fn SearchResults(
         )
         .await
     }));
+
+    // Publish the rendered ids for `j` / `k` navigation. Has to live
+    // in a `use_effect` — writing to a signal during render panics
+    // in Dioxus 0.7. Re-runs on `page` or `account_filter` changes.
+    {
+        let mut visible_messages = visible_messages;
+        use_effect(move || {
+            let read = page.read_unchecked();
+            let Some(Ok(MessagePage { messages, .. })) = read.as_ref() else {
+                visible_messages.set(Vec::new());
+                return;
+            };
+            let filter = account_filter.read().clone();
+            let ids: Vec<MessageId> = match filter {
+                Some(ref id) => messages
+                    .iter()
+                    .filter(|m| m.account_id == *id)
+                    .map(|m| m.id.clone())
+                    .collect(),
+                None => messages.iter().map(|m| m.id.clone()).collect(),
+            };
+            visible_messages.set(ids);
+        });
+    }
+
     rsx! {
         match &*page.read_unchecked() {
             None => rsx! { p { class: "msglist-empty", "Searching…" } },
@@ -2827,8 +2852,6 @@ fn SearchResults(
                     Some(ref id) => messages.iter().filter(|m| m.account_id == *id).cloned().collect(),
                     None => messages.clone(),
                 };
-                let ids: Vec<MessageId> = filtered.iter().map(|m| m.id.clone()).collect();
-                visible_messages.set(ids);
                 let shown = filtered.len() as u32;
                 rsx! {
                     MessageListHeader {
@@ -3005,7 +3028,7 @@ fn UnifiedMessageListV2(
     sync_tick: SyncTick,
     bulk_selected: Signal<HashSet<MessageId>>,
     account_filter: Signal<Option<AccountId>>,
-    mut visible_messages: Signal<Vec<MessageId>>,
+    visible_messages: Signal<Vec<MessageId>>,
 ) -> Element {
     let tick_value = sync_tick();
     let page = use_resource(use_reactive!(|tick_value| async move {
@@ -3018,6 +3041,31 @@ fn UnifiedMessageListV2(
         )
         .await
     }));
+
+    // Publish the rendered ids for `j` / `k` navigation. Has to live
+    // in a `use_effect` — writing to a signal during render panics
+    // in Dioxus 0.7. Re-runs on `page` or `account_filter` changes.
+    {
+        let mut visible_messages = visible_messages;
+        use_effect(move || {
+            let read = page.read_unchecked();
+            let Some(Ok(MessagePage { messages, .. })) = read.as_ref() else {
+                visible_messages.set(Vec::new());
+                return;
+            };
+            let filter = account_filter.read().clone();
+            let ids: Vec<MessageId> = match filter {
+                Some(ref id) => messages
+                    .iter()
+                    .filter(|m| m.account_id == *id)
+                    .map(|m| m.id.clone())
+                    .collect(),
+                None => messages.iter().map(|m| m.id.clone()).collect(),
+            };
+            visible_messages.set(ids);
+        });
+    }
+
     rsx! {
         match &*page.read_unchecked() {
             None => rsx! { p { class: "msglist-empty", "Loading…" } },
@@ -3031,8 +3079,6 @@ fn UnifiedMessageListV2(
                     Some(ref id) => messages.iter().filter(|m| m.account_id == *id).cloned().collect(),
                     None => messages.clone(),
                 };
-                let ids: Vec<MessageId> = filtered.iter().map(|m| m.id.clone()).collect();
-                visible_messages.set(ids);
                 let shown = filtered.len() as u32;
                 rsx! {
                     MessageListHeader {
@@ -3063,7 +3109,7 @@ fn MessageListV2(
     selection: Signal<Selection>,
     folder_tokens: FolderTokens,
     bulk_selected: Signal<HashSet<MessageId>>,
-    mut visible_messages: Signal<Vec<MessageId>>,
+    visible_messages: Signal<Vec<MessageId>>,
 ) -> Element {
     let mut visible_limit = use_signal(|| 200u32);
     let folder_for_fetch = folder.clone();
@@ -3192,17 +3238,28 @@ fn MessageListV2(
         }
     };
 
+    // Publish the rendered ids for `j` / `k` navigation. Lives in a
+    // `use_effect` — writing to a signal during render panics in
+    // Dioxus 0.7. Threads expose their head only; entering one
+    // requires an explicit click.
+    {
+        let mut visible_messages = visible_messages;
+        use_effect(move || {
+            let read = page.read_unchecked();
+            let Some(Ok(MessagePage { messages, .. })) = read.as_ref() else {
+                visible_messages.set(Vec::new());
+                return;
+            };
+            let ids: Vec<MessageId> = messages.iter().map(|m| m.id.clone()).collect();
+            visible_messages.set(ids);
+        });
+    }
+
     rsx! {
         match &*page.read_unchecked() {
             None => rsx! { p { class: "msglist-empty", "Loading…" } },
             Some(Err(e)) => rsx! { p { class: "msglist-empty", "{e}" } },
             Some(Ok(MessagePage { messages, total_count, unread_count })) => {
-                // Publish the rendered ids in display order so `j` / `k`
-                // step through what the user sees, not what the backend
-                // returned. Threads expose their head only — entering a
-                // thread requires explicit click.
-                let ids: Vec<MessageId> = messages.iter().map(|m| m.id.clone()).collect();
-                visible_messages.set(ids);
                 rsx! {
                     MessageListHeader {
                         title: folder_title_from_selection(&folder, &selection),
