@@ -1450,6 +1450,23 @@ ul {
   background: transparent;
 }
 
+/* webkit-iframe branch: the reader body is a sandboxed iframe that
+ * webkit2gtk renders in-place. Sized to fill the remaining flex space
+ * with no border/scrollbar chrome of its own — the iframe content's
+ * own scrollbar is what the user interacts with. `background: white`
+ * matches `compose_reader_html`'s body background; otherwise the iframe
+ * shows through to the dark Dioxus chrome behind it during the brief
+ * srcdoc parse. */
+.reader-body-iframe {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: white;
+}
+
 .reader-subject {
   font-size: var(--fs-13);
   font-weight: var(--fw-bold);

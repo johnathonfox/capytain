@@ -91,6 +91,7 @@ pub struct AppState {
     /// at which we *ask* Servo to relayout but doesn't fix the
     /// surface-vs-viewport mismatch frame; a follow-up pause-paint
     /// approach would be needed for that.
+    #[allow(dead_code)] // unused on the webkit-iframe branch (Servo-only)
     pub resize_debounce: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
 
     /// Single-entry cache of the most recently rendered message —

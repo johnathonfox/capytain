@@ -21,10 +21,16 @@ tauri-build = { workspace = true }
 
 [features]
 # `servo` controls whether the Servo-backed renderer is linked into
-# the desktop app. Default-on so `cargo build -p qsl-desktop`
-# produces the real reader pane on Linux / macOS; turn off for a
-# stubbed build (e.g. Windows CI until Servo-on-Windows lands).
-default = ["servo"]
+# the desktop app. Disabled by default on the
+# `experiment/webkit-reader` branch — the email body is rendered in
+# a sandboxed `<iframe srcdoc="...">` inside the existing webkit2gtk
+# webview, dropping the Servo + surfman + GTK-X11 child-window stack
+# entirely. To re-enable Servo for comparison runs, build with
+# `cargo build -p qsl-desktop --features servo` (or flip back to
+# `default = ["servo"]`). The `qsl-renderer` crate's `link_cleaner`
+# module is still always-compiled; only the embedded-Servo half is
+# feature-gated.
+default = []
 servo = ["qsl-renderer/servo"]
 
 [dependencies]

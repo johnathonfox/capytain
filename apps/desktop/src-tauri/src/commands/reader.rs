@@ -13,7 +13,9 @@
 use qsl_core::RenderPolicy;
 use qsl_ipc::IpcResult;
 use serde::Deserialize;
-use tauri::{Manager, State};
+#[cfg(all(target_os = "linux", feature = "servo"))]
+use tauri::Manager;
+use tauri::State;
 
 use crate::state::AppState;
 

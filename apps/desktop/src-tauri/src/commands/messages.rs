@@ -1202,7 +1202,7 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
                     let state: tauri::State<AppState> = app.state();
                     state.servo_renderers.lock().await.remove(&label);
                     state.last_reader_size.lock().await.remove(&label);
-                    #[cfg(target_os = "linux")]
+                    #[cfg(all(target_os = "linux", feature = "servo"))]
                     crate::linux_gtk::remove_parent(&label);
                     tracing::info!(window = %label, "popup reader window closed; renderer dropped");
                 });

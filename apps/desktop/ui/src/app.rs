@@ -465,43 +465,12 @@ fn full_app_shell() -> Element {
         }));
     }
 
-    // ComposePane occupies the reader slot when active, so the Servo
-    // overlay surface — which paints over `.reader-body-fill` and is
-    // positioned by a JS-side ResizeObserver — must be hidden whenever
-    // compose opens. ReaderPaneV2 has its own `reader_clear` effect
-    // for the no-message case, but it's unmounted while ComposePane
-    // is up, so the reactive guard goes here at the App level.
-    {
-        let composing = compose.read().is_some();
-        use_effect(use_reactive!(|composing| {
-            if composing {
-                wasm_bindgen_futures::spawn_local(async {
-                    let _ = invoke::<()>("reader_clear", serde_json::json!({})).await;
-                });
-            }
-        }));
-    }
-    // Same problem for the command palette: it's a CSS-level overlay
-    // rendered inside the Tauri webview, but Servo's GTK widget paints
-    // *above* the webview surface, so without intervention the
-    // rendered email body shows through (and over) the palette wherever
-    // the two intersect. Clear the overlay on open; force the JS-side
-    // tracker to re-push the bounding rect on close so the overlay
-    // reappears in its previous slot. Closing the palette doesn't
-    // reflow `.reader-body-fill`, so the natural ResizeObserver fire
-    // never happens — we have to nudge it.
-    {
-        let palette_open = *palette_visible.read();
-        use_effect(use_reactive!(|palette_open| {
-            if palette_open {
-                wasm_bindgen_futures::spawn_local(async {
-                    let _ = invoke::<()>("reader_clear", serde_json::json!({})).await;
-                });
-            } else {
-                push_reader_body_rect();
-            }
-        }));
-    }
+    // (Removed on the webkit-iframe branch: the Servo overlay surface
+    // doesn't exist, so the compose-pane and palette open/close events
+    // no longer need a `reader_clear` IPC nudge. The iframe is part of
+    // the Dioxus DOM tree — z-index handles overlap natively, no GTK
+    // child window is composited on top of the webview.)
+    let _ = palette_visible;
     // Most recent sync_event payload, rendered in the bottom status
     // bar. `None` means we haven't seen any events yet — the bar
     // shows "Initializing…" / "Syncing…" until the first event lands.
@@ -547,15 +516,9 @@ fn full_app_shell() -> Element {
         });
     });
 
-    // Reader-body tracker: watches the `.reader-body-fill` element's
-    // bounding rect (ResizeObserver + window resize) and pushes
-    // `(x, y, w, h)` to the Rust side via `reader_set_position`,
-    // which moves Servo's overlay surface to track. Servo handles
-    // link clicks natively via `on_link_click` → `webbrowser::open`,
-    // so we no longer need the iframe-side postMessage bridge.
-    use_hook(|| {
-        start_reader_body_tracker();
-    });
+    // (Removed on the webkit-iframe branch: the rect tracker existed
+    // to position the GTK Servo overlay surface; with the iframe
+    // rendering email bodies in-DOM there's nothing to track.)
 
     // Theme + density: read both from `app_settings` at boot and
     // apply to `<html>` via `data-theme` / `data-density` so the CSS
@@ -4408,20 +4371,13 @@ fn ReaderPaneV2(
 ) -> Element {
     let message_id = selection.read().message.clone();
 
-    // Hide Servo's overlay surface whenever no message is selected.
-    // The Dioxus placeholder text shows through the gap. Without
-    // this the previous render would freeze in place under the
-    // "Select a message" copy.
-    {
-        let has_message = message_id.is_some();
-        use_effect(use_reactive!(|has_message| {
-            if !has_message {
-                wasm_bindgen_futures::spawn_local(async {
-                    let _ = invoke::<()>("reader_clear", serde_json::json!({})).await;
-                });
-            }
-        }));
-    }
+    // The previous architecture painted via Servo over a transparent
+    // `.reader-body-fill` slot, which required a `reader_clear` IPC
+    // hop on deselection so the previous render didn't freeze under
+    // the "Select a message" placeholder. The webkit-iframe path
+    // doesn't have a separate render surface — the iframe lives or
+    // dies with the `ReaderV2` Dioxus component, so unmount IS the
+    // clear. No use_effect needed.
 
     rsx! {
         section {
@@ -4468,20 +4424,12 @@ fn ReaderV2(
                 }),
             )
             .await?;
-            // Hand the body straight to Servo's overlay surface. Doing
-            // it inside the resource closure means it fires once per
-            // successful message fetch — putting it in a `use_effect`
-            // outside the closure would only fire on initial mount and
-            // miss subsequent message switches.
-            let html = compose_reader_html(&rendered);
-            let _ = invoke::<()>(
-                "reader_render",
-                serde_json::json!({ "input": { "html": html } }),
-            )
-            .await;
-            // Force one tracker push so the overlay surface lands in
-            // the right slot on the same frame the new content paints.
-            push_reader_body_rect();
+            // The body HTML is rendered by stuffing
+            // `compose_reader_html(&rendered)` into an `<iframe srcdoc>`
+            // in the rsx! tree below. No IPC hop, no overlay surface,
+            // no rect-tracker — webkit2gtk's iframe sandbox owns the
+            // render. The `RenderedMessage` itself is what we keep
+            // around for the headers and attachment list.
             Ok::<_, String>(rendered)
         }
     ));
@@ -4531,31 +4479,13 @@ fn ReaderV2(
                     chrono::Utc::now(),
                 );
                 let date_full = rendered.headers.date.to_rfc2822();
-                let body_doc = compose_reader_html(rendered);
                 let subject = if rendered.headers.subject.is_empty() {
                     "(no subject)".to_string()
                 } else {
                     rendered.headers.subject.clone()
                 };
-
-                // Push the body HTML to the Servo overlay surface.
-                // `reader_render` is a no-op when Servo isn't
-                // installed (slot is None), so this is safe across
-                // platforms/builds. After the render, force one
-                // tracker push so the surface lands in the right
-                // spot on the same frame the new content paints.
-                let render_payload = body_doc.clone();
-                use_effect(move || {
-                    let payload = render_payload.clone();
-                    wasm_bindgen_futures::spawn_local(async move {
-                        let _ = invoke::<()>(
-                            "reader_render",
-                            serde_json::json!({ "input": { "html": payload } }),
-                        )
-                        .await;
-                    });
-                    push_reader_body_rect();
-                });
+                // The body HTML lands in the `<iframe srcdoc>` below.
+                // No IPC, no overlay surface, no tracker push.
 
                 rsx! {
                     // Toolbar above the header — keyboard hints replace
@@ -4761,15 +4691,26 @@ fn ReaderV2(
                             }
                         }
                     }
-                    // Body slot — transparent placeholder. The
-                    // ResizeObserver wired in App() watches this
-                    // element's bounding rect and pushes it to
-                    // Rust over `reader_set_position`, which moves
-                    // Servo's `gtk::DrawingArea` to overlap exactly
-                    // here. Visible content is painted by Servo,
-                    // not by Dioxus, so this div is intentionally
-                    // empty.
-                    div { class: "reader-body-fill" }
+                    // Body slot — sandboxed iframe. webkit2gtk
+                    // renders the sanitized HTML directly; the
+                    // experiment-branch swap from Servo means we
+                    // give up process isolation in exchange for the
+                    // mature, GPU-agnostic webkit render path.
+                    // `sandbox=""` blocks scripts, forms, top-nav,
+                    // and same-origin cookies — the email body is
+                    // already script-stripped by ammonia upstream,
+                    // but defense-in-depth keeps any future regression
+                    // in the sanitizer from getting JS into the host.
+                    {
+                        let body_html = compose_reader_html(rendered);
+                        rsx! {
+                            iframe {
+                                class: "reader-body-iframe",
+                                "sandbox": "",
+                                srcdoc: "{body_html}",
+                            }
+                        }
+                    }
                 }
             }
         }
