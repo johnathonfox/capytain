@@ -115,9 +115,22 @@ pub async fn sync_folder(
     let mut new_headers: Vec<MessageHeaders> = Vec::new();
     for h in &result.messages {
         match messages::find(conn, &h.id).await? {
-            Some(_) => {
+            Some(existing) => {
                 messages::update(conn, h, None).await?;
                 report.updated += 1;
+                // Heal-on-update: if the existing row never got a
+                // thread_id (synced before threading-pipeline land,
+                // or orphaned by the historical `UPDATE messages SET
+                // thread_id = ?4 ...` bug), opportunistically run the
+                // assembly pass against the freshly-updated row. Once
+                // the column is `Some(_)` we leave it alone, so this
+                // is at-most-once-per-orphan and free on the steady-
+                // state path.
+                if existing.thread_id.is_none() {
+                    if let Err(e) = threading::attach_to_thread(conn, h).await {
+                        warn!(message = %h.id.0, "thread heal-on-update failed: {e}");
+                    }
+                }
             }
             None => {
                 messages::insert(conn, h, None).await?;

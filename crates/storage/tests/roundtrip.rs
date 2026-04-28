@@ -641,3 +641,87 @@ fn transaction_rollback_reverts_writes() {
         );
     });
 }
+
+/// Regression test for the threading-wipe bug caught against a real
+/// Gmail account on 2026-04-27: a re-sync of an existing message
+/// would call `messages::update` with an incoming-headers value of
+/// `thread_id = None` (the wire never carries our locally-computed
+/// thread id), and the old `UPDATE` clause included `thread_id = ?4`,
+/// so every re-sync wiped the thread assignment back to NULL even
+/// though `qsl_sync::threading::attach_to_thread` had correctly
+/// attached the message on first insert. Lock down the new
+/// behaviour: `update` preserves whatever's already in the column.
+#[test]
+fn update_preserves_thread_id_against_wire_none() {
+    let rt = rt();
+    rt.block_on(async move {
+        let conn = fresh_conn().await;
+        let acct = Account {
+            id: AccountId("acct-thread".into()),
+            kind: BackendKind::ImapSmtp,
+            display_name: "Work".into(),
+            email_address: "me@example.com".into(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        };
+        repos::accounts::insert(&conn, &acct).await.expect("acct");
+        let folder = Folder {
+            id: FolderId("INBOX".into()),
+            account_id: acct.id.clone(),
+            name: "Inbox".into(),
+            path: "INBOX".into(),
+            role: Some(FolderRole::Inbox),
+            unread_count: 0,
+            total_count: 0,
+            parent: None,
+        };
+        repos::folders::insert(&conn, &folder)
+            .await
+            .expect("folder");
+
+        // Insert a message *with* a thread_id assigned (mirrors what
+        // the live path does after `attach_to_thread` runs in-line
+        // post-insert via the threads_repo helper).
+        let assigned = ThreadId("t-deadbeef".into());
+        let mut headers = MessageHeaders {
+            id: MessageId("m-1".into()),
+            account_id: acct.id.clone(),
+            folder_id: folder.id.clone(),
+            thread_id: Some(assigned.clone()),
+            rfc822_message_id: Some("<a@b>".into()),
+            subject: "subj".into(),
+            from: vec![],
+            reply_to: vec![],
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            date: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            flags: MessageFlags::default(),
+            labels: vec![],
+            snippet: "".into(),
+            size: 0,
+            has_attachments: false,
+            in_reply_to: None,
+            references: vec![],
+        };
+        repos::messages::insert(&conn, &headers, None)
+            .await
+            .expect("insert");
+
+        // Simulate a re-sync: the wire copy of the headers has no
+        // local thread id (the IMAP / JMAP backend never sets it).
+        // This is the call shape that historically corrupted the
+        // column.
+        headers.thread_id = None;
+        repos::messages::update(&conn, &headers, None)
+            .await
+            .expect("update");
+
+        let back = repos::messages::get(&conn, &headers.id).await.expect("get");
+        assert_eq!(
+            back.thread_id,
+            Some(assigned),
+            "messages::update must not clobber a previously-assigned thread_id with the \
+             incoming-wire `None`"
+        );
+    });
+}
