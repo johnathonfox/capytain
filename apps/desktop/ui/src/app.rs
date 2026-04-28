@@ -354,6 +354,19 @@ fn full_app_shell() -> Element {
     // without touching `selection`.
     let search_query: Signal<String> = use_signal(String::new);
 
+    // Account filter for the unified-inbox / folder views. `None`
+    // shows every account; `Some(id)` scopes the message list to a
+    // single account. Per post-phase-2.md assumption A1 the chip is
+    // a filter, not an active-account swap — the sidebar still shows
+    // every account's mailboxes side by side.
+    let account_filter: Signal<Option<AccountId>> = use_signal(|| None);
+
+    // Currently-visible message ids in display order. Each list
+    // component (folder view, unified view, search results, threads)
+    // publishes its rendered set so `j` / `k` can step through them
+    // without re-fetching. Sorted by date-desc to match the rendering.
+    let visible_messages: Signal<Vec<MessageId>> = use_signal(Vec::new);
+
     // ComposePane occupies the reader slot when active, so the Servo
     // overlay surface — which paints over `.reader-body-fill` and is
     // positioned by a JS-side ResizeObserver — must be hidden whenever
@@ -466,6 +479,7 @@ fn full_app_shell() -> Element {
                 sync_tick,
                 help_visible,
                 search_query,
+                visible_messages,
             );
         });
         if let Some(window) = web_sys::window() {
@@ -528,7 +542,7 @@ fn full_app_shell() -> Element {
             onmousemove: onmousemove_shell,
             onmouseup: onmouseup_shell,
             onmouseleave: onmouseup_shell,
-            TopBar {}
+            TopBar { account_filter }
             div {
                 class: "shell-pane shell-pane-sidebar",
                 SidebarV2 { selection, sync_tick, compose }
@@ -539,7 +553,7 @@ fn full_app_shell() -> Element {
             }
             div {
                 class: "shell-pane shell-pane-list",
-                MessageListPaneV2 { selection, sync_tick, folder_tokens, bulk_selected, search_query }
+                MessageListPaneV2 { selection, sync_tick, folder_tokens, bulk_selected, search_query, account_filter, visible_messages }
             }
             div {
                 class: "shell-splitter",
@@ -611,6 +625,7 @@ fn dispatch_keyboard_command(
     mut sync_tick: SyncTick,
     mut help_visible: Signal<bool>,
     mut search_query: Signal<String>,
+    visible_messages: Signal<Vec<MessageId>>,
 ) {
     use crate::keyboard::KeyboardCommand;
 
@@ -691,6 +706,35 @@ fn dispatch_keyboard_command(
                 selection.with_mut(|s| s.message = None);
                 sync_tick.with_mut(|t| *t = t.wrapping_add(1));
             });
+        }
+        KeyboardCommand::NextMessage | KeyboardCommand::PrevMessage => {
+            // Walk the published `visible_messages` list relative to the
+            // current selection. Wraps at both ends so the user can hold
+            // `j` to cycle the inbox without hitting an invisible stop.
+            // No-op when the list is empty (compose pane open, search
+            // returned nothing, etc.).
+            let ids = visible_messages.read().clone();
+            if ids.is_empty() {
+                return;
+            }
+            let cur = selection.read().message.clone();
+            let cur_idx = cur
+                .as_ref()
+                .and_then(|c| ids.iter().position(|m| m.0 == c.0));
+            let next_idx = match (cmd, cur_idx) {
+                (KeyboardCommand::NextMessage, None) => 0,
+                (KeyboardCommand::PrevMessage, None) => ids.len() - 1,
+                (KeyboardCommand::NextMessage, Some(i)) => (i + 1) % ids.len(),
+                (KeyboardCommand::PrevMessage, Some(i)) => {
+                    if i == 0 {
+                        ids.len() - 1
+                    } else {
+                        i - 1
+                    }
+                }
+                _ => unreachable!(),
+            };
+            selection.with_mut(|s| s.message = Some(ids[next_idx].clone()));
         }
         KeyboardCommand::Reply | KeyboardCommand::ReplyAll | KeyboardCommand::Forward => {
             let Some(id) = selection.read().message.clone() else {
@@ -825,19 +869,30 @@ fn short_folder_label(folder_id: &str) -> String {
 
 /// Top bar above the three-pane shell. Renders the `qsl` wordmark,
 /// version, a `⌘K` command-palette pill (no-op until the palette
-/// lands), and an account-count indicator on the right. Mono +
-/// dense per `docs/ui-direction.md` § Top bar.
+/// lands), and an account-filter chip on the right. Mono + dense
+/// per `docs/ui-direction.md` § Top bar.
+///
+/// `account_filter` is the App-root signal that scopes the message
+/// list to a single account. `None` = show every account; clicking
+/// the chip opens a dropdown with the configured accounts plus an
+/// "all accounts" reset.
 #[component]
-fn TopBar() -> Element {
+fn TopBar(account_filter: Signal<Option<AccountId>>) -> Element {
     let accounts = use_resource(|| async { invoke::<Vec<Account>>("accounts_list", ()).await });
-    let count = match &*accounts.read_unchecked() {
-        Some(Ok(list)) => list.len(),
-        _ => 0,
-    };
-    let count_label = match count {
-        0 => "0 accounts".to_string(),
-        1 => "1 account".to_string(),
-        n => format!("{n} accounts"),
+    let mut chip_open: Signal<bool> = use_signal(|| false);
+
+    let chip_label: String = match (
+        account_filter.read().clone(),
+        accounts.read_unchecked().as_ref(),
+    ) {
+        (None, Some(Ok(list))) if list.is_empty() => "no accounts".to_string(),
+        (None, _) => "all accounts".to_string(),
+        (Some(id), Some(Ok(list))) => list
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| a.email_address.clone())
+            .unwrap_or_else(|| id.0.clone()),
+        (Some(id), _) => id.0.clone(),
     };
 
     rsx! {
@@ -860,7 +915,69 @@ fn TopBar() -> Element {
             }
             div {
                 class: "topbar-right",
-                span { class: "topbar-account-count", "{count_label}" }
+                div {
+                    class: "topbar-chip-wrap",
+                    button {
+                        class: if chip_open() { "topbar-chip topbar-chip-open" } else { "topbar-chip" },
+                        r#type: "button",
+                        title: "Filter messages by account",
+                        onclick: move |_| {
+                            let cur = chip_open();
+                            chip_open.set(!cur);
+                        },
+                        span { class: "topbar-chip-label", "{chip_label}" }
+                        span { class: "topbar-chip-arrow", if chip_open() { "▴" } else { "▾" } }
+                    }
+                    if chip_open() {
+                        div {
+                            class: "topbar-chip-menu",
+                            button {
+                                class: if account_filter.read().is_none() {
+                                    "topbar-chip-item topbar-chip-item-active"
+                                } else {
+                                    "topbar-chip-item"
+                                },
+                                r#type: "button",
+                                onclick: move |_| {
+                                    account_filter.set(None);
+                                    chip_open.set(false);
+                                },
+                                "all accounts"
+                            }
+                            match &*accounts.read_unchecked() {
+                                Some(Ok(list)) => rsx! {
+                                    for a in list.iter().cloned() {
+                                        {
+                                            let id_for_select = a.id.clone();
+                                            let id_for_match = a.id.clone();
+                                            let active = account_filter.read().as_ref() == Some(&id_for_match);
+                                            rsx! {
+                                                button {
+                                                    key: "{a.id.0}",
+                                                    class: if active {
+                                                        "topbar-chip-item topbar-chip-item-active"
+                                                    } else {
+                                                        "topbar-chip-item"
+                                                    },
+                                                    r#type: "button",
+                                                    onclick: move |_| {
+                                                        account_filter.set(Some(id_for_select.clone()));
+                                                        chip_open.set(false);
+                                                    },
+                                                    "{a.email_address}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                Some(Err(e)) => rsx! {
+                                    span { class: "topbar-chip-item topbar-chip-error", "Error: {e}" }
+                                },
+                                None => rsx! {},
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -2230,6 +2347,8 @@ fn MessageListPaneV2(
     folder_tokens: FolderTokens,
     bulk_selected: Signal<HashSet<MessageId>>,
     search_query: Signal<String>,
+    account_filter: Signal<Option<AccountId>>,
+    visible_messages: Signal<Vec<MessageId>>,
 ) -> Element {
     let unified = selection.read().unified;
     let folder_id = selection.read().folder.clone();
@@ -2244,9 +2363,9 @@ fn MessageListPaneV2(
                 BulkActionBar { bulk_selected, sync_tick }
             }
             if searching {
-                SearchResults { query: active_query, selection, bulk_selected }
+                SearchResults { query: active_query, selection, bulk_selected, account_filter, visible_messages }
             } else if unified {
-                UnifiedMessageListV2 { selection, sync_tick, bulk_selected }
+                UnifiedMessageListV2 { selection, sync_tick, bulk_selected, account_filter, visible_messages }
             } else {
                 match folder_id {
                     None => rsx! {
@@ -2256,7 +2375,7 @@ fn MessageListPaneV2(
                         }
                     },
                     Some(fid) => rsx! {
-                        MessageListV2 { folder: fid, selection, folder_tokens, bulk_selected }
+                        MessageListV2 { folder: fid, selection, folder_tokens, bulk_selected, visible_messages }
                     },
                 }
             }
@@ -2327,6 +2446,8 @@ fn SearchResults(
     query: String,
     selection: Signal<Selection>,
     bulk_selected: Signal<HashSet<MessageId>>,
+    account_filter: Signal<Option<AccountId>>,
+    mut visible_messages: Signal<Vec<MessageId>>,
 ) -> Element {
     let q_for_fetch = query.clone();
     let page = use_resource(use_reactive!(|q_for_fetch| async move {
@@ -2342,20 +2463,32 @@ fn SearchResults(
         match &*page.read_unchecked() {
             None => rsx! { p { class: "msglist-empty", "Searching…" } },
             Some(Err(e)) => rsx! { p { class: "msglist-empty", "{e}" } },
-            Some(Ok(MessagePage { messages, total_count, unread_count })) => rsx! {
-                MessageListHeader {
-                    title: format!("Search: {query}"),
-                    shown: messages.len() as u32,
-                    total: *total_count,
-                    unread: *unread_count,
-                }
-                div {
-                    class: "msglist-scroll",
-                    if messages.is_empty() {
-                        p { class: "msglist-empty", "No matches." }
-                    } else {
-                        for m in messages.iter().cloned() {
-                            MessageRowV2 { msg: m, selection, bulk_selected }
+            Some(Ok(MessagePage { messages, total_count, unread_count })) => {
+                // Account filter is applied client-side — `messages_search`
+                // is account-agnostic so we can scope without a re-query.
+                let filter = account_filter.read().clone();
+                let filtered: Vec<_> = match filter {
+                    Some(ref id) => messages.iter().filter(|m| m.account_id == *id).cloned().collect(),
+                    None => messages.clone(),
+                };
+                let ids: Vec<MessageId> = filtered.iter().map(|m| m.id.clone()).collect();
+                visible_messages.set(ids);
+                let shown = filtered.len() as u32;
+                rsx! {
+                    MessageListHeader {
+                        title: format!("Search: {query}"),
+                        shown,
+                        total: *total_count,
+                        unread: *unread_count,
+                    }
+                    div {
+                        class: "msglist-scroll",
+                        if filtered.is_empty() {
+                            p { class: "msglist-empty", "No matches." }
+                        } else {
+                            for m in filtered.into_iter() {
+                                MessageRowV2 { msg: m, selection, bulk_selected }
+                            }
                         }
                     }
                 }
@@ -2515,6 +2648,8 @@ fn UnifiedMessageListV2(
     selection: Signal<Selection>,
     sync_tick: SyncTick,
     bulk_selected: Signal<HashSet<MessageId>>,
+    account_filter: Signal<Option<AccountId>>,
+    mut visible_messages: Signal<Vec<MessageId>>,
 ) -> Element {
     let tick_value = sync_tick();
     let page = use_resource(use_reactive!(|tick_value| async move {
@@ -2531,20 +2666,33 @@ fn UnifiedMessageListV2(
         match &*page.read_unchecked() {
             None => rsx! { p { class: "msglist-empty", "Loading…" } },
             Some(Err(e)) => rsx! { p { class: "msglist-empty", "{e}" } },
-            Some(Ok(MessagePage { messages, total_count, unread_count })) => rsx! {
-                MessageListHeader {
-                    title: "Unified Inbox".to_string(),
-                    shown: messages.len() as u32,
-                    total: *total_count,
-                    unread: *unread_count,
-                }
-                div {
-                    class: "msglist-scroll",
-                    if messages.is_empty() {
-                        p { class: "msglist-empty", "No messages." }
-                    } else {
-                        for m in messages.iter().cloned() {
-                            MessageRowV2 { msg: m, selection, bulk_selected }
+            Some(Ok(MessagePage { messages, total_count, unread_count })) => {
+                // Account filter applies post-fetch — `messages_list_unified`
+                // returns every account so a single chip flip doesn't pay
+                // a re-query cost.
+                let filter = account_filter.read().clone();
+                let filtered: Vec<_> = match filter {
+                    Some(ref id) => messages.iter().filter(|m| m.account_id == *id).cloned().collect(),
+                    None => messages.clone(),
+                };
+                let ids: Vec<MessageId> = filtered.iter().map(|m| m.id.clone()).collect();
+                visible_messages.set(ids);
+                let shown = filtered.len() as u32;
+                rsx! {
+                    MessageListHeader {
+                        title: "Unified Inbox".to_string(),
+                        shown,
+                        total: *total_count,
+                        unread: *unread_count,
+                    }
+                    div {
+                        class: "msglist-scroll",
+                        if filtered.is_empty() {
+                            p { class: "msglist-empty", "No messages." }
+                        } else {
+                            for m in filtered.into_iter() {
+                                MessageRowV2 { msg: m, selection, bulk_selected }
+                            }
                         }
                     }
                 }
@@ -2559,6 +2707,7 @@ fn MessageListV2(
     selection: Signal<Selection>,
     folder_tokens: FolderTokens,
     bulk_selected: Signal<HashSet<MessageId>>,
+    mut visible_messages: Signal<Vec<MessageId>>,
 ) -> Element {
     let mut visible_limit = use_signal(|| 200u32);
     let folder_for_fetch = folder.clone();
@@ -2691,37 +2840,45 @@ fn MessageListV2(
         match &*page.read_unchecked() {
             None => rsx! { p { class: "msglist-empty", "Loading…" } },
             Some(Err(e)) => rsx! { p { class: "msglist-empty", "{e}" } },
-            Some(Ok(MessagePage { messages, total_count, unread_count })) => rsx! {
-                MessageListHeader {
-                    title: folder_title_from_selection(&folder, &selection),
-                    shown: messages.len() as u32,
-                    total: *total_count,
-                    unread: *unread_count,
-                }
-                div {
-                    class: "msglist-scroll",
-                    onscroll: onscroll_msglist,
-                    if messages.is_empty() {
-                        p { class: "msglist-empty", "No messages in this mailbox." }
-                    } else {
-                        for item in crate::threading::group_by_thread(messages.clone()) {
-                            match item {
-                                crate::threading::MessageListItem::Single(m) => rsx! {
-                                    MessageRowV2 { msg: m, selection, bulk_selected }
-                                },
-                                crate::threading::MessageListItem::Thread { head, members } => rsx! {
-                                    ThreadRow { head, members, selection, bulk_selected }
-                                },
+            Some(Ok(MessagePage { messages, total_count, unread_count })) => {
+                // Publish the rendered ids in display order so `j` / `k`
+                // step through what the user sees, not what the backend
+                // returned. Threads expose their head only — entering a
+                // thread requires explicit click.
+                let ids: Vec<MessageId> = messages.iter().map(|m| m.id.clone()).collect();
+                visible_messages.set(ids);
+                rsx! {
+                    MessageListHeader {
+                        title: folder_title_from_selection(&folder, &selection),
+                        shown: messages.len() as u32,
+                        total: *total_count,
+                        unread: *unread_count,
+                    }
+                    div {
+                        class: "msglist-scroll",
+                        onscroll: onscroll_msglist,
+                        if messages.is_empty() {
+                            p { class: "msglist-empty", "No messages in this mailbox." }
+                        } else {
+                            for item in crate::threading::group_by_thread(messages.clone()) {
+                                match item {
+                                    crate::threading::MessageListItem::Single(m) => rsx! {
+                                        MessageRowV2 { msg: m, selection, bulk_selected }
+                                    },
+                                    crate::threading::MessageListItem::Thread { head, members } => rsx! {
+                                        ThreadRow { head, members, selection, bulk_selected }
+                                    },
+                                }
                             }
                         }
                     }
-                }
-                div {
-                    class: "msglist-footer",
-                    if *tail_exhausted.read() {
-                        span { class: "msglist-tail-hint", "All older messages loaded." }
-                    } else if *loading_older.read() {
-                        span { class: "msglist-tail-hint", "Loading more…" }
+                    div {
+                        class: "msglist-footer",
+                        if *tail_exhausted.read() {
+                            span { class: "msglist-tail-hint", "All older messages loaded." }
+                        } else if *loading_older.read() {
+                            span { class: "msglist-tail-hint", "Loading more…" }
+                        }
                     }
                 }
             },

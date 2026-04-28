@@ -191,6 +191,93 @@ ul {
   color: var(--text-secondary);
 }
 
+/* Account filter chip — replaces the static account count.
+ * Click to open a dropdown of configured accounts. Per
+ * post-phase-2.md A1, this is a filter, not an active-account
+ * swap; the sidebar still shows every account's mailboxes. */
+.topbar-chip-wrap {
+  position: relative;
+}
+
+.topbar-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 0.5px solid var(--border-tertiary);
+  border-radius: var(--radius-input);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: var(--fs-11);
+  cursor: pointer;
+}
+
+.topbar-chip:hover {
+  border-color: var(--border-secondary);
+  color: var(--text-primary);
+}
+
+.topbar-chip-open {
+  border-color: var(--accent-amber);
+  color: var(--text-primary);
+}
+
+.topbar-chip-label {
+  white-space: nowrap;
+}
+
+.topbar-chip-arrow {
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+
+.topbar-chip-menu {
+  position: absolute;
+  top: calc(100% + 2px);
+  right: 0;
+  min-width: 200px;
+  max-width: 320px;
+  background: var(--bg-tertiary);
+  border: 0.5px solid var(--border-secondary);
+  border-radius: var(--radius-input);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  padding: 2px 0;
+}
+
+.topbar-chip-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 4px 10px;
+  background: transparent;
+  border: 0;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: var(--fs-11);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topbar-chip-item:hover {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.topbar-chip-item-active {
+  color: var(--accent-amber);
+  font-weight: var(--fw-bold);
+}
+
+.topbar-chip-error {
+  color: var(--danger-red);
+  font-style: normal;
+}
+
 /* ---------- Three-pane shell ---------- */
 
 .app-shell {

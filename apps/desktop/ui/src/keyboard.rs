@@ -40,6 +40,12 @@ pub enum KeyboardCommand {
     /// Focus the search bar above the message list. `/` matches
     /// Gmail; the dispatcher calls `.focus()` on the search input.
     FocusSearch,
+    /// Move the message-list selection to the next message.
+    /// `j` matches Gmail; wraps at the end of the list.
+    NextMessage,
+    /// Move the message-list selection to the previous message.
+    /// `k` matches Gmail; wraps at the start of the list.
+    PrevMessage,
 }
 
 /// Map a `KeyboardEvent.key` value plus the modifier state to a
@@ -65,6 +71,8 @@ pub fn parse(key: &str, ctrl_or_meta: bool) -> Option<KeyboardCommand> {
         "f" => Some(KeyboardCommand::Forward),
         "?" => Some(KeyboardCommand::ToggleHelp),
         "/" => Some(KeyboardCommand::FocusSearch),
+        "j" => Some(KeyboardCommand::NextMessage),
+        "k" => Some(KeyboardCommand::PrevMessage),
         _ => None,
     }
 }
@@ -96,13 +104,19 @@ mod tests {
     fn ctrl_or_meta_swallows_everything() {
         // Ctrl+C / Cmd+R should reach the OS, not us — even for keys
         // whose unmodified form would be ours.
-        for key in ["c", "e", "r", "a", "f", "Escape", "?", "#", "/"] {
+        for key in ["c", "e", "r", "a", "f", "j", "k", "Escape", "?", "#", "/"] {
             assert_eq!(
                 parse(key, true),
                 None,
                 "Ctrl/Cmd+{key} must not produce a KeyboardCommand"
             );
         }
+    }
+
+    #[test]
+    fn parses_j_k_navigation() {
+        assert_eq!(parse("j", false), Some(KeyboardCommand::NextMessage));
+        assert_eq!(parse("k", false), Some(KeyboardCommand::PrevMessage));
     }
 
     #[test]
