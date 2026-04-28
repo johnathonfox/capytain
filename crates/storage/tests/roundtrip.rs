@@ -819,3 +819,110 @@ fn search_ids_finds_messages_by_subject_and_sender() {
         assert!(hits.is_empty());
     });
 }
+
+/// PR-C1 contacts. Lock down the upsert + prefix-query contract:
+/// case-insensitive dedup, monotonic seen_count, sticky non-empty
+/// display_name, and the recency / popularity ordering used by the
+/// autocomplete dropdown.
+#[test]
+fn contacts_upsert_and_query_prefix() {
+    use qsl_storage::repos::contacts::{self, Source};
+    let rt = rt();
+    rt.block_on(async move {
+        let conn = fresh_conn().await;
+
+        // First sighting carries a display name; second sighting
+        // arrives with no display name (mailing-list quirk) but a
+        // later timestamp; third sighting flips back to a name.
+        contacts::upsert_seen(
+            &conn,
+            "alice@example.com",
+            Some("Alice Cohen"),
+            Source::Inbound,
+            100,
+        )
+        .await
+        .expect("upsert 1");
+        contacts::upsert_seen(&conn, "Alice@Example.COM", None, Source::Inbound, 200)
+            .await
+            .expect("upsert 2 (case-flipped, empty name)");
+        contacts::upsert_seen(
+            &conn,
+            "alice@example.com",
+            Some("A. Cohen"),
+            Source::Outbound,
+            300,
+        )
+        .await
+        .expect("upsert 3 (newer name)");
+
+        // Single row collapsed via COLLATE NOCASE; seen_count = 3.
+        let row = contacts::find(&conn, "ALICE@example.com")
+            .await
+            .expect("find")
+            .expect("row");
+        assert_eq!(row.address.to_lowercase(), "alice@example.com");
+        assert_eq!(row.seen_count, 3);
+        assert_eq!(row.last_seen_at, 300);
+        assert_eq!(
+            row.display_name.as_deref(),
+            Some("A. Cohen"),
+            "display_name should advance when the new value is non-empty"
+        );
+
+        // Add a second contact and verify prefix-query ordering.
+        contacts::upsert_seen(
+            &conn,
+            "alistair@example.org",
+            Some("Alistair"),
+            Source::Outbound,
+            50,
+        )
+        .await
+        .expect("upsert alistair");
+
+        let hits = contacts::query_prefix(&conn, "ali", 10)
+            .await
+            .expect("query ali");
+        let addresses: Vec<&str> = hits.iter().map(|c| c.address.as_str()).collect();
+        // alice has last_seen_at=300 (most recent), alistair has 50; recency wins.
+        assert_eq!(addresses, vec!["alice@example.com", "alistair@example.org"]);
+
+        // Display-name prefix also hits (the dropdown searches both).
+        let hits = contacts::query_prefix(&conn, "A. C", 10)
+            .await
+            .expect("name search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].address, "alice@example.com");
+
+        // Empty / whitespace prefix returns empty without scanning.
+        let hits = contacts::query_prefix(&conn, "   ", 10)
+            .await
+            .expect("empty");
+        assert!(hits.is_empty());
+
+        // Unknown prefix returns empty.
+        let hits = contacts::query_prefix(&conn, "zzz", 10).await.expect("zzz");
+        assert!(hits.is_empty());
+    });
+}
+
+/// Empty / whitespace addresses are silently ignored — protects the
+/// caller (sync engine, messages_send) from having to filter them
+/// out before passing to the upsert.
+#[test]
+fn contacts_upsert_skips_empty_addresses() {
+    use qsl_storage::repos::contacts::{self, Source};
+    let rt = rt();
+    rt.block_on(async move {
+        let conn = fresh_conn().await;
+        contacts::upsert_seen(&conn, "", None, Source::Inbound, 100)
+            .await
+            .expect("empty");
+        contacts::upsert_seen(&conn, "   ", None, Source::Inbound, 100)
+            .await
+            .expect("whitespace");
+        let hits = contacts::query_prefix(&conn, "a", 10).await.expect("query");
+        assert!(hits.is_empty());
+    });
+}

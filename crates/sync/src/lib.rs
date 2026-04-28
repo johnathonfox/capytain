@@ -21,7 +21,7 @@ use tracing::{debug, instrument, warn};
 
 use qsl_core::{Folder, MailBackend, MailError, MessageHeaders, StorageError};
 use qsl_storage::{
-    repos::{folders, messages, sync_states},
+    repos::{contacts, folders, messages, sync_states},
     BlobStore, DbConn,
 };
 
@@ -143,6 +143,27 @@ pub async fn sync_folder(
                 // header row which is a hard cache bug.
                 if let Err(e) = threading::attach_to_thread(conn, h).await {
                     warn!(message = %h.id.0, "thread assembly failed: {e}");
+                }
+                // Contacts collection: the `From:` of every
+                // newly-inserted message (one per address; bounce
+                // notifications occasionally have multiple) seeds
+                // the autocomplete dropdown. PR-C2 surfaces this in
+                // compose. Collection failures are logged and
+                // skipped — the message is fully valid even if the
+                // contact upsert blew up.
+                let now = chrono::Utc::now().timestamp();
+                for addr in &h.from {
+                    if let Err(e) = contacts::upsert_seen(
+                        conn,
+                        &addr.address,
+                        addr.display_name.as_deref(),
+                        contacts::Source::Inbound,
+                        now,
+                    )
+                    .await
+                    {
+                        warn!(message = %h.id.0, "contact upsert failed: {e}");
+                    }
                 }
                 report.added += 1;
                 new_headers.push(h.clone());
