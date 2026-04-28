@@ -579,7 +579,24 @@ async fn emit_folder_outcome(
                     .unwrap_or(0)
             };
             if live && report.added > 0 {
-                fire_new_mail_notification(app, account, folder, report.added);
+                // For single-message bursts (the common IDLE case),
+                // fetch the most-recent header so the notification
+                // body can render `"{from} — {subject}"` instead of
+                // the older `"{account} · {folder}"` placeholder.
+                // For multi-message bursts a single-message preview
+                // would be misleading, so we keep the count-only
+                // fallback and skip the lookup entirely.
+                let preview = if report.added == 1 {
+                    let state: tauri::State<'_, AppState> = app.state();
+                    let db = state.sync_db.lock().await;
+                    qsl_storage::repos::messages::list_by_folder(&*db, folder, 1, 0)
+                        .await
+                        .ok()
+                        .and_then(|mut v| v.pop())
+                } else {
+                    None
+                };
+                fire_new_mail_notification(app, account, folder, report.added, preview.as_ref());
             }
             SyncEvent::FolderSynced {
                 account: account.clone(),
@@ -608,19 +625,56 @@ async fn emit_folder_outcome(
 /// and the engine moves on (a missing notification surface — Linux
 /// without a notification daemon, Windows action center disabled —
 /// shouldn't stall sync).
+///
+/// Single-message bursts (`count == 1` and `preview.is_some()`) get
+/// a per-message body — `"Alice Cohen — Project status"` — so the
+/// notification is actionable at a glance. Multi-message bursts
+/// fall back to a count-only body because picking one message to
+/// preview would misrepresent the rest.
+///
+/// Action buttons (Mark read / Archive on Linux per the v0.1 plan)
+/// are deferred: `tauri-plugin-notification` 2.3.3 only exposes
+/// `action_type_id` on mobile, and adding `notify-rust` for the
+/// Linux desktop path requires its own callback-dispatch wiring
+/// that's larger than this PR's scope.
 fn fire_new_mail_notification(
     app: &AppHandle,
     account: &AccountId,
     folder: &FolderId,
     count: usize,
+    preview: Option<&qsl_core::MessageHeaders>,
 ) {
     use tauri_plugin_notification::NotificationExt;
-    let title = if count == 1 {
-        "New message".to_string()
-    } else {
-        format!("{count} new messages")
+
+    let (title, body) = match (count, preview) {
+        (1, Some(headers)) => {
+            let from = headers
+                .from
+                .first()
+                .map(|a| {
+                    a.display_name
+                        .clone()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| a.address.clone())
+                })
+                .unwrap_or_else(|| "Unknown sender".to_string());
+            let subject = if headers.subject.is_empty() {
+                "(no subject)".to_string()
+            } else {
+                headers.subject.clone()
+            };
+            (format!("New from {from}"), format!("{from} — {subject}"))
+        }
+        (1, None) => (
+            "New message".to_string(),
+            format!("{} · {}", account.0, folder.0),
+        ),
+        (n, _) => (
+            format!("{n} new messages"),
+            format!("{} · {}", account.0, folder.0),
+        ),
     };
-    let body = format!("{} · {}", account.0, folder.0);
+
     if let Err(e) = app
         .notification()
         .builder()
