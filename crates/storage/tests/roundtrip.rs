@@ -820,6 +820,172 @@ fn search_ids_finds_messages_by_subject_and_sender() {
     });
 }
 
+/// PR-S2 smoke. Combine the Gmail-style operator parser with the
+/// storage-side `search_with_query`. Three fixtures:
+///   - one unread invoice from alice with attachment, dated Jan 5
+///   - one read lunch chat from bob, no attachment, dated Feb 10
+///   - one read release-notes mail from carol, no attachment, dated Mar 1
+///
+/// The query mix exercises FTS-only, structured-only, and combined
+/// shapes, plus the empty-query short-circuit.
+#[test]
+fn search_with_query_combines_fts_and_filters() {
+    let rt = rt();
+    rt.block_on(async move {
+        let conn = fresh_conn().await;
+        let acct = Account {
+            id: AccountId("sq-acct".into()),
+            kind: BackendKind::ImapSmtp,
+            display_name: "Work".into(),
+            email_address: "me@example.com".into(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        };
+        repos::accounts::insert(&conn, &acct).await.expect("acct");
+        let folder = Folder {
+            id: FolderId("INBOX".into()),
+            account_id: acct.id.clone(),
+            name: "Inbox".into(),
+            path: "INBOX".into(),
+            role: Some(FolderRole::Inbox),
+            unread_count: 0,
+            total_count: 0,
+            parent: None,
+        };
+        repos::folders::insert(&conn, &folder)
+            .await
+            .expect("folder");
+
+        let mk = |id: &str,
+                  subject: &str,
+                  from_addr: &str,
+                  date: DateTime<Utc>,
+                  seen: bool,
+                  has_attachments: bool|
+         -> MessageHeaders {
+            MessageHeaders {
+                id: MessageId(id.into()),
+                account_id: acct.id.clone(),
+                folder_id: folder.id.clone(),
+                thread_id: None,
+                rfc822_message_id: None,
+                in_reply_to: None,
+                references: vec![],
+                from: vec![EmailAddress {
+                    address: from_addr.into(),
+                    display_name: None,
+                }],
+                to: vec![],
+                cc: vec![],
+                bcc: vec![],
+                reply_to: vec![],
+                subject: subject.into(),
+                snippet: String::new(),
+                date,
+                flags: MessageFlags {
+                    seen,
+                    ..MessageFlags::default()
+                },
+                labels: vec![],
+                size: 0,
+                has_attachments,
+            }
+        };
+
+        let invoice = mk(
+            "m1",
+            "Q1 invoice attached",
+            "alice@example.com",
+            Utc.with_ymd_and_hms(2026, 1, 5, 0, 0, 0).unwrap(),
+            false,
+            true,
+        );
+        let lunch = mk(
+            "m2",
+            "Lunch tomorrow?",
+            "bob@example.com",
+            Utc.with_ymd_and_hms(2026, 2, 10, 0, 0, 0).unwrap(),
+            true,
+            false,
+        );
+        let release = mk(
+            "m3",
+            "Release notes for v0.1",
+            "carol@example.com",
+            Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap(),
+            true,
+            false,
+        );
+        for h in [&invoice, &lunch, &release] {
+            repos::messages::insert(&conn, h, None)
+                .await
+                .expect("insert");
+        }
+
+        // Empty query short-circuits to no results — `search_with_query`
+        // refuses to run an unbounded scan.
+        let hits = repos::search::search_with_query(&conn, &qsl_search::parse(""), 10, 0)
+            .await
+            .expect("empty query");
+        assert!(hits.is_empty(), "empty query must not return rows");
+
+        // FTS-only path matches the original `search_ids` behaviour.
+        let q = qsl_search::parse("invoice");
+        let hits = repos::search::search_with_query(&conn, &q, 10, 0)
+            .await
+            .expect("fts only");
+        assert_eq!(hits, vec![MessageId("m1".into())]);
+
+        // Structured-only: `is:unread` returns only the invoice.
+        let q = qsl_search::parse("is:unread");
+        let hits = repos::search::search_with_query(&conn, &q, 10, 0)
+            .await
+            .expect("is:unread");
+        assert_eq!(hits, vec![MessageId("m1".into())]);
+
+        // Structured-only: `has:attachment` returns only the invoice.
+        let q = qsl_search::parse("has:attachment");
+        let hits = repos::search::search_with_query(&conn, &q, 10, 0)
+            .await
+            .expect("has:attachment");
+        assert_eq!(hits, vec![MessageId("m1".into())]);
+
+        // Structured-only date range: `before:2026-02-15` excludes carol's mail.
+        // Returns lunch (Feb 10) and invoice (Jan 5), date DESC.
+        let q = qsl_search::parse("before:2026-02-15");
+        let hits = repos::search::search_with_query(&conn, &q, 10, 0)
+            .await
+            .expect("before");
+        assert_eq!(
+            hits,
+            vec![MessageId("m2".into()), MessageId("m1".into())],
+            "before:date orders by date DESC"
+        );
+
+        // `after:2026-02-01` includes lunch + release.
+        let q = qsl_search::parse("after:2026-02-01");
+        let hits = repos::search::search_with_query(&conn, &q, 10, 0)
+            .await
+            .expect("after");
+        assert_eq!(hits, vec![MessageId("m3".into()), MessageId("m2".into())],);
+
+        // Combined: FTS term + structured filter. `alice is:unread`
+        // → only the invoice (alice has the only unread row anyway,
+        // but the AND is enforced).
+        let q = qsl_search::parse("alice is:unread");
+        let hits = repos::search::search_with_query(&conn, &q, 10, 0)
+            .await
+            .expect("combined");
+        assert_eq!(hits, vec![MessageId("m1".into())]);
+
+        // `is:unread` AND a non-matching FTS term → empty.
+        let q = qsl_search::parse("xylophone is:unread");
+        let hits = repos::search::search_with_query(&conn, &q, 10, 0)
+            .await
+            .expect("combined-empty");
+        assert!(hits.is_empty());
+    });
+}
+
 /// PR-C1 contacts. Lock down the upsert + prefix-query contract:
 /// case-insensitive dedup, monotonic seen_count, sticky non-empty
 /// display_name, and the recency / popularity ordering used by the

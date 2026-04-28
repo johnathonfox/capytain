@@ -565,6 +565,60 @@ ul {
   color: #7c8290;
 }
 
+/* Persistent search bar above the message list. Sits flush with the
+ * pane top so the input is always reachable; `/` focuses, `Esc`
+ * clears. The clear button overlays the right edge when the query
+ * is non-empty. */
+.msglist-search {
+  flex: 0 0 auto;
+  position: relative;
+  padding: 10px 12px;
+  border-bottom: 1px solid #20242e;
+}
+
+.msglist-search-input {
+  width: 100%;
+  font-size: 12px;
+  padding: 6px 28px 6px 10px;
+  border-radius: 4px;
+  border: 1px solid #2a3242;
+  background: #14171f;
+  color: #e6e8eb;
+  outline: none;
+}
+
+.msglist-search-input::placeholder {
+  color: #5d6373;
+}
+
+.msglist-search-input:focus {
+  border-color: #568eeb;
+  background: #181c25;
+}
+
+.msglist-search-clear {
+  position: absolute;
+  top: 50%;
+  right: 18px;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: #7c8290;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.msglist-search-clear:hover {
+  color: #e6e8eb;
+}
+
 .msglist-scroll {
   flex: 1 1 auto;
   overflow-y: auto;

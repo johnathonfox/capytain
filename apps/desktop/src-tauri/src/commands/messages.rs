@@ -145,6 +145,86 @@ pub async fn messages_list_unified(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct MessagesSearchInput {
+    /// Raw user query — Gmail-style operator syntax. Parsed by
+    /// `qsl_search::parse`. Empty / whitespace returns no rows.
+    pub query: String,
+    pub limit: u32,
+    pub offset: u32,
+}
+
+/// `messages_search` — run a Gmail-style operator query across the
+/// whole local cache and return matching message headers.
+///
+/// Pipeline: parse the user string with `qsl_search::parse`,
+/// dispatch to `repos::search::search_with_query` to get
+/// `Vec<MessageId>` ordered by relevance, then hydrate each id back
+/// to a full `MessageHeaders`. Hydration runs serially to keep the
+/// db lock contention bounded; for the 50-row default page that's
+/// well under a frame.
+///
+/// Returns `MessagePage` so the UI can reuse the same list-rendering
+/// path as folder browsing. `unread_count` counts only the rows on
+/// this page — totals across the whole result set aren't tracked
+/// (the FTS index doesn't expose `count(*)` cheaply, and the page
+/// answer is what the user can see).
+#[tauri::command]
+pub async fn messages_search(
+    state: State<'_, AppState>,
+    input: MessagesSearchInput,
+) -> IpcResult<MessagePage> {
+    let MessagesSearchInput {
+        query,
+        limit,
+        offset,
+    } = input;
+    let limit = limit.min(MAX_PAGE_LIMIT);
+
+    let parsed = qsl_search::parse(&query);
+    if parsed.is_empty() {
+        return Ok(MessagePage {
+            messages: Vec::new(),
+            total_count: 0,
+            unread_count: 0,
+        });
+    }
+
+    let db = state.db.lock().await;
+    let ids = qsl_storage::repos::search::search_with_query(&*db, &parsed, limit, offset).await?;
+
+    let mut messages = Vec::with_capacity(ids.len());
+    for id in &ids {
+        match messages_repo::get(&*db, id).await {
+            Ok(h) => messages.push(h),
+            Err(e) => {
+                tracing::warn!(id = %id.0, "messages_search: hydrate failed: {e}");
+            }
+        }
+    }
+    drop(db);
+
+    let unread_count: u32 = messages
+        .iter()
+        .filter(|m| !m.flags.seen)
+        .count()
+        .try_into()
+        .unwrap_or(u32::MAX);
+    let total_count: u32 = messages.len().try_into().unwrap_or(u32::MAX);
+
+    tracing::debug!(
+        query = %query,
+        page = messages.len(),
+        "messages_search"
+    );
+
+    Ok(MessagePage {
+        messages,
+        total_count,
+        unread_count,
+    })
+}
+
+#[derive(Debug, Deserialize)]
 pub struct MessagesGetInput {
     pub id: MessageId,
     /// One-shot override that forces the trusted sanitizer for this
@@ -1083,6 +1163,7 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
                 tauri::async_runtime::spawn(async move {
                     let state: tauri::State<AppState> = app.state();
                     state.servo_renderers.lock().await.remove(&label);
+                    state.last_reader_size.lock().await.remove(&label);
                     #[cfg(target_os = "linux")]
                     crate::linux_gtk::remove_parent(&label);
                     tracing::info!(window = %label, "popup reader window closed; renderer dropped");

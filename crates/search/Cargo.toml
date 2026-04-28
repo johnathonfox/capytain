@@ -2,7 +2,7 @@
 
 [package]
 name = "qsl-search"
-description = "QSL full-text search index built on Tantivy."
+description = "Search query parser for QSL: Gmail-style operators -> Tantivy query + structured filter."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 publish.workspace = true
+
+[dependencies]
+chrono = { workspace = true }
 
 [lints]
 workspace = true

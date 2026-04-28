@@ -34,6 +34,7 @@ qsl-imap-client = { workspace = true }
 qsl-ipc = { workspace = true }
 qsl-jmap-client = { workspace = true }
 qsl-mime = { workspace = true }
+qsl-search = { workspace = true }
 qsl-storage = { workspace = true }
 qsl-sync = { workspace = true }
 qsl-telemetry = { workspace = true }

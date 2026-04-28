@@ -83,12 +83,17 @@ pub(crate) const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
         if (window.__qslReaderTracker) {
             window.__qslReaderTracker.dispose();
         }
-        const push = function() {
+        // rAF-coalesce: ResizeObserver + window.resize fire faster than
+        // we can render. Without this, a continuous splitter drag
+        // floods Tauri with `reader_set_position` calls (60+ Hz), each
+        // calling Servo `resize` and producing visible flicker. With
+        // it, multiple events inside the same frame collapse to a
+        // single push from rAF — the Rust side then dedups by (w, h)
+        // and skips Servo resize when only position changed.
+        let rafScheduled = false;
+        const pushRaw = function() {
             const el = document.querySelector('.reader-body-fill');
-            if (!el) {
-                console.log('[qsl] push: no .reader-body-fill yet');
-                return;
-            }
+            if (!el) return;
             const r = el.getBoundingClientRect();
             // `getBoundingClientRect` returns CSS pixels; the GTK
             // overlay positions widgets in device pixels. On
@@ -101,23 +106,20 @@ pub(crate) const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
             const y = r.y * dpr;
             const w = r.width * dpr;
             const h = r.height * dpr;
-            console.log(
-                '[qsl] push css',
-                'x=' + r.x.toFixed(1),
-                'y=' + r.y.toFixed(1),
-                'w=' + r.width.toFixed(1),
-                'h=' + r.height.toFixed(1),
-                'dpr=' + dpr,
-                '→ device',
-                'x=' + x.toFixed(1),
-                'w=' + w.toFixed(1)
-            );
             if (w <= 0 || h <= 0) return;
             window.__TAURI_INTERNALS__
                 .invoke('reader_set_position', {
                     input: { x: x, y: y, width: w, height: h },
                 })
                 .catch(function(e) { console.warn('reader_set_position:', e); });
+        };
+        const push = function() {
+            if (rafScheduled) return;
+            rafScheduled = true;
+            requestAnimationFrame(function() {
+                rafScheduled = false;
+                pushRaw();
+            });
         };
         // Run once now in case the element is already mounted.
         push();
@@ -316,6 +318,12 @@ fn full_app_shell() -> Element {
     // the set. Lives at App root so it survives folder switches and
     // can be read from any pane that wants to act on the selection.
     let bulk_selected: Signal<HashSet<MessageId>> = use_signal(HashSet::new);
+    // Active search query — empty string means "no search active, show
+    // the regular folder / unified inbox view". Sits at the App root
+    // so it survives sidebar navigation; clearing it (via Esc on the
+    // input or the bar's clear button) returns to the previous view
+    // without touching `selection`.
+    let search_query: Signal<String> = use_signal(String::new);
 
     // ComposePane occupies the reader slot when active, so the Servo
     // overlay surface — which paints over `.reader-body-fill` and is
@@ -422,7 +430,14 @@ fn full_app_shell() -> Element {
                 return;
             };
             event.prevent_default();
-            dispatch_keyboard_command(cmd, selection, compose, sync_tick, help_visible);
+            dispatch_keyboard_command(
+                cmd,
+                selection,
+                compose,
+                sync_tick,
+                help_visible,
+                search_query,
+            );
         });
         if let Some(window) = web_sys::window() {
             if let Some(document) = window.document() {
@@ -494,7 +509,7 @@ fn full_app_shell() -> Element {
             }
             div {
                 class: "shell-pane shell-pane-list",
-                MessageListPaneV2 { selection, sync_tick, folder_tokens, bulk_selected }
+                MessageListPaneV2 { selection, sync_tick, folder_tokens, bulk_selected, search_query }
             }
             div {
                 class: "shell-splitter",
@@ -565,6 +580,7 @@ fn dispatch_keyboard_command(
     mut compose: Signal<Option<ComposeState>>,
     mut sync_tick: SyncTick,
     mut help_visible: Signal<bool>,
+    mut search_query: Signal<String>,
 ) {
     use crate::keyboard::KeyboardCommand;
 
@@ -581,15 +597,33 @@ fn dispatch_keyboard_command(
         }
         KeyboardCommand::Cancel => {
             // Priority: dismiss help first (most modal), then close
-            // compose, then clear the reader's selection. One press
-            // unwinds one layer — matches Gmail / native dialog
-            // behaviour.
+            // compose, then clear active search, then clear the
+            // reader's selection. One press unwinds one layer —
+            // matches Gmail / native dialog behaviour.
             if *help_visible.read() {
                 help_visible.set(false);
             } else if compose.read().is_some() {
                 compose.set(None);
+            } else if !search_query.read().is_empty() {
+                search_query.set(String::new());
             } else if selection.read().message.is_some() {
                 selection.with_mut(|s| s.message = None);
+            }
+        }
+        KeyboardCommand::FocusSearch => {
+            // Focus the search input by id — the bar lives at the
+            // top of the message-list pane and renders unconditionally,
+            // so the element is always in the DOM. `getElementById`
+            // returns null only mid-mount; in that case `/` is a no-op.
+            if let Some(window) = web_sys::window() {
+                if let Some(document) = window.document() {
+                    if let Some(el) = document.get_element_by_id("qsl-search-input") {
+                        if let Ok(input) = el.dyn_into::<web_sys::HtmlInputElement>() {
+                            let _ = input.focus();
+                            input.select();
+                        }
+                    }
+                }
             }
         }
         KeyboardCommand::ToggleHelp => {
@@ -677,7 +711,8 @@ fn ShortcutsOverlay(mut visible: Signal<bool>) -> Element {
                             ("r", "Reply"),
                             ("a", "Reply all"),
                             ("f", "Forward"),
-                            ("Esc", "Close compose / clear selection"),
+                            ("/", "Search mail"),
+                            ("Esc", "Close compose / clear search / clear selection"),
                             ("?", "Toggle this help"),
                         ] {
                             tr {
@@ -2052,17 +2087,23 @@ fn MessageListPaneV2(
     sync_tick: SyncTick,
     folder_tokens: FolderTokens,
     bulk_selected: Signal<HashSet<MessageId>>,
+    search_query: Signal<String>,
 ) -> Element {
     let unified = selection.read().unified;
     let folder_id = selection.read().folder.clone();
     let any_checked = !bulk_selected.read().is_empty();
+    let active_query = search_query.read().clone();
+    let searching = !active_query.is_empty();
     rsx! {
         section {
             class: "msglist",
+            SearchBar { search_query }
             if any_checked {
                 BulkActionBar { bulk_selected, sync_tick }
             }
-            if unified {
+            if searching {
+                SearchResults { query: active_query, selection, bulk_selected }
+            } else if unified {
                 UnifiedMessageListV2 { selection, sync_tick, bulk_selected }
             } else {
                 match folder_id {
@@ -2077,6 +2118,106 @@ fn MessageListPaneV2(
                     },
                 }
             }
+        }
+    }
+}
+
+/// Persistent search input above the message list. Uncontrolled-ish
+/// pattern: the input value is bound to `search_query` via `oninput`,
+/// and the parent re-renders the results list when the signal flips
+/// from empty → non-empty (or back).
+///
+/// Esc on the input clears the query and blurs (returning the user
+/// to the regular list). The keyboard cheatsheet's `/` shortcut
+/// focuses this element by id.
+#[component]
+fn SearchBar(mut search_query: Signal<String>) -> Element {
+    let value = search_query.read().clone();
+    let has_value = !value.is_empty();
+    rsx! {
+        div {
+            class: "msglist-search",
+            input {
+                id: "qsl-search-input",
+                class: "msglist-search-input",
+                r#type: "search",
+                placeholder: "Search mail (try is:unread, from:alice, before:2026-01-01)",
+                value: "{value}",
+                autocomplete: "off",
+                spellcheck: "false",
+                oninput: move |e| search_query.set(e.value()),
+                onkeydown: move |e: Event<KeyboardData>| {
+                    if e.key().to_string() == "Escape" {
+                        e.prevent_default();
+                        search_query.set(String::new());
+                        if let Some(window) = web_sys::window() {
+                            if let Some(document) = window.document() {
+                                if let Some(active) = document.active_element() {
+                                    if let Ok(input) = active.dyn_into::<web_sys::HtmlInputElement>() {
+                                        let _ = input.blur();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+            if has_value {
+                button {
+                    class: "msglist-search-clear",
+                    r#type: "button",
+                    title: "Clear search (Esc)",
+                    onclick: move |_| search_query.set(String::new()),
+                    "×"
+                }
+            }
+        }
+    }
+}
+
+/// Search results pane. Calls `messages_search` for the current
+/// `query` (parsed Gmail-style on the backend) and renders the
+/// matching headers as `MessageRowV2`s — same row component the
+/// folder / unified inbox lists use, so selection / multi-select /
+/// styling all behave identically.
+#[component]
+fn SearchResults(
+    query: String,
+    selection: Signal<Selection>,
+    bulk_selected: Signal<HashSet<MessageId>>,
+) -> Element {
+    let q_for_fetch = query.clone();
+    let page = use_resource(use_reactive!(|q_for_fetch| async move {
+        invoke::<MessagePage>(
+            "messages_search",
+            serde_json::json!({
+                "input": { "query": q_for_fetch, "limit": 100, "offset": 0 },
+            }),
+        )
+        .await
+    }));
+    rsx! {
+        match &*page.read_unchecked() {
+            None => rsx! { p { class: "msglist-empty", "Searching…" } },
+            Some(Err(e)) => rsx! { p { class: "msglist-empty", "{e}" } },
+            Some(Ok(MessagePage { messages, total_count, unread_count })) => rsx! {
+                MessageListHeader {
+                    title: format!("Search: {query}"),
+                    shown: messages.len() as u32,
+                    total: *total_count,
+                    unread: *unread_count,
+                }
+                div {
+                    class: "msglist-scroll",
+                    if messages.is_empty() {
+                        p { class: "msglist-empty", "No matches." }
+                    } else {
+                        for m in messages.iter().cloned() {
+                            MessageRowV2 { msg: m, selection, bulk_selected }
+                        }
+                    }
+                }
+            },
         }
     }
 }

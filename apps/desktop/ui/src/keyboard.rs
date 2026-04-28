@@ -37,6 +37,9 @@ pub enum KeyboardCommand {
     Forward,
     /// Show / hide the keyboard cheatsheet overlay.
     ToggleHelp,
+    /// Focus the search bar above the message list. `/` matches
+    /// Gmail; the dispatcher calls `.focus()` on the search input.
+    FocusSearch,
 }
 
 /// Map a `KeyboardEvent.key` value plus the modifier state to a
@@ -61,6 +64,7 @@ pub fn parse(key: &str, ctrl_or_meta: bool) -> Option<KeyboardCommand> {
         "a" => Some(KeyboardCommand::ReplyAll),
         "f" => Some(KeyboardCommand::Forward),
         "?" => Some(KeyboardCommand::ToggleHelp),
+        "/" => Some(KeyboardCommand::FocusSearch),
         _ => None,
     }
 }
@@ -85,13 +89,14 @@ mod tests {
         // we match on the produced glyph, not raw codes.
         assert_eq!(parse("?", false), Some(KeyboardCommand::ToggleHelp));
         assert_eq!(parse("#", false), Some(KeyboardCommand::Delete));
+        assert_eq!(parse("/", false), Some(KeyboardCommand::FocusSearch));
     }
 
     #[test]
     fn ctrl_or_meta_swallows_everything() {
         // Ctrl+C / Cmd+R should reach the OS, not us — even for keys
         // whose unmodified form would be ours.
-        for key in ["c", "e", "r", "a", "f", "Escape", "?", "#"] {
+        for key in ["c", "e", "r", "a", "f", "Escape", "?", "#", "/"] {
             assert_eq!(
                 parse(key, true),
                 None,
