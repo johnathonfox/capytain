@@ -20,8 +20,8 @@ use std::collections::{HashMap, HashSet};
 
 use dioxus::prelude::*;
 use qsl_ipc::{
-    Account, AccountId, Attachment, Draft, DraftBodyKind, DraftId, EmailAddress, Folder, FolderId,
-    MessageHeaders, MessageId, MessagePage, RenderedMessage, SortOrder, SyncEvent,
+    Account, AccountId, Attachment, Contact, Draft, DraftBodyKind, DraftId, EmailAddress, Folder,
+    FolderId, MessageHeaders, MessageId, MessagePage, RenderedMessage, SortOrder, SyncEvent,
 };
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -1429,25 +1429,232 @@ fn ComposeStatusLabel(status: Signal<SaveStatus>) -> Element {
 #[component]
 fn AddressField(label: String, value: Signal<String>, on_change: EventHandler<()>) -> Element {
     let id = format!("compose-{}", label.to_ascii_lowercase());
+
+    // Autocomplete dropdown state. Each `AddressField` instance has
+    // its own — multiple fields don't share a dropdown so opening
+    // To: doesn't squash a Cc: dropdown that's already open.
+    let suggestions: Signal<Vec<Contact>> = use_signal(Vec::new);
+    let highlighted: Signal<usize> = use_signal(|| 0usize);
+    let dropdown_open: Signal<bool> = use_signal(|| false);
+
+    // Re-fetch suggestions whenever the *active segment* (the chunk
+    // after the last comma/semicolon) changes and is at least 2
+    // characters. Below the 2-char threshold the dropdown closes —
+    // surfacing the whole table on a single character is noisy and
+    // the IPC round-trip is wasted.
+    let value_str = value.read().clone();
+    let active = active_segment(&value_str).to_string();
+    use_effect(use_reactive!(|active| {
+        let mut suggestions = suggestions;
+        let mut dropdown_open = dropdown_open;
+        let mut highlighted = highlighted;
+        if active.trim().len() < 2 {
+            suggestions.set(Vec::new());
+            dropdown_open.set(false);
+            highlighted.set(0);
+            return;
+        }
+        wasm_bindgen_futures::spawn_local(async move {
+            let payload = serde_json::json!({ "input": { "prefix": active.trim(), "limit": 8 } });
+            match invoke::<Vec<Contact>>("contacts_query", payload).await {
+                Ok(rows) => {
+                    let any = !rows.is_empty();
+                    suggestions.set(rows);
+                    dropdown_open.set(any);
+                    highlighted.set(0);
+                }
+                Err(e) => {
+                    web_sys_log(&format!("contacts_query: {e}"));
+                    suggestions.set(Vec::new());
+                    dropdown_open.set(false);
+                }
+            }
+        });
+    }));
+
+    let snapshot = suggestions.read().clone();
+    let snapshot_for_keys = snapshot.clone();
+    let is_open = dropdown_open();
+    let active_idx = highlighted();
+
     rsx! {
         div {
-            class: "field-row",
+            class: "field-row field-row-autocomplete",
             label { class: "label", r#for: "{id}", "{label}" }
-            input {
-                id: "{id}",
-                class: "compose-input",
-                r#type: "text",
-                placeholder: "name@example.com, another@example.com",
-                value: "{value.read()}",
-                oninput: {
-                    let mut value = value;
-                    move |evt: Event<FormData>| {
-                        value.set(evt.value());
-                        on_change.call(());
+            div {
+                class: "compose-input-wrap",
+                input {
+                    id: "{id}",
+                    class: "compose-input",
+                    r#type: "text",
+                    placeholder: "name@example.com, another@example.com",
+                    value: "{value.read()}",
+                    autocomplete: "off",
+                    oninput: {
+                        let mut value = value;
+                        move |evt: Event<FormData>| {
+                            value.set(evt.value());
+                            on_change.call(());
+                        }
+                    },
+                    onkeydown: {
+                        let mut value = value;
+                        let on_change_for_keys = on_change;
+                        let suggestions_for_keys = suggestions;
+                        let mut highlighted = highlighted;
+                        let mut dropdown_open = dropdown_open;
+                        move |evt: Event<KeyboardData>| {
+                            if !is_open {
+                                return;
+                            }
+                            let key = evt.key().to_string();
+                            let len = suggestions_for_keys.read().len();
+                            if len == 0 {
+                                return;
+                            }
+                            match key.as_str() {
+                                "ArrowDown" => {
+                                    evt.prevent_default();
+                                    highlighted.set((active_idx + 1) % len);
+                                }
+                                "ArrowUp" => {
+                                    evt.prevent_default();
+                                    highlighted.set(if active_idx == 0 {
+                                        len - 1
+                                    } else {
+                                        active_idx - 1
+                                    });
+                                }
+                                "Enter" | "Tab" => {
+                                    let pick = suggestions_for_keys
+                                        .read()
+                                        .get(active_idx)
+                                        .cloned();
+                                    if let Some(pick) = pick {
+                                        evt.prevent_default();
+                                        let next = replace_active_segment(
+                                            &value.read(),
+                                            &format_contact(&pick),
+                                        );
+                                        value.set(next);
+                                        dropdown_open.set(false);
+                                        on_change_for_keys.call(());
+                                    }
+                                }
+                                "Escape" => {
+                                    evt.prevent_default();
+                                    dropdown_open.set(false);
+                                }
+                                _ => {}
+                            }
+                        }
+                    },
+                    // Closing on blur uses a small delay (gloo
+                    // sleep-then-set) so a click on a dropdown row
+                    // gets a chance to fire its onmousedown before
+                    // the dropdown unmounts. Without the delay the
+                    // input loses focus, the dropdown closes, and
+                    // the click never lands.
+                    onblur: {
+                        let mut dropdown_open = dropdown_open;
+                        move |_| {
+                            wasm_bindgen_futures::spawn_local(async move {
+                                gloo_timers::future::sleep(
+                                    std::time::Duration::from_millis(150),
+                                )
+                                .await;
+                                dropdown_open.set(false);
+                            });
+                        }
+                    },
+                }
+                if is_open && !snapshot.is_empty() {
+                    div {
+                        class: "compose-autocomplete",
+                        for (i, contact) in snapshot.iter().enumerate().collect::<Vec<_>>() {
+                            div {
+                                key: "{contact.address}",
+                                class: if i == active_idx {
+                                    "compose-autocomplete-row active"
+                                } else {
+                                    "compose-autocomplete-row"
+                                },
+                                // `onmousedown` (not `onclick`) so we
+                                // beat the input's onblur — clicking
+                                // a row should pick it, not just
+                                // close the dropdown.
+                                onmousedown: {
+                                    let mut value = value;
+                                    let mut dropdown_open = dropdown_open;
+                                    let on_change = on_change;
+                                    let pick = contact.clone();
+                                    move |evt: Event<MouseData>| {
+                                        evt.prevent_default();
+                                        let next = replace_active_segment(
+                                            &value.read(),
+                                            &format_contact(&pick),
+                                        );
+                                        value.set(next);
+                                        dropdown_open.set(false);
+                                        on_change.call(());
+                                    }
+                                },
+                                if let Some(name) = contact.display_name.as_deref() {
+                                    if !name.is_empty() {
+                                        span {
+                                            class: "compose-autocomplete-name",
+                                            "{name}"
+                                        }
+                                    }
+                                }
+                                span {
+                                    class: "compose-autocomplete-address",
+                                    "{contact.address}"
+                                }
+                            }
+                        }
+                        // Suppress an unused-var warning for the moved snapshot.
+                        // (No-op block: the iterator above borrowed it once.)
+                        {
+                            let _ = &snapshot_for_keys;
+                            rsx! {}
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+/// Slice of `line` that's currently being typed — everything after
+/// the last `,` or `;`. Used to scope autocomplete to the active
+/// address rather than the whole field. Trims leading whitespace
+/// so `"alice@…, bo"` returns `"bo"`, not `" bo"`.
+fn active_segment(line: &str) -> &str {
+    let split_at = line.rfind([',', ';']).map(|i| i + 1).unwrap_or(0);
+    line[split_at..].trim_start()
+}
+
+/// Replace the active segment of `line` with `replacement`, keeping
+/// the leading addresses and the comma. Used when the user picks
+/// a dropdown row.
+fn replace_active_segment(line: &str, replacement: &str) -> String {
+    let split_at = line.rfind([',', ';']).map(|i| i + 1).unwrap_or(0);
+    let prefix = &line[..split_at];
+    // Reattach with a single space after the separator so subsequent
+    // typing produces `addr1, addr2` not `addr1,addr2`.
+    let glue = if prefix.is_empty() { "" } else { " " };
+    format!("{prefix}{glue}{replacement}, ")
+}
+
+/// Format a Contact as the user-facing one-line address form. Uses
+/// `Name <addr>` when a display name is present, just `addr`
+/// otherwise — matches what `format_addrs` produces for hand-typed
+/// entries.
+fn format_contact(c: &Contact) -> String {
+    match c.display_name.as_deref() {
+        Some(name) if !name.is_empty() => format!("{name} <{}>", c.address),
+        _ => c.address.clone(),
     }
 }
 
@@ -2469,7 +2676,6 @@ fn ThreadRow(
                         let member_ids: Vec<MessageId> =
                             members.iter().map(|m| m.id.clone()).collect();
                         let mut bulk_selected = bulk_selected;
-                        let all_checked = all_checked;
                         move |evt: Event<MouseData>| {
                             evt.stop_propagation();
                             bulk_selected.with_mut(|set| {
