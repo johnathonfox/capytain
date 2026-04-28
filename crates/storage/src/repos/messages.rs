@@ -23,11 +23,20 @@ const INSERT: &str = "
         (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
 ";
 
+// `thread_id` is intentionally NOT in the SET clause: it's locally
+// computed by `qsl_sync::threading::attach_to_thread`, never sourced
+// from the IMAP / JMAP wire. Including it here would make every
+// re-sync overwrite the previously-assigned thread with the
+// incoming-header `None`, leaving the row orphaned from its thread
+// even though `attach_to_thread` had correctly assigned it on
+// initial insert. (Caught against a real Gmail account on
+// 2026-04-27: a reply to a self-sent message kept landing with
+// `thread_id = NULL` despite `threads.message_count` correctly
+// counting it — the touch ran, then the next sync wiped the column.)
 const UPDATE: &str = "
     UPDATE messages
        SET account_id = ?2,
            folder_id = ?3,
-           thread_id = ?4,
            rfc822_message_id = ?5,
            subject = ?6,
            from_json = ?7,

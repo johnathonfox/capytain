@@ -22,19 +22,23 @@ mod format;
 mod reader_only;
 #[cfg(target_arch = "wasm32")]
 mod reply;
+#[cfg(target_arch = "wasm32")]
+mod threading;
 
 #[cfg(target_arch = "wasm32")]
 fn main() {
     dioxus::launch(app::App);
 }
 
-// `format` and `reply` are plain `chrono` / IPC-type logic with no
-// wasm-only deps, so keep their tests reachable from `cargo test`
-// on the host.
+// `format`, `reply`, and `threading` are plain `chrono` / IPC-type
+// logic with no wasm-only deps, so keep their tests reachable from
+// `cargo test` on the host.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod format;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod reply;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod threading;
 
 // On non-wasm targets (the default `cargo check` host), the binary is
 // empty. `dx build --platform web` is the only supported way to
