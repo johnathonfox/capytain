@@ -17,5 +17,6 @@ pub mod folders;
 pub mod messages;
 pub mod outbox;
 pub mod remote_content_opt_ins;
+pub mod search;
 pub mod sync_states;
 pub mod threads;

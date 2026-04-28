@@ -1,0 +1,41 @@
+-- SPDX-License-Identifier: Apache-2.0
+--
+-- QSL schema v5. Phase 2 post-Week-21: full-text search index.
+--
+-- Turso 0.5.3 ships an experimental Tantivy-backed FTS feature
+-- (gated on the `fts` cargo feature, opted into via
+-- `crates/storage/Cargo.toml`). Unlike SQLite's FTS5, the index
+-- is created over an existing table — no virtual table, no
+-- separate row mapping, no manual write-side hooks. Inserts,
+-- updates, and deletes on `messages` are auto-mirrored into the
+-- index by the engine.
+--
+-- Indexed columns:
+--   - `subject`              — message subject line.
+--   - `from_json` / `to_json` — JSON arrays of {address, display_name}.
+--     Tokenization (lowercase + punctuation split) means the JSON
+--     scaffolding (`address`, `display_name`) ends up as low-weight
+--     tokens that BM25 scores down to near-zero, while real signal
+--     (alice@example.com → tokens `alice`, `example`, `com`) lands
+--     in the index. Cleaner-than-this would be a denormalized
+--     `searchable_addresses` column populated by the repo on insert,
+--     but for the v0.1 search-MVP slice the JSON shape is enough.
+--   - `snippet`              — body preview the sync engine writes
+--     for every message. Full-body indexing is a follow-up that
+--     swaps the column for an extracted body-text column.
+--
+-- The `fts` feature is documented as experimental — the manual
+-- explicitly notes "no read-your-writes in transaction" and "use
+-- fts_match() instead of WHERE table MATCH 'query'". The repo layer
+-- (`crates/storage/src/repos/search.rs`) accommodates both.
+--
+-- Limitations & forward path:
+--   - No accent-folding tokenizer in 0.5.3 — `default` lowercases
+--     and splits on punctuation, no diacritic removal. Acceptable
+--     for v0.1; revisit when Turso ships a `unicode61`-equivalent.
+--   - The migration applies inside a transaction (per the runner's
+--     contract). DDL is safe; the table is either empty (fresh DB)
+--     or already populated (upgrade), and Turso builds the index
+--     over existing rows when `CREATE INDEX` runs.
+CREATE INDEX IF NOT EXISTS messages_fts_idx ON messages
+USING fts (subject, from_json, to_json, snippet);

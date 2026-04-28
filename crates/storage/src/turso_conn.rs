@@ -36,6 +36,7 @@ impl TursoConn {
     /// Open an in-memory database. Primarily used by tests.
     pub async fn in_memory() -> Result<Self, StorageError> {
         let db = turso::Builder::new_local(":memory:")
+            .experimental_index_method(true)
             .build()
             .await
             .map_err(err_db)?;
@@ -56,6 +57,13 @@ impl TursoConn {
             .to_str()
             .ok_or_else(|| StorageError::Db("db path is not valid UTF-8".into()))?;
         let db = turso::Builder::new_local(path)
+            // `experimental_index_method` opts into the Tantivy-backed
+            // FTS feature shipped behind a runtime flag in Turso 0.5.3.
+            // Migration 0005 creates a `USING fts(...)` index on the
+            // messages table; the engine refuses the DDL without this
+            // toggle. Both `open` and `in_memory` set it so the test
+            // suite (in-memory) and real binaries (file-backed) agree.
+            .experimental_index_method(true)
             .build()
             .await
             .map_err(err_db)?;

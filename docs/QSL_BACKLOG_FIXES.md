@@ -8,6 +8,25 @@ Pre-MCP cleanup pass. Each item is independently mergeable. Order is roughly pri
 - **Partial** — some pieces shipped, gap remains; details under each item.
 - **Done** — verified shipped; nothing to do.
 
+## 0. Runtime verification debt (un-tested shipped features)
+
+Features that landed and visually render correctly but have *not* had
+their action paths exercised end-to-end. Each is a candidate for a
+quick smoke pass before v0.1 cuts.
+
+- **PR-M1 (#81) — multi-select bulk actions.** Checkboxes + bar render;
+  click a checkbox → bar appears with the right count. Still to
+  verify on a real account:
+  - Bulk **Archive** with mixed singletons + threads → all rows leave
+    the current folder; selection clears; sidebar refresh fires.
+  - Bulk **Mark read** / **Mark unread** → unread dots flip and
+    sidebar unread counts update.
+  - Bulk **Delete** → rows go to Trash (Gmail) / disappear (JMAP).
+  - Thread-head checkbox toggles every member atomically (verify by
+    expanding the thread before checking).
+  - Folder switch with rows still checked → checks persist; Clear
+    drops them.
+
 ## 1. Fix charset handling in HTML body rendering
 
 **Status: Done.** Root cause was *not* in `mail-parser` — the parser already honors declared charsets via its built-in charset table. The actual bug was in `crates/renderer/src/servo.rs::percent_encode`: it called `out.push(b as char)` on each byte of `&str::bytes()`, which treats every UTF-8 continuation byte (≥ 0x80) as a Latin-1 codepoint and re-encodes it. A single `®` (UTF-8 0xC2 0xAE) became the two Latin-1 chars `Â®`, which then re-encoded back to UTF-8 as 0xC3 0x82 0xC2 0xAE — Servo decoded those four bytes as UTF-8 and rendered `Â®`. Fix: percent-encode all bytes ≥ 0x80 too.
