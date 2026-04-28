@@ -35,6 +35,13 @@ Items that need you (the maintainer) at the keyboard or the GitHub UI — things
 
 - [ ] **Reader-render multi-fire observation** (`KNOWN_ISSUES.md`). Click the "Render test page in Servo" button once during a normal interactive session; confirm exactly one `reader_render` log line per click. If verified, delete the entry from `KNOWN_ISSUES.md`.
 
+- [ ] **Compose bundle (PR #100).** Five features need eyeball confirmation:
+  - **Cc/Bcc reveal**: open compose, confirm Bcc is hidden behind `+bcc` link; clicking reveals the row; hydrating a draft with Bcc auto-reveals.
+  - **Per-identity signatures**: set distinct signatures on two accounts in `Settings → Compose`; switching the From dropdown lands the right signature on a fresh draft (only when body is empty).
+  - **Undo-send window**: set `Settings → Compose → Undo send` to 5/10/30s; click Send → countdown banner replaces Send button; Esc anywhere cancels and pane stays open; let it expire → message goes out and pane closes.
+  - **Right-click context menu**: right-click a message row → menu appears at cursor with Reply / Reply-all / Forward / Mark read|unread / Archive / Delete / Open-in-window; backdrop or Esc dismisses.
+  - **File attachments**: `+ Attach` opens the OS file picker (`rfd`); chips show filename + humanized size; × removes; send → recipient sees the file with correct MIME type.
+
 ## Investigations (you've raised, I haven't dug)
 
 - [ ] **webkit2gtk CPU usage.** You noted high CPU at idle. Suspects:
@@ -42,6 +49,8 @@ Items that need you (the maintainer) at the keyboard or the GitHub UI — things
   - JS-side ResizeObserver stuck in a layout-thrash loop.
   - Compose draft auto-save (5 s debounce) or a settings resource refresh stuck in a loop.
   - Profiling path: open devtools (`Ctrl+Shift+I`) → Performance tab → record 5 s at idle → flame chart will show the hot stack.
+
+- [ ] **Reader rendering blank on AMD laptop (2026-04-28).** New issue surfaced during release-build smoke on a hybrid AMD+NVIDIA laptop running off the AMD GPU. Symptoms: message-view headers render correctly but body area is blank, with an "unstyled rectangle" visible in the lower-right (likely the offscreen `gtk::DrawingArea` shifted into view but Servo paint is not visible). Diagnostic plan documented in chat: re-run with `RUST_LOG=qsl_desktop=debug,qsl_renderer=debug` and check whether the popup-window reader paints (cuts the search space in half), and whether `LIBGL_ALWAYS_SOFTWARE=0 MESA_LOADER_DRIVER_OVERRIDE=` (bypassing the NVIDIA-tuned workaround) restores rendering on AMD.
 
 ## Deferred (not blocking)
 
