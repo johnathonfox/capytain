@@ -13,7 +13,6 @@ members = [
     "crates/search",
     "crates/auth",
     "crates/ipc",
-    "crates/renderer",
     "crates/telemetry",
     "apps/desktop/src-tauri",
     "apps/desktop/ui",
@@ -51,7 +50,6 @@ directories = "6"
 async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
 qsl-ipc = { path = "crates/ipc", version = "=0.0.0" }
 qsl-mime = { path = "crates/mime", version = "=0.0.0" }
-qsl-renderer = { path = "crates/renderer", version = "=0.0.0", default-features = false }
 dioxus = { version = "=0.7.6" }
 jmap-client = { version = "0.4", default-features = false, features = ["async"] }
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "async-secret-service", "crypto-rust", "tokio"] }
@@ -99,22 +97,6 @@ webbrowser = "1"
 webpki-roots = "1"
 zstd = { version = "0.13", default-features = false }
 
-# Servo + friends — behind the `servo` feature on `qsl-renderer`.
-# servo 0.1.0 (2026-04-13) has no `lts` feature; the crate is versioned 0.1.0
-# and tracks semver. docs/servo-composition.md §8 called verifying the LTS
-# feature name an open question; resolved: there isn't one. Pin `~0.1.0`
-# (compatible updates only) so the half-yearly migration windows envisioned
-# in §8 still apply, via cargo's SemVer caret default on 0.x.
-servo = "0.1"
-raw-window-handle = "0.6"
-dpi = "0.1"
-# Servo's WebView::take_screenshot returns `image::RgbaImage`; the
-# renderer's Day 5 corpus harness uses that type directly. Pinned to
-# `=0.25.10` because Servo 0.1.0 locks `image = 0.25.10` in its own
-# Cargo.lock — keep our resolution on the same version so
-# `image::RgbaImage` is the same type Servo is handing us.
-image = { version = "=0.25.10", default-features = false, features = ["png"] }
-
 # Dev-only: property-testing for the storage layer round-trip suite.
 proptest = "1"
 
@@ -134,11 +116,6 @@ qsl-sync = { path = "crates/sync", version = "=0.0.0" }
 qsl-telemetry = { path = "crates/telemetry", version = "=0.0.0" }
 
 [workspace.lints.rust]
-# `deny` (rather than `forbid`) so narrow, documented `#[allow(unsafe_code)]`
-# escapes are possible in crates that cross FFI boundaries — specifically
-# `apps/desktop/src-tauri/src/linux_gtk.rs`, which extracts raw Wayland /
-# X11 handles from GTK for Servo's `WindowRenderingContext`. Every such
-# allowance must include a SAFETY comment at the unsafe block.
 unsafe_code = "deny"
 
 [workspace.lints.clippy]

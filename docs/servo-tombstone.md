@@ -3,21 +3,26 @@ SPDX-FileCopyrightText: 2026 QSL Contributors
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Servo reader implementation — paused 2026-04-28
+# Servo reader implementation — removed 2026-04-28
 
-> **Status:** the Servo-backed email renderer is **disabled by default**
-> on `main` as of 2026-04-28. The desktop app's Cargo `default` feature
-> set is `[]` (was `["servo"]`); the body is rendered in a
-> `<iframe sandbox="allow-scripts" srcdoc="...">` inside webkit2gtk
-> instead. The Servo code path stays in tree, gated by
-> `#[cfg(feature = "servo")]`, and can be re-enabled with
-> `cargo build -p qsl-desktop --features servo`.
+> **Status:** the Servo-backed email renderer was **removed from the
+> tree** on 2026-04-28 (branch `experiment/webkit-reader`). It was
+> previously feature-flagged off (this doc was originally written for
+> that intermediate state); the follow-up commit dropped the code
+> entirely. The body is rendered in a
+> `<iframe sandbox="allow-scripts" srcdoc="...">` inside webkit2gtk;
+> there is no longer a `servo` Cargo feature, no `qsl-renderer`
+> crate, no `renderer_bridge.rs`, no `linux_gtk.rs`, and no
+> `crates/core/src/renderer.rs` trait. The last commit with the
+> implementation in tree was `28fe8fc`
+> (`experiment(reader): wire popup window to the iframe path too`);
+> use `git log --all --diff-filter=D -- crates/renderer/` to find it.
 >
-> This doc is the consolidation point for *why* we paused, *what
-> shipped before pausing*, and *what would be needed to bring it
-> back*. Granular design and post-spike findings live in
-> [`servo-composition.md`](servo-composition.md); this is the
-> tombstone-and-revival index.
+> This doc is the consolidation point for *why* the implementation
+> was paused and removed, *what shipped before pausing*, and *what
+> would be needed to bring it back*. Granular design and post-spike
+> findings live in [`servo-composition.md`](servo-composition.md);
+> this is the tombstone-and-revival index.
 
 ---
 

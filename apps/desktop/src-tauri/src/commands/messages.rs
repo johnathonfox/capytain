@@ -1046,12 +1046,10 @@ pub struct MessagesOpenInWindowInput {
 /// Dioxus root component reads that global at boot and mounts the
 /// `ReaderOnlyApp` instead of the three-pane shell.
 ///
-/// `reader_render` for the popup's label lazy-installs a fresh
-/// Servo instance on first call (see `commands::reader::reader_render`).
-/// `WindowEvent::CloseRequested` drops the renderer entry and the
-/// `linux_gtk` parent registry entry; the underlying GTK widgets
-/// stay leaked (a few KB each) by design — see
-/// `docs/superpowers/plans/2026-04-27-reader-popup-window.md`.
+/// We pre-fetch the rendered message and inline its JSON as
+/// `window.__QSL_READER_PRELOAD__` so the popup's reader-only
+/// component can mount instantly without a follow-up `messages_get`
+/// round-trip.
 ///
 /// Calling this for an already-open popup focuses the existing
 /// window instead of spawning a duplicate.
@@ -1099,10 +1097,6 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
     // logged but doesn't abort the open: the popup falls back to
     // calling `messages_get` itself when `__QSL_READER_PRELOAD__`
     // is `null`.
-    // We need to reach into `state.servo_renderers` after install to
-    // dispatch the early body render (backlog #12), so re-acquire the
-    // `AppState` from the AppHandle rather than moving the borrowed
-    // `state: State<'_, AppState>` argument into `messages_get`.
     let state_for_render: tauri::State<AppState> = app.state();
     let t_preload_start = std::time::Instant::now();
     // Backlog #11 — peek the single-entry render cache. If the user
@@ -1168,7 +1162,7 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
 
     let title = format!("QSL — {}", input.id.0);
     let t_window_start = std::time::Instant::now();
-    let window =
+    let _window =
         tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("index.html".into()))
             .title(title)
             .inner_size(720.0, 800.0)
@@ -1190,104 +1184,6 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
         ms = t_window_start.elapsed().as_millis() as u64,
         "messages_open_in_window: WebviewWindow built"
     );
-
-    {
-        let app_for_close = app.clone();
-        let label_for_close = label.clone();
-        window.on_window_event(move |event| {
-            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
-                let app = app_for_close.clone();
-                let label = label_for_close.clone();
-                tauri::async_runtime::spawn(async move {
-                    let state: tauri::State<AppState> = app.state();
-                    state.servo_renderers.lock().await.remove(&label);
-                    state.last_reader_size.lock().await.remove(&label);
-                    #[cfg(all(target_os = "linux", feature = "servo"))]
-                    crate::linux_gtk::remove_parent(&label);
-                    tracing::info!(window = %label, "popup reader window closed; renderer dropped");
-                });
-            }
-        });
-    }
-
-    // Servo install must happen on the GTK main thread —
-    // `gtk::Overlay::new()` panics with "GTK may only be used from
-    // the main thread" anywhere else. We're currently on a tokio
-    // worker (every `#[tauri::command] async fn` is), so dispatch
-    // the install via `run_on_main_thread` and await the result so
-    // the renderer is in the per-window registry before this
-    // command returns. The popup's first `reader_render` then
-    // succeeds without racing the install.
-    #[cfg(feature = "servo")]
-    {
-        let t_install_start = std::time::Instant::now();
-        let install_app = app.clone();
-        let install_label = label.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
-        app.run_on_main_thread(move || {
-            let result = (|| -> Result<(), String> {
-                let webview = install_app
-                    .get_webview_window(&install_label)
-                    .ok_or_else(|| "popup window vanished before install".to_string())?;
-                crate::renderer_bridge::install_servo_renderer_for_window(&install_app, &webview)
-                    .map_err(|e| e.to_string())
-            })();
-            let _ = tx.send(result);
-        })
-        .map_err(|e| {
-            qsl_ipc::IpcError::new(
-                qsl_ipc::IpcErrorKind::Internal,
-                format!("dispatch popup Servo install: {e}"),
-            )
-        })?;
-        match rx.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                tracing::warn!(window = %label, error = %e, "messages_open_in_window: Servo install failed");
-            }
-            Err(e) => {
-                tracing::warn!(window = %label, error = %e, "messages_open_in_window: install reply lost");
-            }
-        }
-        tracing::info!(
-            ms = t_install_start.elapsed().as_millis() as u64,
-            "messages_open_in_window: Servo install completed"
-        );
-
-        // Backlog #12 — render the body into the freshly-installed
-        // Servo overlay immediately, while it's still painting into
-        // its install-time off-screen rect. The popup's wasm bundle
-        // hasn't booted yet, so without this step Servo idles for
-        // ~250 ms until Dioxus mounts and the JS-side ResizeObserver
-        // pushes a real position via `reader_set_position`. Painting
-        // the body into the off-screen rect now means that when the
-        // overlay later moves into the visible reader area, the
-        // first frame that becomes visible already has body content.
-        // We need a `RenderedMessage` to compose from — if the
-        // pre-fetch above failed (and `rendered_opt` is `None`),
-        // skip the early render: the popup's Dioxus side will fall
-        // back to its own `messages_get` round-trip and trigger
-        // `reader_render` itself, matching the pre-#12 behavior.
-        if let Some(rendered) = rendered_opt.as_ref() {
-            let html = qsl_core::compose_reader_html(
-                rendered.sanitized_html.as_deref(),
-                rendered.body_text.as_deref(),
-            );
-            let mut guard = state_for_render.servo_renderers.lock().await;
-            if let Some(renderer) = guard.get_mut(&label) {
-                let _handle = renderer.render(&html, qsl_core::RenderPolicy::strict());
-                tracing::info!(
-                    ms = t_install_start.elapsed().as_millis() as u64,
-                    "messages_open_in_window: pre-Dioxus body render dispatched"
-                );
-            } else {
-                tracing::warn!(
-                    window = %label,
-                    "messages_open_in_window: renderer slot empty after install"
-                );
-            }
-        }
-    }
 
     tracing::info!(
         window = %label,

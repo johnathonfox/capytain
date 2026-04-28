@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Build the full HTML document the Servo reader pane renders.
+//! Build the full HTML document the reader pane renders.
 //!
-//! Both the in-process Dioxus UI and the desktop popup-window install
-//! path need to compose this same document — the UI side from the
-//! reactive `RenderedMessage` it just fetched, the desktop side at
-//! Servo install time so the renderer can paint into the GTK overlay
-//! before Dioxus mounts and `reader_set_position` arrives. Keeping
-//! the function here means both paths produce byte-identical markup
-//! and share the placeholder / theming rules in one place.
+//! The Dioxus UI hands this document to a sandboxed
+//! `<iframe srcdoc>` inside the host webview. Both the inline
+//! reader and the popup-window reader use this composer so the
+//! placeholder, theming, and link-forwarder rules live in one
+//! place.
 //!
 //! Inputs are primitive borrowed slices rather than the
 //! `RenderedMessage` struct so this crate doesn't have to depend on
@@ -27,10 +25,8 @@ pub fn compose_reader_html(body_html: Option<&str>, body_text: Option<&str>) -> 
     let body_section = render_body_section(body_html, body_text);
 
     // Headers (subject / from / date / recipients) are rendered by
-    // the Dioxus side as a styled card; Servo's pane is body-only,
-    // so the user sees each piece of info exactly once whether
-    // Servo is reparented next to the webview (Linux) or running
-    // in a separate auxiliary window (macOS / Windows).
+    // the Dioxus side as a styled card; the iframe contains body
+    // markup only so the user sees each piece of info exactly once.
     format!(
         r#"<!DOCTYPE html>
 <html>
@@ -79,32 +75,21 @@ pub fn compose_reader_html(body_html: Option<&str>, body_text: Option<&str>) -> 
 <body>
   <div class="qsl-body">{body_section}</div>
   <script>
-    // Click forwarder. Two render paths consume this document:
-    //
-    //   1. Servo (legacy) — the wrapper is loaded into a Servo WebView
-    //      with `window.parent === window`. Anchor clicks set
-    //      `window.location.href`, which Servo's navigation delegate
-    //      intercepts and routes to `webbrowser::open`. The delegate
-    //      denies the navigation in-page, so the email body stays put.
-    //
-    //   2. webkit2gtk iframe — the wrapper is loaded into a sandboxed
-    //      `<iframe>` inside the host webview. Top-level navigation
-    //      is blocked by the sandbox (no `allow-top-navigation`), so
-    //      `window.location.href` would silently no-op. Instead we
-    //      postMessage the URL to the parent frame, where the Dioxus
-    //      shell forwards it to the host's `open_external_url`
-    //      Tauri command.
+    // Click forwarder. The wrapper loads into a sandboxed
+    // `<iframe>` inside the host webkit2gtk webview. Top-level
+    // navigation is blocked by the sandbox (no `allow-top-navigation`),
+    // so we postMessage the URL up to the parent frame; the Dioxus
+    // shell forwards it to the host's `open_external_url` Tauri
+    // command which validates the scheme and shells out to the OS
+    // default browser.
     document.addEventListener('click', function(e) {{
       var node = e.target;
       while (node && node.nodeName !== 'A') node = node.parentNode;
       if (!node || !node.href) return;
       e.preventDefault();
-      var url = node.href;
-      if (window.parent && window.parent !== window) {{
-        try {{ window.parent.postMessage({{ type: 'qsl-link-click', url: url }}, '*'); }} catch (err) {{}}
-      }} else {{
-        try {{ window.location.href = url; }} catch (err) {{}}
-      }}
+      try {{
+        window.parent.postMessage({{ type: 'qsl-link-click', url: node.href }}, '*');
+      }} catch (err) {{}}
     }}, true);
   </script>
 </body>

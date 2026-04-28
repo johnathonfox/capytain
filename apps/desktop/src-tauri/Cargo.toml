@@ -19,20 +19,6 @@ path = "src/main.rs"
 [build-dependencies]
 tauri-build = { workspace = true }
 
-[features]
-# `servo` controls whether the Servo-backed renderer is linked into
-# the desktop app. Disabled by default on the
-# `experiment/webkit-reader` branch — the email body is rendered in
-# a sandboxed `<iframe srcdoc="...">` inside the existing webkit2gtk
-# webview, dropping the Servo + surfman + GTK-X11 child-window stack
-# entirely. To re-enable Servo for comparison runs, build with
-# `cargo build -p qsl-desktop --features servo` (or flip back to
-# `default = ["servo"]`). The `qsl-renderer` crate's `link_cleaner`
-# module is still always-compiled; only the embedded-Servo half is
-# feature-gated.
-default = []
-servo = ["qsl-renderer/servo"]
-
 [dependencies]
 qsl-auth = { workspace = true }
 qsl-core = { workspace = true }
@@ -50,36 +36,24 @@ serde_json = { workspace = true }
 # any extra capability tokens — the plugin's default permission set
 # includes `notification:default` which `core:default` re-exports.
 tauri-plugin-notification = "2"
-# The workspace-level decl sets `default-features = false`; desktop
-# re-enables renderer's `servo` via its OWN `[features]` table so a
-# `cargo build -p qsl-desktop --no-default-features` cleanly
-# drops Servo (Windows CI path).
-qsl-renderer = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
-# `rustls` is a transitive dep (servo + tokio-rustls + hyper-rustls
-# all pull it in). Once Servo joins the graph both `ring` and
-# `aws-lc-rs` crypto providers end up enabled at the Cargo feature
-# level, so `rustls::crypto::CryptoProvider::install_default()` has
-# to be called explicitly at startup — otherwise Servo's resource
-# manager panics on the first HTTPS resolution. Only the `ring`
-# feature is enabled here: tokio-rustls elsewhere in the workspace
-# already uses ring, so picking it keeps the two halves consistent.
+# rustls is reached via tokio-rustls / hyper-rustls / lettre.
+# `rustls::crypto::CryptoProvider::install_default()` runs once at
+# startup so the rest of the graph picks `ring` consistently.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 directories = { workspace = true }
-dpi = { workspace = true }
-raw-window-handle = { workspace = true }
 serde = { workspace = true }
 # `devtools` feature enables Ctrl+Shift+I in the WebView even on
 # release builds. Phase 0 preview only — strip before going public.
-# `unstable` exposes `tauri::window::WindowBuilder` (plain OS
-# window, no webview) — we use it for the Servo reader pane so the
-# Servo surfman GL context isn't fighting a webkit2gtk GL context
-# on the same Wayland surface; see renderer_bridge.rs and
-# docs/week-6-day-2-notes.md § Wayland.
-tauri = { workspace = true, features = ["devtools", "unstable"] }
+tauri = { workspace = true, features = ["devtools"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
+# `url` parses the URL handed to `open_external_url` so we can run
+# it through `qsl_core::clean_outbound_url` before invoking the
+# OS default browser. Already in the dep graph transitively; declare
+# it here so the import is explicit.
+url = { workspace = true }
 # Used by the `open_external_url` IPC command to launch URLs (clicked
 # in the reader pane's email iframe) in the user's OS default browser.
 webbrowser = { workspace = true }
@@ -87,23 +61,8 @@ webbrowser = { workspace = true }
 # dialog plugin would also work but adds a JS-bridge surface and a
 # capability token; rfd is a single direct dep that exposes the
 # underlying GTK / NSOpenPanel / IFileDialog without ceremony.
-# `gtk3` matches the workspace's existing GTK-3 backed Linux
-# integration (see `linux_gtk.rs`).
 rfd = { version = "0.15", default-features = false, features = ["gtk3", "tokio"] }
 mime_guess = "2"
-
-# Linux-only: the child-widget integration for the Servo reader pane.
-# See `apps/desktop/src-tauri/src/linux_gtk.rs` and
-# `docs/week-6-day-4-gtk-integration.md`. All pulled in transitively
-# by Tauri 2's Linux backend already; listing here promotes them to
-# direct deps so the linux_gtk module can import them without relying
-# on transitive versioning.
-[target.'cfg(target_os = "linux")'.dependencies]
-gdk = "0.18"
-gdkwayland-sys = "0.18"
-gdkx11 = "0.18"
-glib = "0.18"
-gtk = "0.18"
 
 [lints]
 workspace = true

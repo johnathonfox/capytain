@@ -3,11 +3,10 @@
 //! Shared runtime state for the Tauri shell.
 //!
 //! `AppState` owns the long-lived handles every command needs: the
-//! Turso-backed [`qsl_storage::TursoConn`] for persistence, a
-//! per-account cache of live [`MailBackend`] implementations, and
-//! — when the `servo` feature is on and the platform supports it —
-//! the Servo-backed [`EmailRenderer`] attached to a secondary Tauri
-//! window (the reader pane).
+//! Turso-backed [`qsl_storage::TursoConn`] for persistence and a
+//! per-account cache of live [`MailBackend`] implementations. The
+//! reader pane is a sandboxed `<iframe srcdoc>` inside the host
+//! webview, so there's no out-of-process renderer state to track.
 //!
 //! The backend cache is lazily populated — a `MailBackend` is built and
 //! logged in the first time a command actually reaches out to the
@@ -18,7 +17,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use qsl_core::{AccountId, EmailRenderer, MailBackend};
+use qsl_core::{AccountId, MailBackend};
 use qsl_ipc::{MessageId, RenderedMessage};
 use qsl_storage::TursoConn;
 use tokio::sync::{Mutex, Notify};
@@ -56,44 +55,6 @@ pub struct AppState {
     #[allow(dead_code)] // consumed by later commands in week 5 part 2
     pub data_dir: PathBuf,
 
-    /// Servo-backed email renderers, keyed by Tauri window label
-    /// (`"main"`, `"reader-<msg_id>"`, …). Empty when the `servo`
-    /// feature is off; otherwise `"main"` is populated at setup time
-    /// and popup-window labels are populated lazily on first
-    /// `reader_render` for that label. Consumers MUST handle a
-    /// missing key — degrade the reader pane rather than crashing.
-    ///
-    /// Wrapped in `tokio::sync::Mutex` because trait methods on the
-    /// renderer take `&mut self`, so exclusive access is required.
-    pub servo_renderers: Mutex<HashMap<String, Box<dyn EmailRenderer>>>,
-
-    /// Last `(width, height)` we passed into Servo's `renderer.resize`,
-    /// keyed by Tauri window label. `reader_set_position` consults
-    /// this before calling `resize` again — when the dimensions are
-    /// unchanged (the user is dragging the splitter or scrolling and
-    /// only the rect's `(x, y)` shifted) Servo doesn't need to
-    /// re-layout, and skipping the resize avoids the visible reflow
-    /// flicker the reader pane exhibited at every mouse-move during
-    /// window resize.
-    pub last_reader_size: Mutex<HashMap<String, (u32, u32)>>,
-
-    /// Trailing-edge debounce handles for `renderer.resize`, keyed by
-    /// Tauri window label. `reader_set_position` schedules each new
-    /// size into a deferred tokio task and aborts the previous handle
-    /// for the same window — so a fast continuous drag fires a single
-    /// `resize` on the trailing edge instead of cascading Servo
-    /// relayouts at ~60 Hz. `set_position` itself stays unbatched
-    /// (it's cheap) so the GTK overlay tracks the cursor live.
-    ///
-    /// Experimental — the residual reader-pane flicker is partly
-    /// structural (Servo's offscreen surface size lags its viewport
-    /// handle, see `KNOWN_ISSUES.md`). This debounce caps the rate
-    /// at which we *ask* Servo to relayout but doesn't fix the
-    /// surface-vs-viewport mismatch frame; a follow-up pause-paint
-    /// approach would be needed for that.
-    #[allow(dead_code)] // unused on the webkit-iframe branch (Servo-only)
-    pub resize_debounce: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
-
     /// Single-entry cache of the most recently rendered message —
     /// the `RenderedMessage` produced by the last `messages_get` call.
     /// `messages_open_in_window` (popup-reader path) consults this
@@ -126,19 +87,14 @@ pub struct AppState {
 
 impl AppState {
     /// Build an `AppState` given an already-opened database and the
-    /// resolved data directory. The renderer slot starts empty;
-    /// `main::setup` installs the real renderer once the Tauri window
-    /// exists and its raw handle can be queried.
+    /// resolved data directory.
     pub fn new(db: TursoConn, sync_db: TursoConn, data_dir: PathBuf) -> Self {
         Self {
             db: Arc::new(Mutex::new(db)),
             sync_db: Arc::new(Mutex::new(sync_db)),
             backends: Mutex::new(HashMap::new()),
             data_dir,
-            servo_renderers: Mutex::new(HashMap::new()),
-            last_reader_size: Mutex::new(HashMap::new()),
             last_rendered: Mutex::new(None),
-            resize_debounce: Mutex::new(HashMap::new()),
             ui_ready: Arc::new(Notify::new()),
         }
     }

@@ -8,25 +8,21 @@
 //! UI rides in Tauri's webview and calls these commands over the
 //! standard `invoke` bridge.
 //!
-//! # Runtime shape (Phase 0 Week 5–6)
+//! # Runtime shape
 //!
 //! - Tauri owns the event loop and the tokio runtime (via its built-in
 //!   `tauri::async_runtime`).
 //! - On `setup`, we resolve the OS data directory with `directories`,
 //!   open the database, run pending migrations, and hand the handle to
-//!   [`AppState`]. Then — when the `servo` feature is on (default for
-//!   Linux / macOS) — we build the auxiliary reader window and attach
-//!   the Servo-backed `EmailRenderer` to it. That has to happen on the
-//!   main thread, where the Tauri `setup` hook runs.
+//!   [`AppState`]. The reader pane lives inside the host webview as a
+//!   sandboxed `<iframe srcdoc>`, so there's no auxiliary renderer
+//!   process to attach. (See `docs/servo-tombstone.md` for the
+//!   previous Servo-backed reader implementation.)
 
 mod backend_factory;
 mod commands;
 mod imap_idle;
 mod jmap_push;
-#[cfg(all(feature = "servo", target_os = "linux"))]
-mod linux_gtk;
-#[cfg(feature = "servo")]
-mod renderer_bridge;
 mod state;
 mod sync_engine;
 
@@ -49,12 +45,9 @@ fn main() {
     }
 
     // Install a rustls `CryptoProvider` before any TLS traffic starts.
-    // With the `servo` feature on, both `ring` and `aws-lc-rs` end up
-    // in the dep graph (Servo's hyper-rustls and our keyring /
-    // tokio-rustls pull them in respectively); rustls then refuses to
-    // auto-pick and panics at the first HTTPS handshake — see
-    // docs/week-6-day-2-notes.md. Explicitly installing `ring` keeps
-    // the desktop app consistent with the rest of the workspace.
+    // tokio-rustls / hyper-rustls / lettre all reach rustls indirectly;
+    // installing `ring` once at startup avoids the auto-pick panic
+    // when more than one provider feature is enabled in the dep graph.
     if rustls::crypto::ring::default_provider()
         .install_default()
         .is_err()
@@ -63,15 +56,6 @@ fn main() {
         // we don't want to panic on hot-reload or double-init.
         tracing::debug!("rustls CryptoProvider was already installed; continuing");
     }
-
-    // On Linux + NVIDIA proprietary driver + Wayland + KWin (and
-    // plausibly other explicit-sync-advertising compositors), the
-    // first surfman commit tears the Wayland connection with
-    // `wp_linux_drm_syncobj_surface_v1` protocol error 71. Force
-    // Mesa's llvmpipe EGL before Tauri / GTK / Servo touch GL. No-op
-    // on non-Linux. See docs/upstream/surfman-explicit-sync.md.
-    #[cfg(feature = "servo")]
-    qsl_renderer::apply_nvidia_wayland_workaround();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -86,14 +70,6 @@ fn main() {
             let state = tauri::async_runtime::block_on(bootstrap_state())
                 .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             app.manage(state);
-
-            // Phase 2 Week 16 follow-up: install Servo over a
-            // `gtk::Overlay` so it can be positioned over the
-            // Dioxus `.reader-body-fill` slot. The UI pushes
-            // bounding rects via the `reader_set_position` IPC
-            // command on every reader-pane layout change.
-            #[cfg(feature = "servo")]
-            renderer_bridge::install_servo_renderer(app)?;
 
             // Phase 1 Week 10: kick off a background sync of every
             // configured account so the UI sees fresh mail without the
@@ -126,9 +102,6 @@ fn main() {
             commands::drafts::drafts_load,
             commands::drafts::drafts_list,
             commands::drafts::drafts_delete,
-            commands::reader::reader_render,
-            commands::reader::reader_set_position,
-            commands::reader::reader_clear,
             commands::reader::open_external_url,
             commands::contacts::contacts_query,
             commands::accounts::accounts_set_display_name,

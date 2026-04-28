@@ -1,68 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `reader_*` Tauri commands — the reader-pane Servo renderer seam.
+//! Reader-pane Tauri commands.
 //!
-//! Phase 0 Week 6 scope: `reader_render` takes raw HTML from the UI
-//! and hands it to [`qsl_renderer::ServoRenderer`]. The UI is
-//! responsible for composing the HTML (today: format headers + plain
-//! text body into a minimal styled document in `apps/desktop/ui`).
-//! Real sanitization (ammonia strip → adblock pass) arrives in Phase
-//! 1 alongside the remote-content policy; this seam lets the reader
-//! pane light up end-to-end on selection before that work lands.
+//! The reader pane is a sandboxed `<iframe srcdoc>` inside the host
+//! webview, so the rendering itself doesn't need an IPC seam. The
+//! one command that survives is [`open_external_url`]: clicked
+//! anchors inside the iframe `postMessage` their URLs up to the
+//! parent webview, which forwards them here so the Rust side can
+//! validate the scheme, strip tracking params, and shell out to the
+//! OS default browser.
 
-use qsl_core::RenderPolicy;
+use qsl_core::clean_outbound_url;
 use qsl_ipc::IpcResult;
 use serde::Deserialize;
-#[cfg(all(target_os = "linux", feature = "servo"))]
-use tauri::Manager;
-use tauri::State;
-
-use crate::state::AppState;
-
-#[derive(Debug, Deserialize)]
-pub struct ReaderRenderInput {
-    /// Fully-formed HTML document to render in the Servo reader pane.
-    /// Phase 0: composed by the UI from `RenderedMessage` headers +
-    /// plaintext body. Phase 1: replaced with the sanitized HTML
-    /// returned by `messages_get` once ammonia / adblock pipelines
-    /// are live.
-    pub html: String,
-}
-
-/// `reader_render` — hand HTML to the Servo renderer.
-///
-/// # Thread affinity
-///
-/// `qsl_renderer::ServoRenderer` is `Send + Sync` at the type
-/// level, but every Servo `WebView` call has to happen on the thread
-/// that constructed the engine (design doc §6.6). The renderer handles
-/// this internally: each trait-method call marshals onto the Tauri
-/// main thread via the `MainThreadDispatch` we installed at startup.
-/// That makes this command safe to invoke from any Tauri async
-/// worker thread — which is where `#[tauri::command] async fn` runs.
-#[tauri::command]
-pub async fn reader_render(
-    window: tauri::Window,
-    state: State<'_, AppState>,
-    input: ReaderRenderInput,
-) -> IpcResult<()> {
-    let label = window.label().to_string();
-    tracing::debug!(window = %label, bytes = input.html.len(), "reader_render");
-
-    // Both Servo install paths (main-window setup + popup
-    // `messages_open_in_window`) run on the GTK main thread. If a
-    // render lookup misses here, it means the install hasn't landed
-    // yet — log and drop. We do NOT lazy-install here: this command
-    // runs on a tokio worker, and `gtk::Overlay::new()` panics with
-    // "GTK may only be used from the main thread" off-main.
-    let mut guard = state.servo_renderers.lock().await;
-    if let Some(renderer) = guard.get_mut(&label) {
-        let _handle = renderer.render(&input.html, RenderPolicy::strict());
-    } else {
-        tracing::warn!(window = %label, "reader_render: no renderer installed for this window");
-    }
-    Ok(())
-}
+use url::Url;
 
 #[derive(Debug, Deserialize)]
 pub struct OpenExternalUrlInput {
@@ -70,207 +21,54 @@ pub struct OpenExternalUrlInput {
 }
 
 /// `open_external_url` — hand an http(s) / mailto URL to the OS
-/// default browser.
+/// default browser, after stripping tracking params and unwrapping
+/// known redirect services.
 ///
 /// Triggered when the user clicks a link inside the reader pane's
-/// email iframe. The iframe runs a tiny click interceptor that
-/// `postMessage`s the URL to the parent window; the Dioxus app
-/// invokes this command in response. We deliberately allow only
-/// `http`, `https`, and `mailto` schemes — `javascript:`,
-/// `file://`, etc. would be a privilege-escalation hand-off from
-/// untrusted email content to the host OS.
+/// email iframe. We deliberately allow only `http`, `https`, and
+/// `mailto` schemes — `javascript:`, `file://`, etc. would be a
+/// privilege-escalation hand-off from untrusted email content to
+/// the host OS.
 #[tauri::command]
 pub async fn open_external_url(input: OpenExternalUrlInput) -> IpcResult<()> {
-    let url = input.url.trim();
-    let lower = url.to_ascii_lowercase();
+    let raw = input.url.trim();
+    let lower = raw.to_ascii_lowercase();
     let allowed = lower.starts_with("http://")
         || lower.starts_with("https://")
         || lower.starts_with("mailto:");
     if !allowed {
-        tracing::warn!(%url, "open_external_url: rejecting non-http(s)/mailto scheme");
+        tracing::warn!(url = %raw, "open_external_url: rejecting non-http(s)/mailto scheme");
         return Err(qsl_ipc::IpcError::new(
             qsl_ipc::IpcErrorKind::Permission,
-            format!("unsupported URL scheme: {url}"),
+            format!("unsupported URL scheme: {raw}"),
         ));
     }
 
-    if let Err(e) = webbrowser::open(url) {
-        tracing::warn!(%url, error = %e, "open_external_url: webbrowser::open failed");
+    // `mailto:` URLs go straight to the OS handler — the link
+    // cleaner only knows about web-tracker patterns. For http(s)
+    // we parse, clean, and serialize before handing off; on parse
+    // failure we fall back to the raw URL (pathological cases like
+    // a relative URL slipping through still get the OS's own
+    // resolution).
+    let target = if lower.starts_with("mailto:") {
+        raw.to_string()
+    } else {
+        match Url::parse(raw) {
+            Ok(parsed) => clean_outbound_url(parsed).to_string(),
+            Err(e) => {
+                tracing::debug!(url = %raw, error = %e, "open_external_url: url parse failed; passing raw");
+                raw.to_string()
+            }
+        }
+    };
+
+    if let Err(e) = webbrowser::open(&target) {
+        tracing::warn!(url = %target, error = %e, "open_external_url: webbrowser::open failed");
         return Err(qsl_ipc::IpcError::new(
             qsl_ipc::IpcErrorKind::Internal,
             format!("failed to open URL: {e}"),
         ));
     }
-    tracing::info!(%url, "open_external_url");
-    Ok(())
-}
-
-/// `dead_code` allow: on non-Linux / no-Servo builds the consumer
-/// of these fields is `cfg`'d out, but serde still needs to see the
-/// fields to deserialize the IPC payload — the platforms that
-/// don't render Servo also send no `reader_set_position` calls in
-/// practice, but Tauri registers the command unconditionally.
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct ReaderSetPositionInput {
-    /// Bounding rect of the `.reader-body-fill` slot in window-
-    /// relative CSS pixels. CSS rect coordinates can be negative
-    /// during transitions; the Rust side clamps before passing to
-    /// GTK. `f64` because `getBoundingClientRect` returns floats.
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-}
-
-/// `reader_set_position` — push the reader-body element's bounding
-/// rect at GTK so Servo's overlay surface tracks the slot.
-///
-/// Called from the UI's `ResizeObserver` whenever
-/// `.reader-body-fill` changes shape (window resize, splitter drag,
-/// compose pane open/close, etc.). Rust clamps + casts to i32 and
-/// hands off to `LinuxGtkParent::set_position` on the GTK main
-/// thread via Tauri's `run_on_main_thread`.
-///
-/// No-ops on platforms / builds without the Servo install. Returns
-/// `Ok(())` regardless so the UI can fire blindly without branching
-/// on platform.
-#[tauri::command]
-pub async fn reader_set_position(
-    window: tauri::Window,
-    state: tauri::State<'_, AppState>,
-    input: ReaderSetPositionInput,
-) -> IpcResult<()> {
-    let label = window.label().to_string();
-    #[cfg(all(target_os = "linux", feature = "servo"))]
-    {
-        let Some(parent) = crate::linux_gtk::parent(&label) else {
-            tracing::debug!(window = %label, "reader_set_position: GTK parent not registered yet");
-            return Ok(());
-        };
-        let x = input.x.round() as i32;
-        let y = input.y.round() as i32;
-        let w = input.width.round() as i32;
-        let h = input.height.round() as i32;
-        tracing::debug!(window = %label, x, y, w, h, "reader_set_position");
-        let app = window.app_handle().clone();
-        if let Err(e) = app.run_on_main_thread(move || parent.set_position(x, y, w, h)) {
-            tracing::debug!(error = %e, "reader_set_position: GTK dispatch failed (app shutdown?)");
-        }
-
-        // Servo's WebView locks its viewport at the size passed to
-        // `new_linux`. Without this resize the host widget grows but
-        // Servo keeps painting into the original 720x560. The
-        // `EmailRenderer::resize` default impl is a no-op so this is
-        // safe even when Servo isn't installed.
-        //
-        // Skip when the size is unchanged: pure-position pushes
-        // (splitter drag, window-edge move, scroll-induced rect
-        // shift) don't need Servo to re-layout. We still always run
-        // `set_position` above so the GTK overlay tracks (x, y) per-
-        // event.
-        //
-        // For *changed* sizes we defer the `renderer.resize` call by
-        // a short trailing-edge debounce — a fast continuous drag
-        // generates a flurry of distinct sizes at ~60 Hz, and
-        // cascading Servo relayouts at that rate is what caused the
-        // visible reflow flicker per frame. Debouncing fires the
-        // resize once after the drag stabilizes; positioning stays
-        // immediate so the overlay stays under the cursor.
-        if w > 1 && h > 1 {
-            let new_size = (w as u32, h as u32);
-            let mut sizes = state.last_reader_size.lock().await;
-            let unchanged = sizes.get(&label) == Some(&new_size);
-            if !unchanged {
-                sizes.insert(label.clone(), new_size);
-                drop(sizes);
-                schedule_debounced_resize(&app, &label, new_size);
-            }
-        }
-    }
-    #[cfg(not(all(target_os = "linux", feature = "servo")))]
-    {
-        let _ = window;
-        let _ = label;
-        let _ = state;
-        let _ = input;
-    }
-    Ok(())
-}
-
-/// Trailing-edge debounce delay before applying a deferred
-/// `renderer.resize`. ~80 ms is short enough that a stopped drag
-/// feels instant to the user but long enough that a continuous
-/// drag at typical 60-Hz event rates collapses into a single
-/// trailing resize call.
-#[cfg(all(target_os = "linux", feature = "servo"))]
-const RESIZE_DEBOUNCE_MS: u64 = 80;
-
-/// Cancel any pending deferred resize for `label` and schedule a new
-/// one. The deferred task waits `RESIZE_DEBOUNCE_MS` and then asks
-/// Servo to relayout to `size` — unless a newer schedule cancels it
-/// first. Always runs the actual `renderer.resize` call from a
-/// tokio worker (the renderer marshals to the GTK main thread
-/// internally).
-#[cfg(all(target_os = "linux", feature = "servo"))]
-fn schedule_debounced_resize<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    label: &str,
-    size: (u32, u32),
-) {
-    use tauri::Manager;
-    let app_fire = app.clone();
-    let app_swap = app.clone();
-    let label_fire = label.to_string();
-    let label_swap = label.to_string();
-    // Spawn the deferred fire and store its handle. Aborting the
-    // previous handle cancels the in-flight `tokio::time::sleep`
-    // before it elapses; if the previous task was already past the
-    // sleep and inside the resize call, abort is a no-op (the resize
-    // had already been dispatched), which is fine — at most one
-    // extra resize lands in that race.
-    let handle = tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(RESIZE_DEBOUNCE_MS)).await;
-        let state: tauri::State<AppState> = app_fire.state();
-        let mut slot = state.servo_renderers.lock().await;
-        if let Some(renderer) = slot.get_mut(&label_fire) {
-            tracing::debug!(window = %label_fire, w = size.0, h = size.1, "debounced renderer.resize");
-            renderer.resize(::dpi::PhysicalSize::new(size.0, size.1));
-        }
-    });
-    tauri::async_runtime::spawn(async move {
-        let state: tauri::State<AppState> = app_swap.state();
-        let mut pending = state.resize_debounce.lock().await;
-        if let Some(prev) = pending.insert(label_swap, handle) {
-            prev.abort();
-        }
-    });
-}
-
-/// `reader_clear` — move Servo's overlay surface off-screen.
-///
-/// Called when the user deselects a message or opens the Compose
-/// pane: the Dioxus reader pane shows a placeholder ("Select a
-/// message to read") and Servo's surface should be invisible
-/// rather than freezing the previous render in place. Same
-/// no-op-on-other-platforms shape as `reader_set_position`.
-#[tauri::command]
-pub async fn reader_clear(window: tauri::Window) -> IpcResult<()> {
-    let label = window.label().to_string();
-    #[cfg(all(target_os = "linux", feature = "servo"))]
-    {
-        let Some(parent) = crate::linux_gtk::parent(&label) else {
-            return Ok(());
-        };
-        let app = window.app_handle().clone();
-        if let Err(e) = app.run_on_main_thread(move || parent.hide()) {
-            tracing::debug!(error = %e, "reader_clear: dispatch failed (app shutdown?)");
-        }
-    }
-    #[cfg(not(all(target_os = "linux", feature = "servo")))]
-    {
-        let _ = window;
-        let _ = label;
-    }
+    tracing::info!(url = %target, "open_external_url");
     Ok(())
 }

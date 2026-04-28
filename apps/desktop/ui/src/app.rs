@@ -71,90 +71,6 @@ pub(crate) const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
         });
     }
 
-    // Watch `.reader-body-fill`'s bounding rect and push it to the
-    // Rust side over `reader_set_position`. ResizeObserver fires
-    // whenever the element's content-box changes shape (window
-    // resize, splitter drag, compose pane open/close); window resize
-    // alone doesn't change the element's content-box if the column
-    // is `1fr`, so we also listen on `window.resize` to catch
-    // viewport-relative shifts that don't change the element size
-    // but do change its `(x, y)`. Idempotent — repeat calls
-    // tear down the previous observer first.
-    export function startReaderBodyTracker() {
-        if (window.__qslReaderTracker) {
-            window.__qslReaderTracker.dispose();
-        }
-        // rAF-coalesce: ResizeObserver + window.resize fire faster than
-        // we can render. Without this, a continuous splitter drag
-        // floods Tauri with `reader_set_position` calls (60+ Hz), each
-        // calling Servo `resize` and producing visible flicker. With
-        // it, multiple events inside the same frame collapse to a
-        // single push from rAF — the Rust side then dedups by (w, h)
-        // and skips Servo resize when only position changed.
-        let rafScheduled = false;
-        const pushRaw = function() {
-            const el = document.querySelector('.reader-body-fill');
-            if (!el) return;
-            const r = el.getBoundingClientRect();
-            // `getBoundingClientRect` returns CSS pixels; the GTK
-            // overlay positions widgets in device pixels. On
-            // fractional-scaling displays (KDE Wayland especially)
-            // those two coordinate systems differ by
-            // `devicePixelRatio` — multiply now so GTK lands the
-            // surface where the user actually sees the slot.
-            const dpr = window.devicePixelRatio || 1;
-            const x = r.x * dpr;
-            const y = r.y * dpr;
-            const w = r.width * dpr;
-            const h = r.height * dpr;
-            if (w <= 0 || h <= 0) return;
-            window.__TAURI_INTERNALS__
-                .invoke('reader_set_position', {
-                    input: { x: x, y: y, width: w, height: h },
-                })
-                .catch(function(e) { console.warn('reader_set_position:', e); });
-        };
-        const push = function() {
-            if (rafScheduled) return;
-            rafScheduled = true;
-            requestAnimationFrame(function() {
-                rafScheduled = false;
-                pushRaw();
-            });
-        };
-        // Run once now in case the element is already mounted.
-        push();
-        // ResizeObserver is per-element. Use a MutationObserver as a
-        // boot-time safety net for the first paint when the element
-        // doesn't exist yet — it'll start watching as soon as the
-        // node is added.
-        let resizeObs = null;
-        const tryAttach = function() {
-            const el = document.querySelector('.reader-body-fill');
-            if (!el || resizeObs) return;
-            resizeObs = new ResizeObserver(push);
-            resizeObs.observe(el);
-            push();
-        };
-        tryAttach();
-        const mutObs = new MutationObserver(tryAttach);
-        mutObs.observe(document.body, { childList: true, subtree: true });
-        // Window resize: rect's (x, y) can shift even if the element
-        // itself didn't change size (rare, but happens during splitter
-        // drag if the window edge moves).
-        const onResize = function() { push(); };
-        window.addEventListener('resize', onResize);
-
-        window.__qslReaderTracker = {
-            dispose: function() {
-                if (resizeObs) resizeObs.disconnect();
-                mutObs.disconnect();
-                window.removeEventListener('resize', onResize);
-            },
-            push: push,
-        };
-    }
-
     // Returns the popup-window message id, or null when this isn't
     // a popup. The Tauri `messages_open_in_window` command sets
     // `window.__QSL_READER_ID__` via initialization_script before
@@ -173,16 +89,6 @@ pub(crate) const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
         return window.__QSL_READER_PRELOAD__
             ? JSON.stringify(window.__QSL_READER_PRELOAD__)
             : null;
-    }
-
-    // Force one push on demand. Useful right after the user clicks
-    // a different message — Dioxus may have re-laid-out the body
-    // slot and we want Servo's surface re-positioned in the same
-    // animation frame.
-    export function pushReaderBodyRect() {
-        if (window.__qslReaderTracker) {
-            window.__qslReaderTracker.push();
-        }
     }
 
     // Set the `data-theme` attribute on `<html>` so the CSS rules in
@@ -250,12 +156,6 @@ extern "C" {
 
     #[wasm_bindgen(catch, js_name = tauriListen)]
     async fn tauri_listen(event: &str, handler: &js_sys::Function) -> Result<JsValue, JsValue>;
-
-    #[wasm_bindgen(js_name = startReaderBodyTracker)]
-    pub(crate) fn start_reader_body_tracker();
-
-    #[wasm_bindgen(js_name = pushReaderBodyRect)]
-    pub(crate) fn push_reader_body_rect();
 
     #[wasm_bindgen(js_name = setRootTheme)]
     pub(crate) fn set_root_theme(theme: &str);
@@ -498,11 +398,9 @@ fn full_app_shell() -> Element {
         }));
     }
 
-    // (Removed on the webkit-iframe branch: the Servo overlay surface
-    // doesn't exist, so the compose-pane and palette open/close events
-    // no longer need a `reader_clear` IPC nudge. The iframe is part of
-    // the Dioxus DOM tree — z-index handles overlap natively, no GTK
-    // child window is composited on top of the webview.)
+    // The reader iframe is part of the Dioxus DOM tree — z-index
+    // handles overlap natively, so opening Compose / palette doesn't
+    // need to nudge the renderer.
     let _ = palette_visible;
     // Most recent sync_event payload, rendered in the bottom status
     // bar. `None` means we haven't seen any events yet — the bar
@@ -4412,14 +4310,6 @@ fn ReaderPaneV2(
     compose: Signal<Option<ComposeState>>,
 ) -> Element {
     let message_id = selection.read().message.clone();
-
-    // The previous architecture painted via Servo over a transparent
-    // `.reader-body-fill` slot, which required a `reader_clear` IPC
-    // hop on deselection so the previous render didn't freeze under
-    // the "Select a message" placeholder. The webkit-iframe path
-    // doesn't have a separate render surface — the iframe lives or
-    // dies with the `ReaderV2` Dioxus component, so unmount IS the
-    // clear. No use_effect needed.
 
     rsx! {
         section {
