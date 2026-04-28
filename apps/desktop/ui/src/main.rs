@@ -21,6 +21,8 @@ mod format;
 #[cfg(target_arch = "wasm32")]
 mod keyboard;
 #[cfg(target_arch = "wasm32")]
+mod oauth_add;
+#[cfg(target_arch = "wasm32")]
 mod reader_only;
 #[cfg(target_arch = "wasm32")]
 mod reply;
