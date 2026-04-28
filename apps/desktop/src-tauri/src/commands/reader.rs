@@ -161,10 +161,25 @@ pub async fn reader_set_position(
         // Servo keeps painting into the original 720x560. The
         // `EmailRenderer::resize` default impl is a no-op so this is
         // safe even when Servo isn't installed.
+        //
+        // Skip when the size is unchanged: pure-position pushes
+        // (splitter drag, window-edge move, scroll-induced rect
+        // shift) used to call `renderer.resize` on every event, and
+        // each Servo resize triggered a re-layout + repaint —
+        // visible as flicker in the reader pane during any
+        // continuous resize. We still always run `set_position`
+        // above so the GTK overlay tracks (x, y) per-event.
         if w > 1 && h > 1 {
-            let mut slot = state.servo_renderers.lock().await;
-            if let Some(renderer) = slot.get_mut(&label) {
-                renderer.resize(::dpi::PhysicalSize::new(w as u32, h as u32));
+            let new_size = (w as u32, h as u32);
+            let mut sizes = state.last_reader_size.lock().await;
+            let unchanged = sizes.get(&label) == Some(&new_size);
+            if !unchanged {
+                sizes.insert(label.clone(), new_size);
+                drop(sizes);
+                let mut slot = state.servo_renderers.lock().await;
+                if let Some(renderer) = slot.get_mut(&label) {
+                    renderer.resize(::dpi::PhysicalSize::new(new_size.0, new_size.1));
+                }
             }
         }
     }

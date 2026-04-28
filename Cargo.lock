@@ -8163,6 +8163,7 @@ dependencies = [
  "qsl-jmap-client",
  "qsl-mime",
  "qsl-renderer",
+ "qsl-search",
  "qsl-storage",
  "qsl-sync",
  "qsl-telemetry",
@@ -8259,6 +8260,9 @@ dependencies = [
 [[package]]
 name = "qsl-search"
 version = "0.0.0"
+dependencies = [
+ "chrono",
+]
 
 [[package]]
 name = "qsl-smtp-client"
@@ -8280,6 +8284,7 @@ dependencies = [
  "chrono",
  "proptest",
  "qsl-core",
+ "qsl-search",
  "rand 0.9.4",
  "serde",
  "serde_json",

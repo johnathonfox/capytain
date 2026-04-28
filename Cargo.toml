@@ -127,6 +127,7 @@ qsl-auth = { path = "crates/auth", version = "=0.0.0" }
 qsl-core = { path = "crates/core", version = "=0.0.0" }
 qsl-imap-client = { path = "crates/imap-client", version = "=0.0.0" }
 qsl-jmap-client = { path = "crates/jmap-client", version = "=0.0.0" }
+qsl-search = { path = "crates/search", version = "=0.0.0" }
 qsl-smtp-client = { path = "crates/smtp-client", version = "=0.0.0" }
 qsl-storage = { path = "crates/storage", version = "=0.0.0" }
 qsl-sync = { path = "crates/sync", version = "=0.0.0" }

@@ -66,6 +66,16 @@ pub struct AppState {
     /// renderer take `&mut self`, so exclusive access is required.
     pub servo_renderers: Mutex<HashMap<String, Box<dyn EmailRenderer>>>,
 
+    /// Last `(width, height)` we passed into Servo's `renderer.resize`,
+    /// keyed by Tauri window label. `reader_set_position` consults
+    /// this before calling `resize` again — when the dimensions are
+    /// unchanged (the user is dragging the splitter or scrolling and
+    /// only the rect's `(x, y)` shifted) Servo doesn't need to
+    /// re-layout, and skipping the resize avoids the visible reflow
+    /// flicker the reader pane exhibited at every mouse-move during
+    /// window resize.
+    pub last_reader_size: Mutex<HashMap<String, (u32, u32)>>,
+
     /// Fired by the `ui_ready` IPC command once the Dioxus app has
     /// mounted in the webview. The sync engine awaits this (with a
     /// short safety timeout) before its bootstrap pass so the
@@ -88,6 +98,7 @@ impl AppState {
             backends: Mutex::new(HashMap::new()),
             data_dir,
             servo_renderers: Mutex::new(HashMap::new()),
+            last_reader_size: Mutex::new(HashMap::new()),
             ui_ready: Arc::new(Notify::new()),
         }
     }
