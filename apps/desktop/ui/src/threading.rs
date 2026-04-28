@@ -126,12 +126,19 @@ mod tests {
         ];
         let groups = group_by_thread(msgs);
         assert_eq!(groups.len(), 3);
-        for g in &groups {
-            assert!(
-                matches!(g, MessageListItem::Single(_)),
-                "expected all singletons, got {g:?}"
-            );
-        }
+        // Read the inner header so `Single`'s payload field is
+        // exercised on the host-test path. Without this, clippy's
+        // `dead_code` fires under `--all-targets` because `app.rs`
+        // (the only other reader of the field) is `cfg`'d out on
+        // non-wasm builds.
+        let ids: Vec<&str> = groups
+            .iter()
+            .map(|g| match g {
+                MessageListItem::Single(m) => m.id.0.as_str(),
+                MessageListItem::Thread { .. } => panic!("expected only singletons"),
+            })
+            .collect();
+        assert_eq!(ids, vec!["m1", "m2", "m3"]);
     }
 
     #[test]
