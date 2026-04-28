@@ -32,6 +32,16 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 serde-wasm-bindgen = "0.6"
+# Document-level keydown listener (PR-T2 keyboard shortcuts) + the
+# `is_typing_in_field()` active-element check both go through web_sys.
+# Only the four features we actually call into are enabled — the
+# crate's full feature set is enormous.
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "Element",
+    "KeyboardEvent",
+] }
 # Used by the compose pane's 5s auto-save debounce. Pulls only the
 # `futures` feature so we get `gloo_timers::future::sleep` and
 # nothing else on the wasm side.

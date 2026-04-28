@@ -928,3 +928,74 @@ ul {
   font-size: 12px;
   color: #7c8290;
 }
+
+/* Keyboard-shortcut cheatsheet overlay (toggled by `?`). */
+.shortcuts-overlay-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+
+.shortcuts-overlay {
+  background: #1a1f2c;
+  border: 1px solid #2a3242;
+  border-radius: 8px;
+  padding: 22px 28px 18px 28px;
+  min-width: 360px;
+  color: #e6e8eb;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.shortcuts-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 14px 0;
+  color: #e6e8eb;
+  letter-spacing: 0.02em;
+}
+
+.shortcuts-table {
+  width: 100%;
+  font-size: 13px;
+  border-collapse: collapse;
+}
+
+.shortcuts-table td {
+  padding: 4px 0;
+  vertical-align: middle;
+}
+
+.shortcut-key {
+  width: 56px;
+  padding-right: 12px;
+}
+
+.shortcut-key kbd {
+  display: inline-block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  background: #2a3242;
+  color: #e6e8eb;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid #3a4252;
+  min-width: 28px;
+  text-align: center;
+}
+
+.shortcut-label {
+  color: #cfd3da;
+}
+
+.shortcuts-footnote {
+  margin: 14px 0 0 0;
+  font-size: 11px;
+  color: #7c8290;
+}

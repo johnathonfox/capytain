@@ -309,6 +309,7 @@ fn full_app_shell() -> Element {
     let mut sync_tick: SyncTick = use_signal(|| 0u64);
     let mut folder_tokens: FolderTokens = use_signal(HashMap::new);
     let compose: Signal<Option<ComposeState>> = use_signal(|| None);
+    let help_visible: Signal<bool> = use_signal(|| false);
 
     // ComposePane occupies the reader slot when active, so the Servo
     // overlay surface — which paints over `.reader-body-fill` and is
@@ -393,6 +394,41 @@ fn full_app_shell() -> Element {
         });
     });
 
+    // Install the document-level keydown listener once per session.
+    // Dioxus's element-level `onkeydown` only fires when that element
+    // (or a child) has focus, which doesn't cover the "no input
+    // focused, just press `c`" case the Gmail-style scheme assumes.
+    // A document listener catches the keystroke regardless of focus
+    // and `is_typing()` swallows it again for `<input>` / `<textarea>`
+    // / `[contenteditable]`. The closure leaks via `Box::leak` because
+    // the listener lives for the app's lifetime.
+    use_hook(move || {
+        let cb = Closure::<dyn FnMut(JsValue)>::new(move |event_js: JsValue| {
+            let Ok(event) = event_js.dyn_into::<web_sys::KeyboardEvent>() else {
+                return;
+            };
+            if is_typing_in_field() {
+                return;
+            }
+            let key = event.key();
+            let ctrl_or_meta = event.ctrl_key() || event.meta_key();
+            let Some(cmd) = crate::keyboard::parse(&key, ctrl_or_meta) else {
+                return;
+            };
+            event.prevent_default();
+            dispatch_keyboard_command(cmd, selection, compose, sync_tick, help_visible);
+        });
+        if let Some(window) = web_sys::window() {
+            if let Some(document) = window.document() {
+                let func = cb.as_ref().unchecked_ref::<js_sys::Function>();
+                if let Err(e) = document.add_event_listener_with_callback("keydown", func) {
+                    web_sys_log(&format!("keydown listener install failed: {e:?}"));
+                }
+            }
+        }
+        Box::leak(Box::new(cb));
+    });
+
     let onmousemove_shell = move |e: Event<MouseData>| {
         let Some((target, start_x, start_w)) = *drag.read() else {
             return;
@@ -474,6 +510,185 @@ fn full_app_shell() -> Element {
                 div { class: "shell-drag-overlay" }
             }
             StatusBar { status: sync_status }
+            if help_visible() {
+                ShortcutsOverlay { visible: help_visible }
+            }
+        }
+    }
+}
+
+/// Returns `true` when the document's currently-focused element is one
+/// the user is typing into — `<input>`, `<textarea>`, `<select>`, or a
+/// `[contenteditable]` element. Single-letter keyboard shortcuts must
+/// not fire in those cases (otherwise `c` while editing the To: field
+/// would open a new compose). Best-effort: when we can't reach the
+/// document or the active element, default to `false` so the
+/// shortcuts work — never `true` (the safe-against-misfire bias is
+/// to *fire* the shortcut, since the user's intent is "act on this
+/// app," and the shortcut is a no-op when no message is selected).
+fn is_typing_in_field() -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    let Some(document) = window.document() else {
+        return false;
+    };
+    let Some(active) = document.active_element() else {
+        return false;
+    };
+    let tag = active.tag_name();
+    if tag.eq_ignore_ascii_case("INPUT")
+        || tag.eq_ignore_ascii_case("TEXTAREA")
+        || tag.eq_ignore_ascii_case("SELECT")
+    {
+        return true;
+    }
+    matches!(
+        active.get_attribute("contenteditable").as_deref(),
+        Some("true") | Some("")
+    )
+}
+
+/// Turn a [`crate::keyboard::KeyboardCommand`] into actual side effects
+/// against the App-root signals. Pulled out of the listener closure
+/// for readability — the closure can stay tightly scoped to "parse +
+/// guard," and this function owns the per-command dispatch.
+fn dispatch_keyboard_command(
+    cmd: crate::keyboard::KeyboardCommand,
+    mut selection: Signal<Selection>,
+    mut compose: Signal<Option<ComposeState>>,
+    mut sync_tick: SyncTick,
+    mut help_visible: Signal<bool>,
+) {
+    use crate::keyboard::KeyboardCommand;
+
+    match cmd {
+        KeyboardCommand::Compose => {
+            // Empty compose. Default-account resolution happens inside
+            // the compose pane when it can't read `selection.account`,
+            // so we don't need to fetch the account list here.
+            let default_account = selection.read().account.clone();
+            compose.set(Some(ComposeState {
+                default_account,
+                draft_id: None,
+            }));
+        }
+        KeyboardCommand::Cancel => {
+            // Priority: dismiss help first (most modal), then close
+            // compose, then clear the reader's selection. One press
+            // unwinds one layer — matches Gmail / native dialog
+            // behaviour.
+            if *help_visible.read() {
+                help_visible.set(false);
+            } else if compose.read().is_some() {
+                compose.set(None);
+            } else if selection.read().message.is_some() {
+                selection.with_mut(|s| s.message = None);
+            }
+        }
+        KeyboardCommand::ToggleHelp => {
+            let cur = *help_visible.read();
+            help_visible.set(!cur);
+        }
+        KeyboardCommand::Archive => {
+            let Some(id) = selection.read().message.clone() else {
+                return;
+            };
+            spawn(async move {
+                let payload = serde_json::json!({
+                    "input": { "ids": [id.clone()] }
+                });
+                if let Err(e) = invoke::<()>("messages_archive", payload).await {
+                    web_sys_log(&format!("messages_archive: {e}"));
+                    return;
+                }
+                selection.with_mut(|s| s.message = None);
+                sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+            });
+        }
+        KeyboardCommand::Delete => {
+            let Some(id) = selection.read().message.clone() else {
+                return;
+            };
+            spawn(async move {
+                let payload = serde_json::json!({
+                    "input": { "ids": [id.clone()] }
+                });
+                if let Err(e) = invoke::<()>("messages_delete", payload).await {
+                    web_sys_log(&format!("messages_delete: {e}"));
+                    return;
+                }
+                selection.with_mut(|s| s.message = None);
+                sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+            });
+        }
+        KeyboardCommand::Reply | KeyboardCommand::ReplyAll | KeyboardCommand::Forward => {
+            let Some(id) = selection.read().message.clone() else {
+                return;
+            };
+            let kind = match cmd {
+                KeyboardCommand::Reply => ReplyKind::Reply,
+                KeyboardCommand::ReplyAll => ReplyKind::ReplyAll,
+                _ => ReplyKind::Forward,
+            };
+            // Reply / forward need the full RenderedMessage (subject
+            // re-write, quoted body, etc.). Fetch it on demand — adds
+            // ~one IPC round-trip but avoids lifting the reader's
+            // already-rendered message out to a global signal.
+            spawn(async move {
+                let payload = serde_json::json!({
+                    "input": { "id": id.clone(), "force_trusted": false }
+                });
+                match invoke::<RenderedMessage>("messages_get", payload).await {
+                    Ok(rendered) => open_reply(rendered, compose, kind),
+                    Err(e) => web_sys_log(&format!("messages_get for shortcut: {e}")),
+                }
+            });
+        }
+    }
+}
+
+/// Modal cheatsheet shown over the app shell when `?` is pressed.
+/// Closing is via either pressing `?` or `Esc` (both routed through
+/// the keyboard dispatcher) or clicking the backdrop.
+#[component]
+fn ShortcutsOverlay(mut visible: Signal<bool>) -> Element {
+    rsx! {
+        div {
+            class: "shortcuts-overlay-backdrop",
+            onclick: move |_| visible.set(false),
+            div {
+                class: "shortcuts-overlay",
+                onclick: |evt: Event<MouseData>| evt.stop_propagation(),
+                h2 { class: "shortcuts-title", "Keyboard Shortcuts" }
+                table {
+                    class: "shortcuts-table",
+                    tbody {
+                        for (key, label) in [
+                            ("c", "Compose"),
+                            ("e", "Archive selected message"),
+                            ("#", "Delete selected message"),
+                            ("r", "Reply"),
+                            ("a", "Reply all"),
+                            ("f", "Forward"),
+                            ("Esc", "Close compose / clear selection"),
+                            ("?", "Toggle this help"),
+                        ] {
+                            tr {
+                                td {
+                                    class: "shortcut-key",
+                                    kbd { "{key}" }
+                                }
+                                td { class: "shortcut-label", "{label}" }
+                            }
+                        }
+                    }
+                }
+                p {
+                    class: "shortcuts-footnote",
+                    "Shortcuts are ignored while typing in a field."
+                }
+            }
         }
     }
 }
