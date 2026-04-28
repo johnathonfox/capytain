@@ -42,14 +42,26 @@ fn build_dioxus_ui() {
         .join("ui");
 
     // Rebuild the UI when any source / asset / config changes.
-    for path in [
-        ui_dir.join("src"),
-        ui_dir.join("assets"),
+    //
+    // `cargo:rerun-if-changed=DIR` is unreliable in practice: cargo
+    // stats the directory itself, and most filesystems do *not* bump
+    // a directory's mtime when files inside it are modified, only
+    // when entries are added or removed. So a plain edit to
+    // `ui/src/app.rs` would slip past the watcher and the wasm bundle
+    // in `ui/dist/` would stay stale across branch switches. The
+    // workaround is to enumerate every relevant file and emit one
+    // directive per file — cargo follows file mtimes correctly. (See
+    // https://github.com/rust-lang/cargo/issues/2926 for the long-
+    // running tracking issue.)
+    for dir in [ui_dir.join("src"), ui_dir.join("assets")] {
+        emit_rerun_for_files_in(&dir);
+    }
+    for file in [
         ui_dir.join("index.html"),
         ui_dir.join("Dioxus.toml"),
         ui_dir.join("Cargo.toml"),
     ] {
-        println!("cargo:rerun-if-changed={}", path.display());
+        println!("cargo:rerun-if-changed={}", file.display());
     }
 
     // `QSL_SKIP_UI_BUILD=1` lets CI skip the Dioxus step entirely
@@ -149,6 +161,35 @@ fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Walk `dir` recursively and emit one `cargo:rerun-if-changed`
+/// directive per regular file. Workaround for cargo's directory-watch
+/// behaviour (only directory mtime is tracked; intra-directory edits
+/// slip past). Best-effort: I/O errors during the walk just stop the
+/// recursion at that branch — the output is "fewer rerun
+/// directives," not a fatal error, since the cargo build still
+/// proceeds either way.
+fn emit_rerun_for_files_in(dir: &Path) {
+    // Always tell cargo to watch the directory itself so that
+    // additions / removals still trigger a rebuild even if no
+    // existing file's mtime changed.
+    println!("cargo:rerun-if-changed={}", dir.display());
+
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        match entry.file_type() {
+            Ok(ft) if ft.is_dir() => emit_rerun_for_files_in(&path),
+            Ok(ft) if ft.is_file() => {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Ensure `apps/desktop/ui/dist/` exists (empty is fine) so
