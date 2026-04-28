@@ -5,6 +5,29 @@
 //! than inlined into `rsx!`.
 
 use chrono::{DateTime, Datelike, Local, Utc};
+use qsl_ipc::MessageFlags;
+
+/// One-character glyph + CSS class describing the dominant IMAP
+/// state for a message row. Per `docs/ui-direction.md` § Message
+/// list § Flag column glyphs the precedence is:
+///
+///   `D` draft  >  `F` flagged  >  `R` replied  >  `!` unread  >  `·` read
+///
+/// Only one glyph renders per row — the spec calls out that
+/// stacking two glyphs in the 8px column would be unreadable.
+pub fn flag_glyph(flags: &MessageFlags) -> (&'static str, &'static str) {
+    if flags.draft {
+        ("D", "msg-flag-draft")
+    } else if flags.flagged {
+        ("F", "msg-flag-flagged")
+    } else if flags.answered {
+        ("R", "msg-flag-replied")
+    } else if !flags.seen {
+        ("!", "msg-flag-unread")
+    } else {
+        ("·", "msg-flag-read")
+    }
+}
 
 /// Map a raw IMAP / JMAP folder name to its human-friendly display
 /// form for the sidebar and message-list header.
@@ -31,17 +54,18 @@ pub fn display_name_for_folder(name: &str) -> &str {
     }
 }
 
-/// Format a [`DateTime<Utc>`] for the message-list date column,
-/// switching display style by recency relative to `now`:
+/// Format a [`DateTime<Utc>`] for the message-list date column.
+/// Follows `docs/ui-direction.md` § Message list § Timestamp:
 ///
-/// - **Same calendar day** → `HH:MM` in the local timezone.
+/// - **Same calendar day** → `HH:MM` (e.g. `14:23`).
+/// - **Yesterday** → `yest`.
 /// - **Within the last six days** → three-letter weekday (`Mon`, `Tue`).
-/// - **Earlier in the same calendar year** → `Mon D` (`Apr 3`).
-/// - **Older than that** → `YYYY-MM-DD` (`2024-12-08`).
+/// - **Earlier in the same calendar year** → `Mon D` (`Apr 23`).
+/// - **Older than that** → `Mon 'YY` (`Mar '25`).
 ///
-/// `now` is injected for testability — the caller normally passes
-/// `Utc::now()`. All comparisons are done in the local timezone so
-/// the boundary lines up with the user's wall clock, not UTC's.
+/// All comparisons are done in the local timezone so the boundary
+/// lines up with the user's wall clock, not UTC's. `now` is
+/// injected for testability — production callers pass `Utc::now()`.
 pub fn format_relative_date(when: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let when_local = when.with_timezone(&Local);
     let now_local = now.with_timezone(&Local);
@@ -53,7 +77,11 @@ pub fn format_relative_date(when: DateTime<Utc>, now: DateTime<Utc>) -> String {
     // Days between calendar dates (positive when `when` is in the past).
     let diff_days = (now_local.date_naive() - when_local.date_naive()).num_days();
 
-    if (1..7).contains(&diff_days) {
+    if diff_days == 1 {
+        return "yest".to_string();
+    }
+
+    if (2..7).contains(&diff_days) {
         return when_local.format("%a").to_string();
     }
 
@@ -61,7 +89,10 @@ pub fn format_relative_date(when: DateTime<Utc>, now: DateTime<Utc>) -> String {
         return when_local.format("%b %-d").to_string();
     }
 
-    when_local.format("%Y-%m-%d").to_string()
+    // Older: `Mon 'YY` (two-digit year). Apostrophe matches the
+    // ui-direction.md spec example `Mar '25`.
+    let two_digit_year = when_local.year() % 100;
+    format!("{} '{:02}", when_local.format("%b"), two_digit_year)
 }
 
 #[cfg(test)]
@@ -85,9 +116,16 @@ mod tests {
     }
 
     #[test]
-    fn yesterday_through_six_days_ago_uses_weekday() {
+    fn yesterday_renders_as_yest() {
         let now = at(2026, 4, 25, 14, 0);
-        for days in 1..=6 {
+        let when = now - chrono::Duration::days(1);
+        assert_eq!(format_relative_date(when, now), "yest");
+    }
+
+    #[test]
+    fn two_through_six_days_ago_uses_weekday() {
+        let now = at(2026, 4, 25, 14, 0);
+        for days in 2..=6 {
             let when = now - chrono::Duration::days(days);
             let out = format_relative_date(when, now);
             assert_eq!(
@@ -112,10 +150,60 @@ mod tests {
     }
 
     #[test]
-    fn last_year_or_older_uses_iso_date() {
+    fn last_year_or_older_uses_two_digit_year_with_apostrophe() {
         let now = at(2026, 4, 25, 14, 0);
         let when = at(2024, 12, 8, 9, 0);
-        assert_eq!(format_relative_date(when, now), "2024-12-08");
+        assert_eq!(format_relative_date(when, now), "Dec '24");
+        let earlier = at(2025, 3, 15, 9, 0);
+        assert_eq!(format_relative_date(earlier, now), "Mar '25");
+    }
+
+    #[test]
+    fn flag_glyph_precedence_draft_wins() {
+        let f = MessageFlags {
+            draft: true,
+            flagged: true,
+            answered: true,
+            ..Default::default()
+        };
+        assert_eq!(flag_glyph(&f), ("D", "msg-flag-draft"));
+    }
+
+    #[test]
+    fn flag_glyph_flagged_beats_replied_and_unread() {
+        let f = MessageFlags {
+            flagged: true,
+            answered: true,
+            seen: false,
+            ..Default::default()
+        };
+        assert_eq!(flag_glyph(&f), ("F", "msg-flag-flagged"));
+    }
+
+    #[test]
+    fn flag_glyph_replied_beats_unread() {
+        let f = MessageFlags {
+            answered: true,
+            seen: false,
+            ..Default::default()
+        };
+        assert_eq!(flag_glyph(&f), ("R", "msg-flag-replied"));
+    }
+
+    #[test]
+    fn flag_glyph_unread_when_unseen() {
+        // `seen` defaults to false; everything else default → "unread".
+        let f = MessageFlags::default();
+        assert_eq!(flag_glyph(&f), ("!", "msg-flag-unread"));
+    }
+
+    #[test]
+    fn flag_glyph_read_dot_when_seen() {
+        let f = MessageFlags {
+            seen: true,
+            ..Default::default()
+        };
+        assert_eq!(flag_glyph(&f), ("·", "msg-flag-read"));
     }
 
     #[test]
