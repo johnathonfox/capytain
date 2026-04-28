@@ -26,6 +26,23 @@ pub struct Account {
 
     /// When the account was first added locally.
     pub created_at: DateTime<Utc>,
+
+    /// Plain-text signature appended to outbound messages by the
+    /// compose pane. `None` means "no signature". Edited via the
+    /// Settings → Accounts tab.
+    #[serde(default)]
+    pub signature: Option<String>,
+
+    /// Per-account notification gate consumed by the desktop
+    /// notification bridge. `true` (the default for migrated rows)
+    /// fires notifications for incoming messages on this account;
+    /// `false` silences them while leaving sync running.
+    #[serde(default = "default_notify_enabled")]
+    pub notify_enabled: bool,
+}
+
+fn default_notify_enabled() -> bool {
+    true
 }
 
 /// Which `MailBackend` implementation handles an account.
