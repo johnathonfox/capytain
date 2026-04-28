@@ -213,6 +213,17 @@ extern "C" {
 
 /// Thin wrapper around the Tauri `invoke` bridge. Serializes `args` to
 /// JSON, forwards to JS, and deserializes the return value into `T`.
+///
+/// The return path round-trips through `JSON.stringify` +
+/// `serde_json::from_str` instead of `serde_wasm_bindgen::from_value`.
+/// `serde-wasm-bindgen` 0.6 silently dropped `Option<FolderRole>` to
+/// `None` for several externally-tagged unit-variant tag values that the
+/// Rust side ships as plain JSON strings, so the sidebar saw INBOX +
+/// All Mail and lost the rest of the [Gmail]/* mailboxes. Tauri 2's
+/// command results are JSON-encoded over the wire anyway, so the
+/// round-trip is just re-stringifying the value the JS bridge already
+/// `JSON.parse`d — no information loss, and `serde_json` handles
+/// externally-tagged enums correctly.
 pub(crate) async fn invoke<T>(cmd: &str, args: impl Serialize) -> Result<T, String>
 where
     T: for<'de> serde::Deserialize<'de>,
@@ -221,7 +232,11 @@ where
     let js_ret = core_invoke(cmd, js_args)
         .await
         .map_err(|e| format!("{e:?}"))?;
-    serde_wasm_bindgen::from_value(js_ret).map_err(|e| e.to_string())
+    let json = js_sys::JSON::stringify(&js_ret)
+        .map_err(|e| format!("invoke {cmd}: JSON.stringify: {e:?}"))?
+        .as_string()
+        .ok_or_else(|| format!("invoke {cmd}: JSON.stringify returned non-string"))?;
+    serde_json::from_str(&json).map_err(|e| format!("invoke {cmd}: {e}"))
 }
 
 // ---------- Selection state ----------
@@ -2086,14 +2101,19 @@ fn ReaderPaneV2(
             class: "reader-pane",
             match message_id {
                 None => rsx! { div { class: "reader-empty", "Select a message to read." } },
-                Some(id) => rsx! { ReaderV2 { id, sync_tick, compose } },
+                Some(id) => rsx! { ReaderV2 { id, selection, sync_tick, compose } },
             }
         }
     }
 }
 
 #[component]
-fn ReaderV2(id: MessageId, sync_tick: SyncTick, compose: Signal<Option<ComposeState>>) -> Element {
+fn ReaderV2(
+    id: MessageId,
+    selection: Signal<Selection>,
+    sync_tick: SyncTick,
+    compose: Signal<Option<ComposeState>>,
+) -> Element {
     // `force_trusted` is the one-shot "Load images" override. Resets
     // to false when the user navigates to a different message — see
     // the use_effect below — so a previously-loaded message doesn't
@@ -2259,6 +2279,48 @@ fn ReaderV2(id: MessageId, sync_tick: SyncTick, compose: Signal<Option<ComposeSt
                                         move |_| open_reply(r.clone(), compose, ReplyKind::Forward)
                                     },
                                     "Forward"
+                                }
+                                button {
+                                    class: "reader-action reader-action-archive",
+                                    r#type: "button",
+                                    title: "Archive (move to All Mail / Archive)",
+                                    onclick: {
+                                        let id = rendered.headers.id.clone();
+                                        let mut selection = selection;
+                                        let mut sync_tick = sync_tick;
+                                        move |_| {
+                                            let id = id.clone();
+                                            spawn(async move {
+                                                let payload = serde_json::json!({
+                                                    "input": { "ids": [id.clone()] }
+                                                });
+                                                if let Err(e) = invoke::<()>(
+                                                    "messages_archive",
+                                                    payload,
+                                                )
+                                                .await
+                                                {
+                                                    web_sys_log(&format!(
+                                                        "messages_archive: {e}"
+                                                    ));
+                                                    return;
+                                                }
+                                                // Optimistic UI: clear the
+                                                // reader (the archived row
+                                                // disappears from this folder)
+                                                // and bump sync_tick so the
+                                                // sidebar + message list
+                                                // refetch immediately.
+                                                selection.with_mut(|sel| {
+                                                    sel.message = None;
+                                                });
+                                                sync_tick.with_mut(|t| {
+                                                    *t = t.wrapping_add(1)
+                                                });
+                                            });
+                                        }
+                                    },
+                                    "Archive"
                                 }
                             }
                         }

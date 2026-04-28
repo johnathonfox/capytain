@@ -113,6 +113,7 @@ fn main() {
             commands::messages::messages_mark_read,
             commands::messages::messages_flag,
             commands::messages::messages_move,
+            commands::messages::messages_archive,
             commands::messages::messages_delete,
             commands::messages::messages_get,
             commands::messages::messages_trust_sender,

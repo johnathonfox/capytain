@@ -558,6 +558,111 @@ pub async fn messages_move(state: State<'_, AppState>, input: MessagesMoveInput)
 }
 
 #[derive(Debug, Deserialize)]
+pub struct MessagesArchiveInput {
+    pub ids: Vec<MessageId>,
+}
+
+/// `messages_archive` — archive messages by moving them to the
+/// account's archive target. Resolution per account: prefer a folder
+/// with `FolderRole::Archive` (Fastmail-style), then fall back to
+/// `FolderRole::All` (Gmail's `[Gmail]/All Mail` — moving INBOX → All
+/// Mail removes the INBOX label, which is exactly Gmail's archive
+/// semantic).
+///
+/// Local update flips `messages.folder_id`; the existing
+/// `OP_MOVE` outbox op carries the move to the wire. We do not
+/// introduce a separate "archive" op — the move-to-correct-target
+/// abstraction handles both Gmail and Fastmail correctly through the
+/// backend's `move_messages` (UID MOVE on IMAP, `Email/set
+/// mailboxIds` on JMAP).
+#[tauri::command]
+pub async fn messages_archive(
+    state: State<'_, AppState>,
+    input: MessagesArchiveInput,
+) -> IpcResult<()> {
+    let MessagesArchiveInput { ids } = input;
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let db = state.db.lock().await;
+    // Group ids by account so we resolve the archive target once per
+    // account, not per message.
+    let mut by_account: std::collections::HashMap<qsl_core::AccountId, Vec<MessageId>> =
+        std::collections::HashMap::new();
+    for id in &ids {
+        let headers = match messages_repo::get(&*db, id).await {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(id = %id.0, "messages_archive: skipping unknown id: {e}");
+                continue;
+            }
+        };
+        by_account
+            .entry(headers.account_id)
+            .or_default()
+            .push(id.clone());
+    }
+
+    for (account, account_ids) in by_account {
+        let folders = folders_repo::list_by_account(&*db, &account).await?;
+        let target = resolve_archive_target(&folders).ok_or_else(|| {
+            qsl_ipc::IpcError::new(
+                qsl_ipc::IpcErrorKind::NotFound,
+                format!(
+                    "messages_archive: no archive target for account {} (need Archive- or All-role folder)",
+                    account.0
+                ),
+            )
+        })?;
+
+        let mut moved = Vec::with_capacity(account_ids.len());
+        for id in account_ids {
+            // Skip messages already in the archive target.
+            let headers = match messages_repo::get(&*db, &id).await {
+                Ok(h) => h,
+                Err(_) => continue,
+            };
+            if headers.folder_id == target {
+                continue;
+            }
+            if let Err(e) = messages_repo::set_folder(&*db, &id, &target).await {
+                tracing::warn!(id = %id.0, "messages_archive: local update failed: {e}");
+                continue;
+            }
+            moved.push(id);
+        }
+
+        if moved.is_empty() {
+            continue;
+        }
+
+        let payload = serde_json::json!({
+            "ids": moved,
+            "target": target,
+        });
+        outbox_repo::enqueue(&*db, &account, "move_messages", &payload.to_string()).await?;
+    }
+    Ok(())
+}
+
+/// Pick the best archive target for an account given its folder list.
+/// Prefers a folder with `FolderRole::Archive`; falls back to
+/// `FolderRole::All`. Returns `None` if neither is present, in which
+/// case the caller should surface an error rather than guess.
+fn resolve_archive_target(folders: &[qsl_core::Folder]) -> Option<FolderId> {
+    folders
+        .iter()
+        .find(|f| matches!(f.role, Some(FolderRole::Archive)))
+        .or_else(|| {
+            folders
+                .iter()
+                .find(|f| matches!(f.role, Some(FolderRole::All)))
+        })
+        .map(|f| f.id.clone())
+}
+
+#[derive(Debug, Deserialize)]
 pub struct MessagesDeleteInput {
     pub ids: Vec<MessageId>,
 }
@@ -918,6 +1023,12 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
             .title(title)
             .inner_size(720.0, 800.0)
             .initialization_script(&init_script)
+            // Child windows need an explicit opt-in or right-click →
+            // Inspect / Ctrl+Shift+I are silently disabled even though
+            // the host has Tauri's `devtools` feature enabled. Effective
+            // only when the underlying runtime supports it (Tauri's
+            // `devtools` feature is on for this binary in `Cargo.toml`).
+            .devtools(true)
             .build()
             .map_err(|e| {
                 qsl_ipc::IpcError::new(
@@ -1000,4 +1111,58 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
         "messages_open_in_window"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qsl_core::{AccountId, Folder};
+
+    fn folder(id: &str, role: Option<FolderRole>) -> Folder {
+        Folder {
+            id: FolderId(id.into()),
+            account_id: AccountId("acct".into()),
+            name: id.rsplit('/').next().unwrap_or(id).into(),
+            path: id.into(),
+            role,
+            unread_count: 0,
+            total_count: 0,
+            parent: None,
+        }
+    }
+
+    #[test]
+    fn resolve_archive_target_prefers_archive_role() {
+        let folders = vec![
+            folder("INBOX", Some(FolderRole::Inbox)),
+            folder("Archive", Some(FolderRole::Archive)),
+            folder("[Gmail]/All Mail", Some(FolderRole::All)),
+        ];
+        assert_eq!(
+            resolve_archive_target(&folders),
+            Some(FolderId("Archive".into())),
+        );
+    }
+
+    #[test]
+    fn resolve_archive_target_falls_back_to_all() {
+        let folders = vec![
+            folder("INBOX", Some(FolderRole::Inbox)),
+            folder("[Gmail]/All Mail", Some(FolderRole::All)),
+            folder("[Gmail]/Sent Mail", Some(FolderRole::Sent)),
+        ];
+        assert_eq!(
+            resolve_archive_target(&folders),
+            Some(FolderId("[Gmail]/All Mail".into())),
+        );
+    }
+
+    #[test]
+    fn resolve_archive_target_returns_none_without_archive_or_all() {
+        let folders = vec![
+            folder("INBOX", Some(FolderRole::Inbox)),
+            folder("Trash", Some(FolderRole::Trash)),
+        ];
+        assert_eq!(resolve_archive_target(&folders), None);
+    }
 }

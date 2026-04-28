@@ -47,6 +47,5 @@ pub async fn folders_list(
             .await
             .unwrap_or(0);
     }
-    tracing::debug!(account = %input.account.0, count = folders.len(), "folders_list");
     Ok(folders)
 }

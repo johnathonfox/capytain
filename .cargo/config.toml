@@ -8,3 +8,23 @@ xtask = "run --package xtask --"
 
 [net]
 git-fetch-with-cli = true
+
+# `option_env!` evaluated at compile time inside `stylo`'s
+# `STYLE_THREAD_STACK_SIZE_KB` constant. Stylo defaults to 512 KB on the
+# Servo feature; that's enough for typical web pages but not for
+# marketing-newsletter HTML (Mailchimp / Constant Contact / etc.) which
+# routinely nest deep enough — and pile on enough computed-style work in
+# a single selector pass — to blow the style thread stack.
+#
+# A real Mailchimp campaign delivered to a Gmail inbox aborted the
+# process mid-render with `thread 'StyleThread#2' has overflowed its
+# stack` on 2026-04-27. 4 MB per style thread is the same order of
+# magnitude Firefox uses for its parallel style traversal threads; the
+# extra address space cost (≈ a few MB × num_cpus * 0.75) is fine on
+# desktop and saves us from `SIGSEGV` aborts on user-supplied content.
+#
+# `option_env!` means this only takes effect when stylo is recompiled —
+# after editing this file you may need `cargo clean -p stylo` if
+# previous builds linger in `target/`.
+[env]
+SERVO_STYLE_THREAD_STACK_SIZE_KB = "4096"
