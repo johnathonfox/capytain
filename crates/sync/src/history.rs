@@ -14,37 +14,33 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
 use tracing::{debug, info, warn};
 
 use qsl_core::{AccountId, FolderId, HistoryChunk, MailBackend, MessageHeaders};
 use qsl_storage::{
     repos::{
-        contacts, history_sync as history_repo, history_sync::HistorySyncStatus as RepoStatus,
-        messages,
+        history_sync as history_repo, history_sync::HistorySyncStatus as RepoStatus, messages,
     },
     DbConn,
 };
 
-use crate::threading;
 use crate::SyncError;
 
 /// How many headers to ask the backend for per chunk.
 ///
-/// Gmail tolerates ~1k UIDs per FETCH on a fresh OAuth client, but
-/// the per-account bandwidth budget tightens after the first few
-/// hundred MB. 200 hits a sweet spot: enough to amortize the
-/// SELECT and round-trip, small enough that a transient network
-/// blip surrenders less than one chunk of progress, and well below
-/// any throttle thresholds we've seen in practice.
-pub const HISTORY_CHUNK_SIZE: u32 = 200;
+/// 1000 is the upper end of what Gmail's IMAP frontend processes in a
+/// single UID FETCH without splitting the response. Bigger chunks
+/// amortize the per-FETCH SELECT + round-trip overhead, which
+/// dominates at smaller sizes. The trade-off: a transient network
+/// blip surrenders one chunk of progress, but resume picks up the
+/// persisted anchor on the next start.
+pub const HISTORY_CHUNK_SIZE: u32 = 1000;
 
-/// Sleep between chunks to keep the per-account FETCH rate under
-/// Gmail's "Too many simultaneous connections" / temp-block radar.
-/// 200ms × 200 headers = 1k headers/sec sustained, which a fresh OAuth
-/// client never gets blocked on. Errors-with-backoff use a longer
-/// recovery window — see [`THROTTLE_RECOVERY_MS`].
-pub const INTER_CHUNK_DELAY_MS: u64 = 200;
+/// Sleep between chunks. Kept small so the network connection stays
+/// hot; Gmail's "Too many simultaneous connections" gate trips on
+/// concurrent IMAP sessions, not on a single session's request rate.
+/// Errors-with-backoff still use the longer [`THROTTLE_RECOVERY_MS`].
+pub const INTER_CHUNK_DELAY_MS: u64 = 50;
 
 /// Wait this long after a chunk fails before retrying. Compounds with
 /// the [`MAX_CHUNK_RETRIES`] cap below.
@@ -235,38 +231,26 @@ where
     }
 }
 
-/// Persist one chunk of headers — insert if new (running threading
-/// and contacts collection); skip silently if already known.
-/// Returns the count of newly-inserted rows.
+/// Persist one chunk of headers — insert if new, skip silently if
+/// already known. Returns the count of newly-inserted rows.
+///
+/// Threading and contacts upserts are deliberately skipped on the
+/// history-pull hot path: each `attach_to_thread` runs ~3 SQL
+/// queries per message, which makes a 100k-message pull spend most
+/// of its wall-clock time in serial round-trips for archival mail
+/// nobody reads as a thread anyway. The recent-mail threading the
+/// user actually sees comes from the bootstrap + live-sync paths,
+/// both of which still run threading inline. Pulled-history
+/// messages will lack `thread_id` until either a re-sync of the
+/// folder triggers `sync_folder`'s heal-on-update path, or a
+/// future "rethread historical mail" action runs.
 async fn persist_chunk(conn: &dyn DbConn, headers: &[MessageHeaders]) -> Result<u32, SyncError> {
     let mut inserted: u32 = 0;
     for h in headers {
         match messages::find(conn, &h.id).await? {
-            Some(_) => {
-                // Already known — bootstrap or live sync got there
-                // first. Don't re-thread; the existing row's
-                // thread_id is fine.
-                continue;
-            }
+            Some(_) => continue,
             None => {
                 messages::insert(conn, h, None).await?;
-                if let Err(e) = threading::attach_to_thread(conn, h).await {
-                    warn!(message = %h.id.0, "thread assembly failed: {e}");
-                }
-                let now = Utc::now().timestamp();
-                for addr in &h.from {
-                    if let Err(e) = contacts::upsert_seen(
-                        conn,
-                        &addr.address,
-                        addr.display_name.as_deref(),
-                        contacts::Source::Inbound,
-                        now,
-                    )
-                    .await
-                    {
-                        warn!(message = %h.id.0, "contact upsert failed: {e}");
-                    }
-                }
                 inserted = inserted.saturating_add(1);
             }
         }
