@@ -564,24 +564,41 @@ impl MailBackend for ImapBackend {
             .fetch_older_headers(folder, before_anchor, limit)
             .await?;
 
-        // Advance the anchor. When the chunk is non-empty we use the
-        // lowest UID it returned — that's the next call's `before`
-        // boundary, exclusive. When the chunk is empty it usually
-        // means the entire UID range we asked for had been EXPUNGEd
-        // (Gmail does this for spam after 30 days), but messages may
-        // still exist further down. Walk the anchor down by `limit`
-        // so the next chunk picks up the next slice; the loop will
-        // bottom out at 1 either way.
-        let next_anchor = if headers.is_empty() {
-            let before = u32::try_from(before_anchor).unwrap_or(u32::MAX);
-            u64::from(before.saturating_sub(limit).max(1))
-        } else {
+        // Advance the anchor. Two cases:
+        //
+        // 1. Non-empty chunk: use the lowest UID it returned. That's
+        //    the next call's `before` boundary, exclusive.
+        //
+        // 2. Empty chunk: we just walked through `limit` UIDs that
+        //    are all EXPUNGEd (Gmail's INBOX is dense with these on
+        //    accounts that archive aggressively — every message
+        //    moved to All Mail leaves a hole). Naively moving the
+        //    anchor down by `limit` makes the driver burn dozens of
+        //    no-op chunks walking through dead space at ~200ms
+        //    each. Do a single `UID SEARCH UID 1:<before-1>` to
+        //    find the largest existing UID below the anchor and
+        //    jump straight there. One round-trip beats 50.
+        let next_anchor = if !headers.is_empty() {
             headers
                 .iter()
                 .filter_map(|h| MessageRef::decode(&h.id).ok())
                 .map(|r| u64::from(r.uid))
                 .min()
                 .unwrap_or(0)
+        } else {
+            self.next_existing_uid_below(folder, before_anchor)
+                .await
+                .unwrap_or_else(|e| {
+                    // Fall back to the conservative walk on search
+                    // failure — slower, but correct.
+                    warn!(
+                        folder = %folder.0,
+                        before = before_anchor,
+                        "UID SEARCH skip-gap failed: {e}; falling back to slow walk"
+                    );
+                    let before = u32::try_from(before_anchor).unwrap_or(u32::MAX);
+                    u64::from(before.saturating_sub(limit).max(1))
+                })
         };
         Ok(qsl_core::HistoryChunk {
             headers,
@@ -1117,6 +1134,39 @@ impl ImapBackend {
             .await
             .map_err(|e| MailError::Protocol(format!("APPEND {mailbox}: {e}")))?;
         Ok(())
+    }
+
+    /// Find the largest existing UID strictly below `before` in
+    /// `folder`. Used by [`pull_history_chunk`] to skip over runs
+    /// of EXPUNGEd UIDs (Gmail INBOX after heavy archiving) in a
+    /// single round-trip. Returns the next anchor for the pager:
+    /// `max_uid + 1` so the next chunk's range still includes the
+    /// found UID, or `0` when no messages exist below `before`
+    /// (signals tail-exhausted to the driver loop).
+    async fn next_existing_uid_below(
+        &self,
+        folder: &FolderId,
+        before: u64,
+    ) -> Result<u64, MailError> {
+        let upper = u32::try_from(before.saturating_sub(1))
+            .map_err(|_| MailError::Protocol(format!("anchor {before} exceeds IMAP UID range")))?;
+        if upper == 0 {
+            return Ok(0);
+        }
+        let mut session = self.lock_session_alive().await?;
+        session
+            .select(&folder.0)
+            .await
+            .map_err(|e| MailError::Protocol(format!("SELECT {}: {e}", folder.0)))?;
+        let uids = session
+            .uid_search(format!("UID 1:{upper}"))
+            .await
+            .map_err(|e| MailError::Protocol(format!("UID SEARCH UID 1:{upper}: {e}")))?;
+        Ok(uids
+            .into_iter()
+            .max()
+            .map(|u| u64::from(u) + 1)
+            .unwrap_or(0))
     }
 }
 
