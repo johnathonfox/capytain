@@ -14,10 +14,11 @@
 //!    `tx` on every untagged response.
 //!
 //! On any error (connect, auth, IDLE protocol, socket drop), the
-//! task emits [`BackendEvent::ConnectionLost`], sleeps with
-//! exponential backoff (2s → 4s → ... capped at 5 min), and
-//! restarts from step 1. The receiver dropping `tx` ends the task
-//! cleanly.
+//! task emits [`BackendEvent::ConnectionLost`], sleeps with jittered
+//! exponential backoff (2s → 4s → ... capped at 5 min, ±50% per
+//! sleep), and restarts from step 1. The receiver dropping `tx` ends
+//! the task cleanly. Jitter is what keeps a multi-account box from
+//! reconnecting in lock-step after a Wi-Fi flap.
 
 use std::time::Duration;
 
@@ -29,6 +30,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::backend_factory;
+use crate::reconnect::jittered;
 use crate::state::AppState;
 
 /// Initial reconnect delay. Doubles on each failure up to [`MAX_BACKOFF`].
@@ -68,7 +70,7 @@ pub fn spawn_watcher(
                     if tx.send(BackendEvent::ConnectionLost).await.is_err() {
                         return;
                     }
-                    tokio::time::sleep(backoff).await;
+                    tokio::time::sleep(jittered(backoff)).await;
                     backoff = (backoff * 2).min(MAX_BACKOFF);
                     // Successful reconnect resets backoff inside the
                     // loop body via the Ok(()) path on the next

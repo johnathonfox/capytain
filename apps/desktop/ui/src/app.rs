@@ -138,6 +138,16 @@ pub(crate) const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
             window.removeEventListener('message', window.__qslLinkListener);
         }
         const listener = function(e) {
+            // Defence-in-depth: the sandboxed reader iframe is the only
+            // sender we accept here, and `sandbox="allow-scripts"`
+            // (without `allow-same-origin`) gives it the opaque "null"
+            // origin. Anything else posting to this window — a future
+            // child iframe with same-origin, a window.open()'d helper,
+            // a browser extension — should not be able to drive
+            // `open_external_url`. The structural sandbox already
+            // blocks that, but this guard makes the contract explicit
+            // and survives a future change to the iframe shape.
+            if (e.origin !== 'null') return;
             const data = e && e.data;
             if (!data || typeof data !== 'object' || data.type !== 'qsl-link-click') return;
             const url = data.url;
