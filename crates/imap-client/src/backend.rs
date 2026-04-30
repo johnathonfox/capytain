@@ -464,11 +464,13 @@ impl MailBackend for ImapBackend {
                 folder_id: folder.clone(),
                 backend_state: new_state.encode(),
             },
-            // QRESYNC's VANISHED response is the standard route for
-            // server-side deletion detection since the last sync. The
-            // full VANISHED parser lands alongside Phase 1's delta
-            // work; for now we surface an empty `removed` list and
-            // rely on the next full rescan to catch deletions.
+            // Server-side deletion detection runs out-of-band via
+            // `MailBackend::list_known_ids` — `qsl-sync` calls it on
+            // every cycle and diffs against the local cache. This is
+            // backend-agnostic and works on Gmail (which doesn't
+            // advertise QRESYNC) without a VANISHED parser. `removed`
+            // stays empty here because nothing in this fetch path can
+            // observe deletions.
             removed: Vec::new(),
         })
     }
@@ -544,6 +546,45 @@ impl MailBackend for ImapBackend {
             "IMAP fetch_older_headers"
         );
         Ok(messages)
+    }
+
+    async fn list_known_ids(&self, folder: &FolderId) -> Result<Vec<MessageId>, MailError> {
+        let mut session = self.lock_session_alive().await?;
+
+        let mbox = session
+            .select(&folder.0)
+            .await
+            .map_err(|e| MailError::Protocol(format!("SELECT {}: {e}", folder.0)))?;
+        let uidvalidity = mbox
+            .uid_validity
+            .ok_or_else(|| MailError::Protocol("SELECT missing UIDVALIDITY".into()))?;
+
+        // `UID SEARCH ALL` returns every UID currently in the folder.
+        // Cheap relative to a full FETCH: a folder with 50K messages
+        // is ~250 KB on the wire (UID-list responses are uncompressed
+        // ASCII integers). We don't paginate; the reconciliation pass
+        // is happy to walk one set at a time.
+        let uids = session
+            .uid_search("ALL")
+            .await
+            .map_err(|e| MailError::Protocol(format!("UID SEARCH ALL {}: {e}", folder.0)))?;
+
+        debug!(
+            folder = %folder.0,
+            count = uids.len(),
+            "IMAP list_known_ids"
+        );
+        Ok(uids
+            .into_iter()
+            .map(|uid| {
+                MessageRef {
+                    uidvalidity,
+                    uid,
+                    folder: folder.0.clone(),
+                }
+                .encode()
+            })
+            .collect())
     }
 
     async fn fetch_raw_message(&self, id: &MessageId) -> Result<Vec<u8>, MailError> {

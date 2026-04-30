@@ -268,6 +268,32 @@ impl MailBackend for JmapBackend {
         })
     }
 
+    async fn list_known_ids(&self, folder: &FolderId) -> Result<Vec<MessageId>, MailError> {
+        use jmap_client::core::query::Comparator;
+        use jmap_client::email::{self, query::Filter};
+
+        let client = self.client.lock().await;
+        let query = client
+            .email_query(
+                Some(Filter::in_mailbox(folder.0.clone())),
+                None::<Vec<Comparator<email::query::Comparator>>>,
+            )
+            .await
+            .map_err(|e| MailError::Protocol(format!("Email/query {}: {e}", folder.0)))?;
+        let ids: Vec<MessageId> = query
+            .ids()
+            .iter()
+            .map(|s| MessageId(s.to_string()))
+            .collect();
+        drop(client);
+        debug!(
+            folder = %folder.0,
+            count = ids.len(),
+            "JMAP list_known_ids"
+        );
+        Ok(ids)
+    }
+
     async fn fetch_message(&self, id: &MessageId) -> Result<MessageBody, MailError> {
         let client = self.client.lock().await;
         let email = client

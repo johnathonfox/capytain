@@ -127,6 +127,26 @@ pub trait MailBackend: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Enumerate every message id the server currently has in
+    /// `folder`. Used by `qsl-sync` to reconcile server-side
+    /// deletions: after the normal `list_messages` pass, the engine
+    /// diffs this set against the local cache and removes anything
+    /// the server no longer carries.
+    ///
+    /// Independent of the CONDSTORE/QRESYNC paths because Gmail
+    /// doesn't advertise QRESYNC (so VANISHED responses aren't
+    /// available there) and JMAP has no equivalent push-on-delete
+    /// signal — a periodic enumeration is the only universally
+    /// reliable route.
+    ///
+    /// Default impl returns an empty vec so backends that haven't
+    /// wired this up yet stay compilable; the sync engine treats
+    /// "empty live set + non-empty local set" as a backend-incapable
+    /// signal and skips the prune step.
+    async fn list_known_ids(&self, _folder: &FolderId) -> Result<Vec<MessageId>, MailError> {
+        Ok(Vec::new())
+    }
+
     /// Fetch the full body of a single message.
     async fn fetch_message(&self, id: &MessageId) -> Result<MessageBody, MailError>;
 

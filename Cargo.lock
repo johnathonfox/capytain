@@ -5499,6 +5499,7 @@ dependencies = [
  "qsl-storage",
  "qsl-sync",
  "qsl-telemetry",
+ "rand 0.9.4",
  "rfd",
  "rustls",
  "serde",
