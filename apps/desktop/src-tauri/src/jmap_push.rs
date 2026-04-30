@@ -14,9 +14,12 @@
 //!    [`BackendEvent::AccountChanged`] over `tx` on every push.
 //!
 //! On any error (connect, auth, transport, parse), the task emits
-//! [`BackendEvent::ConnectionLost`], sleeps with exponential backoff
-//! (2s → 4s → ... capped at 5 min), and restarts. Receiver dropping
-//! `tx` ends the task cleanly.
+//! [`BackendEvent::ConnectionLost`], sleeps with jittered exponential
+//! backoff (2s → 4s → ... capped at 5 min, ±50% per sleep), and
+//! restarts. Receiver dropping `tx` ends the task cleanly. Jitter
+//! breaks reconnect storms — without it, five accounts that all lose
+//! network at the same instant would all reconnect at the same
+//! instant, hammering provider rate limits in lock-step.
 
 use std::time::Duration;
 
@@ -28,6 +31,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::backend_factory;
+use crate::reconnect::jittered;
 use crate::state::AppState;
 
 const INITIAL_BACKOFF: Duration = Duration::from_secs(2);
@@ -54,7 +58,7 @@ pub fn spawn_watcher(
                     if tx.send(BackendEvent::ConnectionLost).await.is_err() {
                         return;
                     }
-                    tokio::time::sleep(backoff).await;
+                    tokio::time::sleep(jittered(backoff)).await;
                     backoff = (backoff * 2).min(MAX_BACKOFF);
                     if tx.send(BackendEvent::ConnectionRestored).await.is_err() {
                         return;

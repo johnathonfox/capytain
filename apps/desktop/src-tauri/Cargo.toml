@@ -63,6 +63,11 @@ webbrowser = { workspace = true }
 # underlying GTK / NSOpenPanel / IFileDialog without ceremony.
 rfd = { version = "0.15", default-features = false, features = ["gtk3", "tokio"] }
 mime_guess = "2"
+# Used by `imap_idle` and `jmap_push` for jittered exponential backoff
+# on watcher reconnect — avoids reconnect storms when several
+# accounts lose network simultaneously (Wi-Fi flap, NAT eviction).
+# Already in the dep graph via qsl-auth, so no build-cost increase.
+rand = { workspace = true }
 
 [lints]
 workspace = true

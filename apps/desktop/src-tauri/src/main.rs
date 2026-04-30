@@ -23,6 +23,7 @@ mod backend_factory;
 mod commands;
 mod imap_idle;
 mod jmap_push;
+mod reconnect;
 mod state;
 mod sync_engine;
 
