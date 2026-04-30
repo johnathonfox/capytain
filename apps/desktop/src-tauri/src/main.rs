@@ -139,6 +139,7 @@ fn main() {
             commands::accounts::accounts_add_oauth,
             commands::settings::settings_open,
             commands::settings::oauth_add_open,
+            commands::settings::oauth_add_close,
             commands::settings::oauth_providers_list,
             commands::settings::app_settings_get,
             commands::settings::app_settings_set,

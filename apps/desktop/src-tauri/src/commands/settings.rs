@@ -108,6 +108,29 @@ pub async fn oauth_add_open<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> IpcR
     open_view_window(&app, "oauth-add", "QSL — Add account", 520.0, 460.0)
 }
 
+/// `oauth_add_close` — close the add-account window from its own
+/// wasm side after success / cancel.
+///
+/// Why a host-side command instead of JS `window.close()`: on
+/// webkit2gtk, calling `window.close()` from inside a Tauri-owned
+/// webview window often unloads the page (clearing the Dioxus root)
+/// without actually closing the GTK window. The user sees a blank
+/// shell with the title bar still up. Going through Tauri's
+/// `WebviewWindow::close` does the right thing on every platform.
+/// `core:window:allow-close` in `capabilities/default.json` already
+/// covers the equivalent JS path; this command makes the Rust side
+/// the single source of truth.
+#[tauri::command]
+pub async fn oauth_add_close<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> IpcResult<()> {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window("oauth-add") {
+        if let Err(e) = window.close() {
+            tracing::warn!(error = %e, "oauth_add_close: WebviewWindow::close failed");
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 pub struct OauthProviderInfo {
     pub slug: String,
