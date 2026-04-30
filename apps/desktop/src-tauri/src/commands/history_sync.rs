@@ -103,7 +103,12 @@ pub async fn history_sync_start(
         return Ok(());
     }
 
-    // Persist the row, register the canceller, spawn the driver.
+    // Persist the row in `pending`, register the canceller, spawn
+    // the driver. The driver flips to `running` once it actually
+    // acquires the per-account lock and starts fetching, so a job
+    // queued behind another pull on the same account renders as
+    // "Queued" in the UI instead of misleadingly showing "Running ·
+    // 0 fetched".
     {
         let db = state.db.lock().await;
         history_repo::start(
@@ -114,6 +119,7 @@ pub async fn history_sync_start(
             total_estimate.map(|v| v as i64),
         )
         .await?;
+        history_repo::set_status(&*db, &account, &folder, RepoStatus::Pending, None).await?;
     }
 
     let cancel = Arc::new(AtomicBool::new(false));
@@ -240,6 +246,25 @@ fn spawn_driver(
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
 
+        // Mark pending so a row that's queued behind another pull
+        // on the same account renders as "Queued" in the UI rather
+        // than "Running · 0 fetched". Idempotent if already
+        // pending (e.g. from `history_sync_start`), and idempotent
+        // for resumed rows that came in as `running`.
+        {
+            let db = state.sync_db.lock().await;
+            if let Err(e) =
+                history_repo::set_status(&*db, &account, &folder, RepoStatus::Pending, None).await
+            {
+                tracing::warn!(
+                    account = %account.0,
+                    folder = %folder.0,
+                    "history sync: persist pending status failed: {e}"
+                );
+            }
+        }
+        emit_progress_for_account(&app, &state, &account).await;
+
         // Per-account serialization. Each account's cached IMAP
         // session can only run one command at a time; without this
         // gate, two parallel pulls on the same account would
@@ -253,6 +278,26 @@ fn spawn_driver(
                 .clone()
         };
         let _account_guard = account_lock.lock().await;
+
+        // We've acquired the per-account lock — flip status from
+        // `pending` to `running` so the UI shows "Running" instead
+        // of "Queued". `pull_history` will set this again at its
+        // top, but doing it here means the transition is visible
+        // before the first DB call inside the driver fires its
+        // own progress event.
+        {
+            let db = state.sync_db.lock().await;
+            if let Err(e) =
+                history_repo::set_status(&*db, &account, &folder, RepoStatus::Running, None).await
+            {
+                tracing::warn!(
+                    account = %account.0,
+                    folder = %folder.0,
+                    "history sync: persist running status failed: {e}"
+                );
+            }
+        }
+        emit_progress_for_account(&app, &state, &account).await;
 
         // Re-check cancel after the queue wait — the user may have
         // canceled this folder while we were waiting for an earlier

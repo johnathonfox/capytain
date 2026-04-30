@@ -421,7 +421,7 @@ fn HistorySyncStartRow(
 ) -> Element {
     let already: std::collections::HashSet<String> = existing_rows
         .iter()
-        .filter(|r| r.status == "running" || r.status == "completed")
+        .filter(|r| r.status == "running" || r.status == "pending" || r.status == "completed")
         .map(|r| r.folder.0.clone())
         .collect();
 
@@ -522,17 +522,33 @@ fn HistorySyncRowView(row: HistorySyncStatus, mut tick: Signal<u64>) -> Element 
             Some(pct)
         }
     };
-    let status_label = match row.status.as_str() {
-        "running" => "Running",
-        "pending" => "Queued",
-        "completed" => "Complete",
-        "canceled" => "Canceled",
-        "error" => "Error",
-        other => other,
+    // "Completed with zero new messages" means the pager walked the
+    // tail and found nothing not already in storage — the user's
+    // ahead-of-bootstrap mail is fully synced. Render that as
+    // "Already up to date" so the row doesn't read as a 0% pull.
+    let already_up_to_date = row.status == "completed" && row.fetched == 0;
+    let status_label = if already_up_to_date {
+        "Already up to date"
+    } else {
+        match row.status.as_str() {
+            "running" => "Running",
+            "pending" => "Queued",
+            "completed" => "Complete",
+            "canceled" => "Canceled",
+            "error" => "Error",
+            other => other,
+        }
     };
-    let progress_text = match (row.total_estimate, percent) {
-        (Some(total), Some(p)) => format!("{} / ~{} ({:.0}%)", row.fetched, total, p),
-        _ => format!("{} fetched", row.fetched),
+    // Hide the "0 / ~N (0%)" line for the up-to-date case (the
+    // status label already conveys everything) and the queued case
+    // (no fetch has happened yet, so the percentage is meaningless).
+    let progress_text = if already_up_to_date || row.status == "pending" {
+        String::new()
+    } else {
+        match (row.total_estimate, percent) {
+            (Some(total), Some(p)) => format!("{} / ~{} ({:.0}%)", row.fetched, total, p),
+            _ => format!("{} fetched", row.fetched),
+        }
     };
 
     let acct_for_actions = row.account.clone();
@@ -546,17 +562,23 @@ fn HistorySyncRowView(row: HistorySyncStatus, mut tick: Signal<u64>) -> Element 
             div {
                 class: "settings-history-sync-row-info",
                 div { class: "settings-history-sync-row-folder", "{row.folder_label}" }
-                div { class: "settings-history-sync-row-status", "{status_label} · {progress_text}" }
+                if progress_text.is_empty() {
+                    div { class: "settings-history-sync-row-status", "{status_label}" }
+                } else {
+                    div { class: "settings-history-sync-row-status", "{status_label} · {progress_text}" }
+                }
                 if let Some(err) = &row.last_error {
                     div { class: "settings-history-sync-row-error", "{err}" }
                 }
             }
             if let Some(p) = percent {
-                div {
-                    class: "settings-history-sync-progress",
+                if !already_up_to_date {
                     div {
-                        class: "settings-history-sync-progress-fill",
-                        style: "width: {p}%;",
+                        class: "settings-history-sync-progress",
+                        div {
+                            class: "settings-history-sync-progress-fill",
+                            style: "width: {p}%;",
+                        }
                     }
                 }
             }
