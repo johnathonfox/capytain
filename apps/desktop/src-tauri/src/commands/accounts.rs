@@ -16,10 +16,19 @@ use qsl_ipc::{Account, IpcResult};
 use qsl_storage::repos::accounts as accounts_repo;
 use qsl_storage::BlobStore;
 use serde::Deserialize;
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::state::AppState;
 use crate::sync_engine;
+
+/// Tauri event fired whenever the set of configured accounts changes
+/// (add succeeds, remove). Carries no payload — listeners just refetch
+/// `accounts_list`. Used by the main window's sidebar + topbar and
+/// the Settings → Accounts panel so the UI doesn't lag behind a
+/// mutation done from another window. Defined here rather than in
+/// `qsl-ipc` because it's a UI-side coordination signal, not part of
+/// the public IPC surface other crates depend on.
+pub const ACCOUNTS_EVENT: &str = "accounts_changed";
 
 /// `accounts_list` — return every configured account, ordered by
 /// `created_at`. Called by the sidebar on window open and by the
@@ -202,6 +211,10 @@ pub async fn accounts_add_oauth(
         sync_engine::sync_one_account(&app_for_sync, &blobs, &account_id_for_sync).await;
     });
 
+    if let Err(e) = app.emit(ACCOUNTS_EVENT, ()) {
+        tracing::warn!("accounts_add_oauth: emit accounts_changed failed: {e}");
+    }
+
     tracing::info!(
         account = %account.id.0,
         scopes = outcome.granted_scopes.len(),
@@ -229,9 +242,12 @@ pub struct AccountsRemoveInput {
 /// `accounts_remove` — delete an account row. Schema-level cascades
 /// take care of folders / messages / threads / outbox / contacts;
 /// the in-memory `state.backends` cache is also purged so a
-/// re-added-immediately account doesn't hit the stale handle.
+/// re-added-immediately account doesn't hit the stale handle. Fires
+/// `ACCOUNTS_EVENT` so the main window's sidebar + topbar refetch
+/// immediately rather than waiting for the user to manually refresh.
 #[tauri::command]
 pub async fn accounts_remove(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     input: AccountsRemoveInput,
 ) -> IpcResult<()> {
@@ -239,6 +255,9 @@ pub async fn accounts_remove(
     accounts_repo::delete(&*db, &input.id).await?;
     drop(db);
     state.backends.lock().await.remove(&input.id);
+    if let Err(e) = app.emit(ACCOUNTS_EVENT, ()) {
+        tracing::warn!("accounts_remove: emit accounts_changed failed: {e}");
+    }
     tracing::info!(account = %input.id.0, "accounts_remove");
     Ok(())
 }
