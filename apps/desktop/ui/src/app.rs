@@ -481,6 +481,12 @@ fn full_app_shell() -> Element {
     // shows "Initializing…" / "Syncing…" until the first event lands.
     let mut sync_status: Signal<SyncStatus> = use_signal(|| SyncStatus::Initializing);
 
+    // In-flight history-sync, kept separate from `sync_status` so a
+    // FolderSynced cycle arriving mid-pull doesn't blow away the
+    // progress line. Cleared when the pull terminates (completed /
+    // canceled / error) — see `HistoryActivity::from_event`.
+    let mut history_activity: Signal<Option<HistoryActivity>> = use_signal(|| None);
+
     // Pane widths in CSS pixels. Defaults match the original
     // 200/280/rest layout. Drag handlers below mutate these.
     let mut sidebar_w = use_signal(|| 240u32);
@@ -518,6 +524,31 @@ fn full_app_shell() -> Element {
                 }
                 if let Some(s) = SyncStatus::from_event(&evt) {
                     sync_status.set(s);
+                }
+                if let Some(update) = HistoryActivity::from_event(&evt) {
+                    match update {
+                        Some(activity) => history_activity.set(Some(activity)),
+                        None => {
+                            // Terminal status: only clear the bar
+                            // when this event matches the activity
+                            // currently displayed. A different folder
+                            // finishing while INBOX is still pulling
+                            // would otherwise wipe the running line.
+                            if let SyncEvent::HistorySyncProgress {
+                                account, folder, ..
+                            } = &evt
+                            {
+                                let cur_matches = history_activity
+                                    .peek()
+                                    .as_ref()
+                                    .map(|a| a.account == *account && a.folder_id == *folder)
+                                    .unwrap_or(false);
+                                if cur_matches {
+                                    history_activity.set(None);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -699,7 +730,7 @@ fn full_app_shell() -> Element {
             if dragging {
                 div { class: "shell-drag-overlay" }
             }
-            StatusBar { status: sync_status }
+            StatusBar { status: sync_status, history: history_activity }
             if help_visible() {
                 ShortcutsOverlay { visible: help_visible }
             }
@@ -1660,9 +1691,67 @@ impl SyncStatus {
                 folder: short_folder_label(&folder.0),
                 error: error.clone(),
             }),
-            // HistorySyncProgress doesn't belong in the bottom status
-            // bar — the Settings panel renders its own progress UI.
+            // History-sync progress is surfaced through the dedicated
+            // `history_activity` signal so it can preempt the regular
+            // folder-sync line in the status bar without losing it.
             SyncEvent::HistorySyncProgress { .. } => None,
+        }
+    }
+}
+
+/// In-flight history-sync surfaced in the bottom status bar. Lives in
+/// its own signal (not folded into [`SyncStatus`]) so a folder-sync
+/// cycle landing while a history pull is running doesn't overwrite
+/// the progress line — the bar overlays history on top while the pull
+/// is active and falls back to the regular sync status when it ends.
+///
+/// Multi-folder edge case: only the most recently touched (account,
+/// folder) is tracked. The driver runs at most one active pull per
+/// account (per `history_account_locks`), so for the dominant
+/// single-account user this is exactly one row at a time. Multi-account
+/// last-write-wins is acceptable for an indicator — the Settings panel
+/// is the source of truth for full per-row state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryActivity {
+    pub account: AccountId,
+    pub folder_id: FolderId,
+    /// Already short-labeled for display (e.g. `INBOX`).
+    pub folder_label: String,
+    pub fetched: u32,
+    pub total_estimate: Option<u32>,
+}
+
+impl HistoryActivity {
+    /// Translate a `HistorySyncProgress` into a status-bar update.
+    /// `Some(Some(_))` = show this activity, `Some(None)` = clear if
+    /// the currently-shown activity matches this (account, folder),
+    /// `None` = ignore (status doesn't affect the bar — e.g. pending
+    /// rows are queued and don't represent active work).
+    fn from_event(evt: &SyncEvent) -> Option<Option<Self>> {
+        let SyncEvent::HistorySyncProgress {
+            account,
+            folder,
+            status,
+            fetched,
+            total_estimate,
+            ..
+        } = evt
+        else {
+            return None;
+        };
+        match status.as_str() {
+            "running" | "in-flight" => Some(Some(HistoryActivity {
+                account: account.clone(),
+                folder_id: folder.clone(),
+                folder_label: short_folder_label(&folder.0),
+                fetched: *fetched,
+                total_estimate: *total_estimate,
+            })),
+            "completed" | "canceled" | "error" => Some(None),
+            // `pending` rows are queued behind the active pull. Don't
+            // surface them in the status bar — it would race with the
+            // running row's progress line on multi-folder kicks.
+            _ => None,
         }
     }
 }
@@ -1797,32 +1886,51 @@ fn TopBar(account_filter: Signal<Option<AccountId>>, mut palette_visible: Signal
 }
 
 #[component]
-fn StatusBar(status: Signal<SyncStatus>) -> Element {
+fn StatusBar(status: Signal<SyncStatus>, history: Signal<Option<HistoryActivity>>) -> Element {
+    let history_snapshot = history.read().clone();
     let snapshot = status.read().clone();
-    let (dot_class, label) = match &snapshot {
-        SyncStatus::Initializing => ("status-dot working", "Initializing…".to_string()),
-        SyncStatus::Synced {
-            folder,
-            added,
-            updated,
-            live,
-        } => {
-            let prefix = if *live { "Synced" } else { "Loaded" };
-            let counts = if *added == 0 && *updated == 0 {
-                String::new()
-            } else if *updated == 0 {
-                format!(" · {added} new")
-            } else if *added == 0 {
-                format!(" · {updated} updated")
-            } else {
-                format!(" · {added} new · {updated} updated")
-            };
-            ("status-dot ok", format!("{prefix} {folder}{counts}"))
+    // History-sync preempts the regular folder-sync line while a pull
+    // is active — it's the long-running, user-initiated operation the
+    // status bar should foreground. The folder line resumes when the
+    // pull terminates.
+    let (dot_class, label) = if let Some(activity) = &history_snapshot {
+        let detail = match (activity.fetched, activity.total_estimate) {
+            (fetched, Some(total)) if total > 0 => {
+                let pct = (fetched as f64 / total as f64 * 100.0).clamp(0.0, 100.0);
+                format!("{fetched} / ~{total} ({pct:.0}%)")
+            }
+            (fetched, _) => format!("{fetched} fetched"),
+        };
+        (
+            "status-dot working",
+            format!("Pulling history · {} · {detail}", activity.folder_label),
+        )
+    } else {
+        match &snapshot {
+            SyncStatus::Initializing => ("status-dot working", "Initializing…".to_string()),
+            SyncStatus::Synced {
+                folder,
+                added,
+                updated,
+                live,
+            } => {
+                let prefix = if *live { "Synced" } else { "Loaded" };
+                let counts = if *added == 0 && *updated == 0 {
+                    String::new()
+                } else if *updated == 0 {
+                    format!(" · {added} new")
+                } else if *added == 0 {
+                    format!(" · {updated} updated")
+                } else {
+                    format!(" · {added} new · {updated} updated")
+                };
+                ("status-dot ok", format!("{prefix} {folder}{counts}"))
+            }
+            SyncStatus::Failed { folder, error } => (
+                "status-dot error",
+                format!("Sync failed: {folder} — {error}"),
+            ),
         }
-        SyncStatus::Failed { folder, error } => (
-            "status-dot error",
-            format!("Sync failed: {folder} — {error}"),
-        ),
     };
 
     rsx! {
