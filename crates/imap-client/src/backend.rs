@@ -8,6 +8,7 @@
 //! mutex, runs its command sequence, unlocks.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_imap::types::Fetch;
 use async_imap::{Client, Session};
@@ -15,9 +16,28 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use tokio_rustls::client::TlsStream;
 use tracing::{debug, info, warn};
+
+/// Connection-freshness window. If no command has run on the cached
+/// session for this long, the next acquire issues a `NOOP` first to
+/// confirm the socket is still alive. On NOOP failure the backend
+/// transparently reconnects in place via `dial_session` using the
+/// stored credentials.
+///
+/// 5 minutes is well under typical NAT idle-eviction (15-30 min on
+/// most home routers) and well over the cost of a NOOP round-trip
+/// (~50 ms) so the heartbeat doesn't add visible latency to active
+/// use. After laptop sleep / Wi-Fi flap / VPN reconnect, the next
+/// command pays one NOOP probe and either continues on the same
+/// socket or reconnects without surfacing a mid-session error.
+const STALE_THRESHOLD: Duration = Duration::from_secs(5 * 60);
+
+/// Default IMAPS port, captured on the backend so the self-heal
+/// reconnect can reach the same endpoint without rethreading it
+/// through every call site.
+const IMAPS_PORT: u16 = 993;
 
 use qsl_core::{
     AccountId, AttachmentRef, BackendKind, EmailAddress, Folder, FolderId, FolderRole, MailBackend,
@@ -38,6 +58,14 @@ pub type StreamT = TlsStream<TcpStream>;
 /// IDLE required at connect.
 pub struct ImapBackend {
     session: Mutex<Session<StreamT>>,
+    /// Last successful command boundary. Read by `lock_session_alive`
+    /// to decide whether to issue a `NOOP` heartbeat before handing
+    /// the session out, written after every successful acquire.
+    /// Separate mutex from `session` so the activity update is brief
+    /// and doesn't extend the session-lock window — both locks are
+    /// taken in the same order (`session` first) at every call site,
+    /// so there's no deadlock risk.
+    last_activity: Mutex<Instant>,
     account: AccountId,
     host: Arc<str>,
     /// True when the server advertised `X-GM-EXT-1`, Gmail's extension
@@ -56,7 +84,11 @@ pub struct ImapBackend {
     /// submission burst as long as it hasn't expired in the interim.
     /// If lettre returns an auth error, the outbox drain will retry
     /// against a freshly-built backend whose token has just been
-    /// refreshed.
+    /// refreshed. Also reused by `lock_session_alive` when it
+    /// needs to reconnect a NOOP-failed socket — if the token is
+    /// stale at that point, the reconnect's XOAUTH2 returns
+    /// `MailError::Auth` which the caller's `with_auth_retry`
+    /// wrapper handles by evicting the cached backend.
     access_token: Arc<str>,
 }
 
@@ -79,12 +111,49 @@ impl ImapBackend {
     ) -> Self {
         Self {
             session: Mutex::new(session),
+            last_activity: Mutex::new(Instant::now()),
             account,
             host: host.into(),
             gmail_ext,
             email: email.into(),
             access_token: access_token.into(),
         }
+    }
+
+    /// Acquire the session, running a `NOOP` heartbeat first if the
+    /// last successful command was more than [`STALE_THRESHOLD`] ago.
+    /// If NOOP fails, transparently reconnects in place via
+    /// `dial_session` using the stored credentials. Updates
+    /// `last_activity` and returns the locked guard.
+    ///
+    /// All MailBackend method bodies acquire the session through
+    /// this helper so the heartbeat is uniform — a single
+    /// `self.session.lock().await` somewhere would skip the probe
+    /// and resurrect the post-sleep wedge.
+    async fn lock_session_alive(&self) -> Result<MutexGuard<'_, Session<StreamT>>, MailError> {
+        let stale = {
+            let activity = self.last_activity.lock().await;
+            activity.elapsed() >= STALE_THRESHOLD
+        };
+        let mut guard = self.session.lock().await;
+        if stale {
+            match guard.noop().await {
+                Ok(()) => {
+                    debug!(host = %self.host, "NOOP heartbeat ok");
+                }
+                Err(e) => {
+                    info!(host = %self.host, "NOOP heartbeat failed ({e}); reconnecting in place");
+                    let DialedSession {
+                        session: fresh,
+                        gmail_ext: _,
+                    } = dial_session(&self.host, IMAPS_PORT, &self.email, &self.access_token)
+                        .await?;
+                    *guard = fresh;
+                }
+            }
+        }
+        *self.last_activity.lock().await = Instant::now();
+        Ok(guard)
     }
 
     /// Connect to `host:port` over TLS, authenticate via SASL XOAUTH2
@@ -213,7 +282,7 @@ const NOT_YET: &str = "IMAP adapter read-path arrives in Phase 0 Week 4 part 2a 
 #[async_trait]
 impl MailBackend for ImapBackend {
     async fn list_folders(&self) -> Result<Vec<Folder>, MailError> {
-        let mut session = self.session.lock().await;
+        let mut session = self.lock_session_alive().await?;
         let mut stream = session
             .list(None, Some("*"))
             .await
@@ -251,7 +320,7 @@ impl MailBackend for ImapBackend {
         since: Option<&SyncState>,
         limit: Option<u32>,
     ) -> Result<MessageList, MailError> {
-        let mut session = self.session.lock().await;
+        let mut session = self.lock_session_alive().await?;
 
         let mbox = session
             .select(&folder.0)
@@ -429,7 +498,7 @@ impl MailBackend for ImapBackend {
             ))
         })?;
 
-        let mut session = self.session.lock().await;
+        let mut session = self.lock_session_alive().await?;
 
         let mbox = session
             .select(&folder.0)
@@ -479,7 +548,7 @@ impl MailBackend for ImapBackend {
 
     async fn fetch_raw_message(&self, id: &MessageId) -> Result<Vec<u8>, MailError> {
         let r = MessageRef::decode(id)?;
-        let mut session = self.session.lock().await;
+        let mut session = self.lock_session_alive().await?;
 
         let mbox = session
             .select(&r.folder)
@@ -577,7 +646,7 @@ impl MailBackend for ImapBackend {
             return Ok(());
         }
 
-        let mut session = self.session.lock().await;
+        let mut session = self.lock_session_alive().await?;
         for ((folder, uidvalidity), uids) in by_folder {
             let mbox = session
                 .select(&folder)
@@ -647,7 +716,7 @@ impl MailBackend for ImapBackend {
                 .push(r.uid);
         }
 
-        let mut session = self.session.lock().await;
+        let mut session = self.lock_session_alive().await?;
         for ((folder, uidvalidity), uids) in by_folder {
             let mbox = session
                 .select(&folder)
@@ -732,7 +801,7 @@ impl MailBackend for ImapBackend {
                 .push(r.uid);
         }
 
-        let mut session = self.session.lock().await;
+        let mut session = self.lock_session_alive().await?;
         for ((folder, uidvalidity), uids) in by_folder {
             let mbox = session
                 .select(&folder)
@@ -869,7 +938,7 @@ fn map_smtp_error(e: qsl_smtp_client::SmtpError) -> MailError {
 
 impl ImapBackend {
     async fn append_to_sent(&self, raw_rfc822: &[u8], mailbox: &str) -> Result<(), MailError> {
-        let mut session = self.session.lock().await;
+        let mut session = self.lock_session_alive().await?;
         session
             .append(mailbox, Some("(\\Seen)"), None, raw_rfc822)
             .await
