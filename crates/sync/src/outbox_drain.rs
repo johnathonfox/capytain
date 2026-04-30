@@ -35,6 +35,12 @@ pub const OP_DELETE: &str = "delete_messages";
 /// message via the account's submission backend (SMTP for IMAP
 /// accounts, JMAP `EmailSubmission/set` for JMAP accounts).
 pub const OP_SUBMIT_MESSAGE: &str = "submit_message";
+/// Op-kind tag for `save_draft` payloads — uploads the draft RFC 5322
+/// bytes to the account's Drafts mailbox (IMAP APPEND with `\Draft`,
+/// JMAP `Email/import` with `$draft`). Producers enqueue with a
+/// dedup key set to the local draft id so auto-save bursts coalesce
+/// to a single pending row instead of stacking one per keystroke.
+pub const OP_SAVE_DRAFT: &str = "save_draft";
 
 /// One drained row's outcome — the engine uses this to decide
 /// whether to emit a UI event for a failure-to-DLQ transition.
@@ -77,6 +83,18 @@ pub struct MovePayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeletePayload {
     pub ids: Vec<MessageId>,
+}
+
+/// JSON payload for `save_draft` rows. Same base64 encoding logic as
+/// [`SubmitMessagePayload`] for the same reason — JSON arrays of
+/// integers triple the byte count. `draft_id` is the *local* drafts
+/// row id (see `qsl-storage::repos::drafts`); it doubles as the
+/// outbox row's `dedup_key` so auto-save bursts don't queue up.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveDraftPayload {
+    pub draft_id: String,
+    /// Base64-encoded RFC 5322 bytes.
+    pub raw_b64: String,
 }
 
 /// JSON payload for `submit_message` rows. The full RFC 5322 byte
@@ -216,6 +234,14 @@ async fn dispatch(
                 .decode(&payload.raw_b64)
                 .map_err(|e| MailError::Parse(format!("outbox.submit_message base64: {e}")))?;
             backend.submit_message(&raw).await.map(|_| ())
+        }
+        OP_SAVE_DRAFT => {
+            let payload: SaveDraftPayload = serde_json::from_str(&entry.payload_json)
+                .map_err(|e| MailError::Parse(format!("outbox.save_draft payload: {e}")))?;
+            let raw = base64_engine
+                .decode(&payload.raw_b64)
+                .map_err(|e| MailError::Parse(format!("outbox.save_draft base64: {e}")))?;
+            backend.save_draft(&raw).await.map(|_| ())
         }
         other => Err(MailError::Other(format!("outbox: unknown op_kind {other}"))),
     }

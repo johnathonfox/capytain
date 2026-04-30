@@ -885,10 +885,39 @@ impl MailBackend for ImapBackend {
     }
 
     async fn save_draft(&self, raw_rfc822: &[u8]) -> Result<MessageId, MailError> {
-        let _ = raw_rfc822;
-        Err(MailError::Other(
-            "IMAP write path arrives in Phase 1 Week 2".into(),
-        ))
+        // Find the Drafts mailbox by role. We can't hardcode the path
+        // because Gmail uses `[Gmail]/Drafts` while a generic IMAP
+        // server might just use `Drafts` or a localized name; the
+        // role classifier in `name_to_folder` already normalises this
+        // for the Gmail bracket-prefix and the standard SPECIAL-USE
+        // attributes.
+        let folders = self.list_folders().await?;
+        let drafts = folders
+            .into_iter()
+            .find(|f| f.role == Some(FolderRole::Drafts))
+            .ok_or_else(|| MailError::NotFound("IMAP save_draft: no Drafts mailbox".into()))?;
+
+        let mut session = self.lock_session_alive().await?;
+        // `\Seen` keeps the draft from showing up as unread (the user
+        // wrote it; nothing to "read" later); `\Draft` is the IMAP
+        // standard marker so the server's web UI groups the message
+        // alongside its native drafts. Most servers (Gmail included)
+        // already imply `\Draft` for everything in the Drafts
+        // mailbox; sending it explicitly is harmless and survives a
+        // future move-out-of-Drafts.
+        session
+            .append(&drafts.id.0, Some("(\\Seen \\Draft)"), None, raw_rfc822)
+            .await
+            .map_err(|e| MailError::Protocol(format!("APPEND {}: {e}", drafts.id.0)))?;
+        debug!(folder = %drafts.id.0, "IMAP save_draft APPEND ok");
+        // Synthetic id — the new UID is available via APPENDUID
+        // (UIDPLUS extension) but async-imap's high-level `append`
+        // doesn't surface the response code. The next sync round-trip
+        // will pick the message up via the Drafts folder watcher and
+        // we'll see the canonical `imap|<uv>|<uid>|<folder>` form
+        // there. For now, return a placeholder so the trait shape
+        // holds; the outbox drain ignores the value.
+        Ok(MessageId(format!("imap-draft|pending|{}", drafts.id.0)))
     }
 
     async fn submit_message(&self, raw_rfc822: &[u8]) -> Result<Option<MessageId>, MailError> {
