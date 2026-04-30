@@ -47,6 +47,17 @@ pub struct MessageList {
     pub removed: Vec<MessageId>,
 }
 
+/// One chunk of a `pull_history_chunk` response.
+#[derive(Debug, Clone)]
+pub struct HistoryChunk {
+    /// Headers in this chunk, in no particular order.
+    pub headers: Vec<MessageHeaders>,
+    /// Anchor for the next chunk. Caller passes this back as the
+    /// `before_anchor` argument on the next call. `0` (or any value
+    /// `<= 1`) signals tail-exhausted; the driver loop exits.
+    pub next_anchor: u64,
+}
+
 /// Real-time change notifications from a backend's live-sync stream.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -125,6 +136,34 @@ pub trait MailBackend: Send + Sync {
         _limit: u32,
     ) -> Result<Vec<MessageHeaders>, MailError> {
         Ok(Vec::new())
+    }
+
+    /// Pull one chunk of older history, returning the headers plus
+    /// the anchor the caller should use on the next chunk. Powers
+    /// the "Pull full mail history" backfill in `qsl_sync::history`.
+    ///
+    /// `before_anchor` is the lowest UID/key the caller currently
+    /// has; the chunk should contain entries strictly older than
+    /// that. `limit` caps the response size so the caller can throttle.
+    ///
+    /// Returns a [`HistoryChunk`] whose `next_anchor` is `<= 1` once
+    /// the historical tail is exhausted. Setting `next_anchor = 0`
+    /// signals "no more history available from this backend" and the
+    /// driver loop will exit.
+    ///
+    /// Default impl reports tail-exhausted immediately so backends
+    /// that haven't wired up history paging stay compilable; backends
+    /// that paginate (IMAP today, JMAP `Email/query` later) override.
+    async fn pull_history_chunk(
+        &self,
+        _folder: &FolderId,
+        _before_anchor: u64,
+        _limit: u32,
+    ) -> Result<HistoryChunk, MailError> {
+        Ok(HistoryChunk {
+            headers: Vec::new(),
+            next_anchor: 0,
+        })
     }
 
     /// Enumerate every message id the server currently has in

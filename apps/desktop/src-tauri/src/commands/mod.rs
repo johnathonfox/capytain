@@ -19,6 +19,7 @@ pub mod compose;
 pub mod contacts;
 pub mod drafts;
 pub mod folders;
+pub mod history_sync;
 pub mod messages;
 pub mod reader;
 pub mod settings;

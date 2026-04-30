@@ -21,9 +21,11 @@
 //!     banner.
 
 use dioxus::prelude::*;
-use qsl_ipc::{Account, AccountId};
+use qsl_ipc::{Account, AccountId, Folder, FolderId, FolderRole, HistorySyncStatus};
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::{JsCast, JsValue};
 
-use crate::app::{invoke, web_sys_log, TAILWIND_CSS};
+use crate::app::{invoke, tauri_listen, web_sys_log, TAILWIND_CSS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -295,8 +297,347 @@ fn AccountRow(account: Account, tick: SettingsTick) -> Element {
                     span { "Show desktop notifications for new mail on this account" }
                 }
             }
+            AccountHistorySync { account_id: id.clone() }
         }
     }
+}
+
+/// Per-account "Pull full mail history" panel. Sits at the bottom of
+/// every AccountRow and surfaces the state of the
+/// `history_sync_state` table for that account.
+#[component]
+fn AccountHistorySync(account_id: AccountId) -> Element {
+    // Local refresh tick — bumped on user actions and on every
+    // `sync_event` of kind `history_sync_progress` for this account.
+    let mut tick = use_signal(|| 0u64);
+
+    // Subscribe to the engine's sync event stream so progress
+    // updates re-render this panel without polling. The closure
+    // filters on the event's `kind` + `account` so unrelated events
+    // (FolderSynced, other accounts) don't trigger needless rerenders.
+    {
+        let acct_for_listen = account_id.0.clone();
+        use_hook(move || {
+            let acct = acct_for_listen.clone();
+            let cb = Closure::<dyn FnMut(JsValue)>::new(move |payload: JsValue| {
+                let value: serde_json::Value = match serde_wasm_bindgen::from_value(payload) {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                let kind = value.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                if kind != "history_sync_progress" {
+                    return;
+                }
+                let evt_account = value.get("account").and_then(|v| v.as_str()).unwrap_or("");
+                if evt_account != acct {
+                    return;
+                }
+                tick.with_mut(|t| *t = t.wrapping_add(1));
+            });
+            wasm_bindgen_futures::spawn_local(async move {
+                let func = cb.as_ref().unchecked_ref::<js_sys::Function>();
+                if let Err(e) = tauri_listen("sync_event", func).await {
+                    web_sys_log(&format!("settings sync_event listen failed: {e:?}"));
+                }
+                // Settings is a short-lived window; leaking the
+                // closure here matches the app.rs pattern and keeps
+                // the listener alive until the window is dropped.
+                Box::leak(Box::new(cb));
+            });
+        });
+    }
+
+    let acct_for_rows = account_id.clone();
+    let tick_value = *tick.read();
+    let rows = use_resource(use_reactive!(|tick_value, acct_for_rows| async move {
+        let _ = tick_value;
+        invoke::<Vec<HistorySyncStatus>>(
+            "history_sync_list",
+            serde_json::json!({ "input": { "account": acct_for_rows } }),
+        )
+        .await
+    }));
+
+    let acct_for_folders = account_id.clone();
+    let folders = use_resource(use_reactive!(|acct_for_folders| async move {
+        invoke::<Vec<Folder>>(
+            "folders_list",
+            serde_json::json!({ "input": { "account": acct_for_folders } }),
+        )
+        .await
+    }));
+
+    rsx! {
+        div {
+            class: "settings-field",
+            label { class: "settings-label", "Mail history" }
+            div {
+                class: "settings-history-sync",
+                p {
+                    class: "settings-history-sync-blurb",
+                    "Pull every older message for a folder, in the background. ",
+                    "Resumable — closing QSL while a pull is running picks up where you left off on next launch."
+                }
+                match (&*rows.read_unchecked(), &*folders.read_unchecked()) {
+                    (None, _) | (_, None) => rsx! {
+                        p { class: "settings-empty", "Loading…" }
+                    },
+                    (Some(Err(e)), _) => rsx! {
+                        p { class: "settings-empty settings-error", "{e}" }
+                    },
+                    (_, Some(Err(e))) => rsx! {
+                        p { class: "settings-empty settings-error", "{e}" }
+                    },
+                    (Some(Ok(rows)), Some(Ok(folders))) => rsx! {
+                        HistorySyncStartRow {
+                            account_id: account_id.clone(),
+                            folders: folders.clone(),
+                            existing_rows: rows.clone(),
+                            tick,
+                        }
+                        if !rows.is_empty() {
+                            ul {
+                                class: "settings-history-sync-list",
+                                for row in rows.iter().cloned() {
+                                    HistorySyncRowView { row, tick }
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        }
+    }
+}
+
+/// Folder picker + start button. Only shows folders that don't
+/// already have a history-sync row to avoid double-starting.
+#[component]
+fn HistorySyncStartRow(
+    account_id: AccountId,
+    folders: Vec<Folder>,
+    existing_rows: Vec<HistorySyncStatus>,
+    mut tick: Signal<u64>,
+) -> Element {
+    let already: std::collections::HashSet<String> = existing_rows
+        .iter()
+        .filter(|r| r.status == "running" || r.status == "completed")
+        .map(|r| r.folder.0.clone())
+        .collect();
+
+    // Default selection: the All Mail / Archive role if available,
+    // else Inbox, else first folder. Skips folders that are already
+    // running or completed (the user can re-pick those via the
+    // per-row Resume / Restart buttons).
+    let default_folder: Option<FolderId> = folders
+        .iter()
+        .find(|f| f.role == Some(FolderRole::All) && !already.contains(&f.id.0))
+        .or_else(|| {
+            folders
+                .iter()
+                .find(|f| f.role == Some(FolderRole::Archive) && !already.contains(&f.id.0))
+        })
+        .or_else(|| {
+            folders
+                .iter()
+                .find(|f| f.role == Some(FolderRole::Inbox) && !already.contains(&f.id.0))
+        })
+        .or_else(|| folders.iter().find(|f| !already.contains(&f.id.0)))
+        .map(|f| f.id.clone());
+
+    let mut selected = use_signal(|| default_folder.clone());
+    let cur_value = selected
+        .read()
+        .as_ref()
+        .map(|f| f.0.clone())
+        .unwrap_or_default();
+
+    let candidates: Vec<&Folder> = folders
+        .iter()
+        .filter(|f| !already.contains(&f.id.0))
+        .collect();
+
+    if candidates.is_empty() {
+        return rsx! {
+            p {
+                class: "settings-empty",
+                "Every folder has already been pulled or is in progress."
+            }
+        };
+    }
+
+    rsx! {
+        div {
+            class: "settings-history-sync-start",
+            select {
+                class: "settings-input",
+                value: "{cur_value}",
+                onchange: move |evt: Event<FormData>| {
+                    selected.set(Some(FolderId(evt.value())));
+                },
+                for f in candidates {
+                    option {
+                        value: "{f.id.0}",
+                        "{folder_label(f)}"
+                    }
+                }
+            }
+            button {
+                class: "settings-button",
+                r#type: "button",
+                onclick: {
+                    let acct = account_id.clone();
+                    move |_| {
+                        let Some(folder) = selected.read().clone() else { return };
+                        let acct = acct.clone();
+                        spawn(async move {
+                            if let Err(e) = invoke::<()>(
+                                "history_sync_start",
+                                serde_json::json!({
+                                    "input": { "account": acct, "folder": folder }
+                                }),
+                            )
+                            .await
+                            {
+                                web_sys_log(&format!("history_sync_start: {e}"));
+                                return;
+                            }
+                            tick.with_mut(|t| *t = t.wrapping_add(1));
+                        });
+                    }
+                },
+                "Pull full history"
+            }
+        }
+    }
+}
+
+/// One existing row's progress + action buttons.
+#[component]
+fn HistorySyncRowView(row: HistorySyncStatus, mut tick: Signal<u64>) -> Element {
+    let percent = match (row.fetched, row.total_estimate) {
+        (_, Some(0)) | (_, None) => None,
+        (f, Some(total)) => {
+            let pct = (f as f64 / total as f64 * 100.0).clamp(0.0, 100.0);
+            Some(pct)
+        }
+    };
+    let status_label = match row.status.as_str() {
+        "running" => "Running",
+        "pending" => "Queued",
+        "completed" => "Complete",
+        "canceled" => "Canceled",
+        "error" => "Error",
+        other => other,
+    };
+    let progress_text = match (row.total_estimate, percent) {
+        (Some(total), Some(p)) => format!("{} / ~{} ({:.0}%)", row.fetched, total, p),
+        _ => format!("{} fetched", row.fetched),
+    };
+
+    let acct_for_actions = row.account.clone();
+    let folder_for_actions = row.folder.clone();
+    let is_running = row.status == "running" || row.status == "pending";
+    let is_resumable = row.status == "canceled" || row.status == "error";
+
+    rsx! {
+        li {
+            class: "settings-history-sync-row",
+            div {
+                class: "settings-history-sync-row-info",
+                div { class: "settings-history-sync-row-folder", "{row.folder_label}" }
+                div { class: "settings-history-sync-row-status", "{status_label} · {progress_text}" }
+                if let Some(err) = &row.last_error {
+                    div { class: "settings-history-sync-row-error", "{err}" }
+                }
+            }
+            if let Some(p) = percent {
+                div {
+                    class: "settings-history-sync-progress",
+                    div {
+                        class: "settings-history-sync-progress-fill",
+                        style: "width: {p}%;",
+                    }
+                }
+            }
+            div {
+                class: "settings-history-sync-row-actions",
+                if is_running {
+                    button {
+                        class: "settings-button settings-button-danger",
+                        r#type: "button",
+                        onclick: {
+                            let acct = acct_for_actions.clone();
+                            let folder = folder_for_actions.clone();
+                            move |_| {
+                                let acct = acct.clone();
+                                let folder = folder.clone();
+                                spawn(async move {
+                                    if let Err(e) = invoke::<()>(
+                                        "history_sync_cancel",
+                                        serde_json::json!({
+                                            "input": { "account": acct, "folder": folder }
+                                        }),
+                                    )
+                                    .await
+                                    {
+                                        web_sys_log(&format!("history_sync_cancel: {e}"));
+                                        return;
+                                    }
+                                    tick.with_mut(|t| *t = t.wrapping_add(1));
+                                });
+                            }
+                        },
+                        "Cancel"
+                    }
+                } else if is_resumable {
+                    button {
+                        class: "settings-button",
+                        r#type: "button",
+                        onclick: {
+                            let acct = acct_for_actions.clone();
+                            let folder = folder_for_actions.clone();
+                            move |_| {
+                                let acct = acct.clone();
+                                let folder = folder.clone();
+                                spawn(async move {
+                                    if let Err(e) = invoke::<()>(
+                                        "history_sync_start",
+                                        serde_json::json!({
+                                            "input": { "account": acct, "folder": folder }
+                                        }),
+                                    )
+                                    .await
+                                    {
+                                        web_sys_log(&format!("history_sync_start: {e}"));
+                                        return;
+                                    }
+                                    tick.with_mut(|t| *t = t.wrapping_add(1));
+                                });
+                            }
+                        },
+                        "Resume"
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn folder_label(f: &Folder) -> String {
+    if let Some(role) = &f.role {
+        match role {
+            FolderRole::All => return "All Mail".to_string(),
+            FolderRole::Inbox => return "Inbox".to_string(),
+            FolderRole::Archive => return "Archive".to_string(),
+            FolderRole::Sent => return "Sent".to_string(),
+            FolderRole::Drafts => return "Drafts".to_string(),
+            FolderRole::Trash => return "Trash".to_string(),
+            FolderRole::Spam => return "Spam".to_string(),
+            _ => {}
+        }
+    }
+    f.name.clone()
 }
 
 #[component]

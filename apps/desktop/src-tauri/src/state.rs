@@ -15,10 +15,11 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
-use qsl_core::{AccountId, MailBackend};
+use qsl_core::{AccountId, FolderId, MailBackend};
 use qsl_ipc::{MessageId, RenderedMessage};
 use qsl_storage::TursoConn;
 use tokio::sync::{Mutex, Notify, OnceCell};
@@ -101,6 +102,14 @@ pub struct AppState {
     /// that need fresh flags re-call `messages_get` regardless.
     pub last_rendered: Mutex<Option<(MessageId, RenderedMessage)>>,
 
+    /// Per-(account, folder) cancellation flags for in-flight
+    /// history-sync ("Pull full mail history") jobs. The Tauri
+    /// command flips the `AtomicBool` to true; the
+    /// `qsl_sync::history::pull_history` driver checks it between
+    /// chunks and bails cleanly. Cleared by the driver on terminal
+    /// transitions so a future re-start gets a fresh token.
+    pub history_cancellers: Mutex<HashMap<(AccountId, FolderId), Arc<AtomicBool>>>,
+
     /// Fired by the `ui_ready` IPC command once the Dioxus app has
     /// mounted in the webview. The sync engine awaits this (with a
     /// short safety timeout) before its bootstrap pass so the
@@ -120,6 +129,7 @@ impl AppState {
             sync_db: Arc::new(Mutex::new(sync_db)),
             backends: Mutex::new(HashMap::new()),
             data_dir,
+            history_cancellers: Mutex::new(HashMap::new()),
             last_rendered: Mutex::new(None),
             ui_ready: Arc::new(Notify::new()),
         }

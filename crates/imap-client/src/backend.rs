@@ -548,6 +548,47 @@ impl MailBackend for ImapBackend {
         Ok(messages)
     }
 
+    async fn pull_history_chunk(
+        &self,
+        folder: &FolderId,
+        before_anchor: u64,
+        limit: u32,
+    ) -> Result<qsl_core::HistoryChunk, MailError> {
+        if before_anchor <= 1 || limit == 0 {
+            return Ok(qsl_core::HistoryChunk {
+                headers: Vec::new(),
+                next_anchor: 0,
+            });
+        }
+        let headers = self
+            .fetch_older_headers(folder, before_anchor, limit)
+            .await?;
+
+        // Advance the anchor. When the chunk is non-empty we use the
+        // lowest UID it returned — that's the next call's `before`
+        // boundary, exclusive. When the chunk is empty it usually
+        // means the entire UID range we asked for had been EXPUNGEd
+        // (Gmail does this for spam after 30 days), but messages may
+        // still exist further down. Walk the anchor down by `limit`
+        // so the next chunk picks up the next slice; the loop will
+        // bottom out at 1 either way.
+        let next_anchor = if headers.is_empty() {
+            let before = u32::try_from(before_anchor).unwrap_or(u32::MAX);
+            u64::from(before.saturating_sub(limit).max(1))
+        } else {
+            headers
+                .iter()
+                .filter_map(|h| MessageRef::decode(&h.id).ok())
+                .map(|r| u64::from(r.uid))
+                .min()
+                .unwrap_or(0)
+        };
+        Ok(qsl_core::HistoryChunk {
+            headers,
+            next_anchor,
+        })
+    }
+
     async fn list_known_ids(&self, folder: &FolderId) -> Result<Vec<MessageId>, MailError> {
         let mut session = self.lock_session_alive().await?;
 

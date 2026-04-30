@@ -2482,3 +2482,95 @@ ul {
   color: var(--text-primary);
   border-color: var(--accent-amber);
 }
+
+/* ----- History sync ("Pull full mail history") panel ----- */
+
+.settings-history-sync {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.settings-history-sync-blurb {
+  margin: 0;
+  font-size: var(--fs-11);
+  color: var(--text-tertiary);
+}
+
+.settings-history-sync-start {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-history-sync-start select {
+  flex: 1 1 auto;
+}
+
+.settings-history-sync-list {
+  list-style: none;
+  margin: 4px 0 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-history-sync-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas:
+    "info actions"
+    "progress progress";
+  gap: 6px 12px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 0.5px solid var(--border-tertiary);
+  border-radius: var(--radius-input);
+  background: var(--bg-secondary);
+}
+
+.settings-history-sync-row-info {
+  grid-area: info;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-history-sync-row-folder {
+  font-size: var(--fs-12);
+  font-weight: var(--fw-bold);
+  color: var(--text-primary);
+}
+
+.settings-history-sync-row-status {
+  font-size: var(--fs-11);
+  color: var(--text-tertiary);
+}
+
+.settings-history-sync-row-error {
+  font-size: var(--fs-11);
+  color: var(--danger-red, #d8504e);
+}
+
+.settings-history-sync-row-actions {
+  grid-area: actions;
+  display: flex;
+  gap: 6px;
+}
+
+.settings-history-sync-progress {
+  grid-area: progress;
+  height: 4px;
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.settings-history-sync-progress-fill {
+  height: 100%;
+  background: var(--accent-amber);
+  transition: width 250ms ease-out;
+}

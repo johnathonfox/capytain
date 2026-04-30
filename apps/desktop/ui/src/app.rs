@@ -165,7 +165,10 @@ extern "C" {
     async fn core_invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
 
     #[wasm_bindgen(catch, js_name = tauriListen)]
-    async fn tauri_listen(event: &str, handler: &js_sys::Function) -> Result<JsValue, JsValue>;
+    pub(crate) async fn tauri_listen(
+        event: &str,
+        handler: &js_sys::Function,
+    ) -> Result<JsValue, JsValue>;
 
     #[wasm_bindgen(js_name = setRootTheme)]
     pub(crate) fn set_root_theme(theme: &str);
@@ -500,13 +503,22 @@ fn full_app_shell() -> Element {
             if let Ok(evt) = serde_wasm_bindgen::from_value::<SyncEvent>(payload) {
                 let folder = match &evt {
                     SyncEvent::FolderSynced { folder, .. }
-                    | SyncEvent::FolderError { folder, .. } => folder.clone(),
+                    | SyncEvent::FolderError { folder, .. } => Some(folder.clone()),
+                    // History-sync progress doesn't invalidate any
+                    // folder's message list (the rows show up via
+                    // the normal sync path); the Settings panel
+                    // listens for these directly.
+                    SyncEvent::HistorySyncProgress { .. } => None,
                 };
-                folder_tokens.with_mut(|m| {
-                    let entry = m.entry(folder).or_insert(0);
-                    *entry = entry.wrapping_add(1);
-                });
-                sync_status.set(SyncStatus::from_event(&evt));
+                if let Some(folder) = folder {
+                    folder_tokens.with_mut(|m| {
+                        let entry = m.entry(folder).or_insert(0);
+                        *entry = entry.wrapping_add(1);
+                    });
+                }
+                if let Some(s) = SyncStatus::from_event(&evt) {
+                    sync_status.set(s);
+                }
             }
         });
         wasm_bindgen_futures::spawn_local(async move {
@@ -1630,7 +1642,7 @@ pub enum SyncStatus {
 }
 
 impl SyncStatus {
-    fn from_event(evt: &SyncEvent) -> Self {
+    fn from_event(evt: &SyncEvent) -> Option<Self> {
         match evt {
             SyncEvent::FolderSynced {
                 folder,
@@ -1638,16 +1650,19 @@ impl SyncStatus {
                 updated,
                 live,
                 ..
-            } => SyncStatus::Synced {
+            } => Some(SyncStatus::Synced {
                 folder: short_folder_label(&folder.0),
                 added: *added,
                 updated: *updated,
                 live: *live,
-            },
-            SyncEvent::FolderError { folder, error, .. } => SyncStatus::Failed {
+            }),
+            SyncEvent::FolderError { folder, error, .. } => Some(SyncStatus::Failed {
                 folder: short_folder_label(&folder.0),
                 error: error.clone(),
-            },
+            }),
+            // HistorySyncProgress doesn't belong in the bottom status
+            // bar — the Settings panel renders its own progress UI.
+            SyncEvent::HistorySyncProgress { .. } => None,
         }
     }
 }

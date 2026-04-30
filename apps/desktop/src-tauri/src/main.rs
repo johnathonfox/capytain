@@ -143,6 +143,9 @@ fn main() {
             commands::settings::app_settings_get,
             commands::settings::app_settings_set,
             commands::compose::compose_pick_attachments,
+            commands::history_sync::history_sync_start,
+            commands::history_sync::history_sync_cancel,
+            commands::history_sync::history_sync_list,
         ])
         .run(tauri::generate_context!())
         .expect("error while running QSL");

@@ -33,7 +33,7 @@ pub use error::{MailError, StorageError};
 pub use folder::{Folder, FolderRole};
 pub use ids::{AccountId, AttachmentRef, DraftId, FolderId, MessageId, ThreadId};
 pub use link_cleaner::clean_outbound_url;
-pub use mail_backend::{BackendEvent, MailBackend, MessageList};
+pub use mail_backend::{BackendEvent, HistoryChunk, MailBackend, MessageList};
 pub use message::{Attachment, EmailAddress, MessageBody, MessageFlags, MessageHeaders};
 pub use reader_html::compose_reader_html;
 pub use sync_state::SyncState;
