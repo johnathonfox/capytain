@@ -140,29 +140,43 @@ pub async fn history_sync_start(
     Ok(())
 }
 
-/// `history_sync_cancel` — flip the cancel token AND immediately
-/// flip the row's status to `canceled` in the database, so the UI
-/// can render the Resume button right away without waiting for the
-/// driver's in-flight chunk to complete (an IMAP FETCH on a slow
-/// connection can take 30+ seconds, which felt like the cancel
-/// button was broken).
+/// `history_sync_cancel` — stop the pull AND remove the row from the
+/// table so the Settings list and the bottom status bar both clear
+/// immediately. The driver checks the AtomicBool between chunks and
+/// exits cleanly; its own post-cancel `set_status` write becomes a
+/// no-op against the now-empty row.
 ///
-/// The driver checks the AtomicBool between chunks and exits
-/// cleanly. Its own `set_status(Canceled)` write is then idempotent
-/// — the row's already canceled.
+/// Why a delete instead of leaving a `canceled` terminal row: the
+/// user reported that a Canceled row sticks around as visual debt
+/// they have to dismiss by hand. Treating Cancel as "remove the
+/// task" matches the mental model of the button — Resume is still
+/// available from the start dropdown if they change their mind.
+///
+/// We emit a synthetic `canceled` `HistorySyncProgress` event after
+/// the delete so the UI's status-bar overlay (which keys off
+/// terminal status strings) drops the "Pulling history" line right
+/// away. Without this synthetic event the bar would stay stuck —
+/// the driver's own final emit would find no row and skip.
 ///
 /// No-op for unknown (account, folder) pairs.
 #[tauri::command]
 pub async fn history_sync_cancel(
+    app: AppHandle,
     state: State<'_, AppState>,
     input: HistorySyncCancelInput,
 ) -> IpcResult<()> {
     let HistorySyncCancelInput { account, folder } = input;
     let token_present = {
-        let cancellers = state.history_cancellers.lock().await;
+        let mut cancellers = state.history_cancellers.lock().await;
         match cancellers.get(&(account.clone(), folder.clone())) {
             Some(token) => {
                 token.store(true, Ordering::Relaxed);
+                // Drop the canceller now too. The driver's own
+                // cleanup (`drop_canceller`) is idempotent so this
+                // double-remove is safe and means a brand-new
+                // Start on the same folder right after Cancel
+                // doesn't trip the "already running" rejection.
+                cancellers.remove(&(account.clone(), folder.clone()));
                 true
             }
             None => false,
@@ -177,25 +191,51 @@ pub async fn history_sync_cancel(
         return Ok(());
     }
 
-    // Persist the canceled status immediately so the UI's next
-    // refetch (bumped by the cancel-button onclick handler) sees
-    // the row in its final state and switches Cancel → Resume.
+    // Snapshot the row's last-known progress before the delete so
+    // the synthetic terminal event below carries truthful counts
+    // (rather than zeros that could briefly flash in the UI).
+    let snapshot = {
+        let db = state.db.lock().await;
+        history_repo::get(&*db, &account, &folder)
+            .await
+            .ok()
+            .flatten()
+    };
+
     {
         let db = state.db.lock().await;
-        if let Err(e) =
-            history_repo::set_status(&*db, &account, &folder, RepoStatus::Canceled, None).await
-        {
+        if let Err(e) = history_repo::delete(&*db, &account, &folder).await {
             tracing::warn!(
                 account = %account.0,
                 folder = %folder.0,
-                "history sync cancel: persist status failed: {e}"
+                "history sync cancel: delete row failed: {e}"
             );
         }
     }
+
+    // Synthetic terminal event — clears the status-bar overlay and
+    // bumps the Settings tick so the panel refetches and drops the
+    // row from the list. Carries `status="canceled"` because that's
+    // the variant `HistoryActivity::from_event` recognises as a
+    // clear-the-bar terminal state.
+    let event = SyncEvent::HistorySyncProgress {
+        account: account.clone(),
+        folder: folder.clone(),
+        status: RepoStatus::Canceled.as_str().to_string(),
+        fetched: snapshot.as_ref().map(|r| r.fetched).unwrap_or(0),
+        total_estimate: snapshot
+            .as_ref()
+            .and_then(|r| r.total_estimate.map(|v| v as u32)),
+        last_error: None,
+    };
+    if let Err(e) = app.emit(SYNC_EVENT, &event) {
+        tracing::warn!("emit history_sync cancel terminal event: {e}");
+    }
+
     tracing::info!(
         account = %account.0,
         folder = %folder.0,
-        "history sync cancel requested"
+        "history sync cancel requested — row deleted"
     );
     Ok(())
 }
