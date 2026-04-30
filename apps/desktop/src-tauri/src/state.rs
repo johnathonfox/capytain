@@ -16,11 +16,34 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use qsl_core::{AccountId, MailBackend};
 use qsl_ipc::{MessageId, RenderedMessage};
 use qsl_storage::TursoConn;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, OnceCell};
+
+/// One entry of [`AppState::backends`].
+///
+/// Stores the live backend handle alongside the `Instant` it was
+/// built. `backend_factory::get_or_open` checks the age and rebuilds
+/// when it's older than `MAX_BACKEND_AGE` so the next IMAP / JMAP
+/// command runs against a fresh OAuth access token.
+pub struct CachedBackend {
+    pub backend: Arc<dyn MailBackend>,
+    pub built_at: Instant,
+}
+
+/// Slot in the per-account backend cache.
+///
+/// Wrapping `CachedBackend` in `Arc<OnceCell<...>>` single-flights
+/// the build: if N concurrent commands hit a cold cache, only the
+/// first runs `refresh_access_token` + `connect`, and the rest wait
+/// on the same `OnceCell::get_or_try_init` future. Without this
+/// they'd all refresh the OAuth token in parallel, which works (the
+/// refresh tokens are reusable) but burns extra network round-trips
+/// and risks tripping provider rate limits on big bursts.
+pub type BackendSlot = Arc<OnceCell<CachedBackend>>;
 
 /// Long-lived state attached to the Tauri app via `manage`.
 ///
@@ -43,11 +66,14 @@ pub struct AppState {
     /// `TursoConn::open` enables.
     pub sync_db: Arc<Mutex<TursoConn>>,
 
-    /// Per-account backend cache. Populated lazily on first use and
-    /// evicted when an account is removed. `Arc<dyn MailBackend>` is
-    /// cheap to clone so command handlers can drop the lock fast.
-    #[allow(dead_code)] // populated by commands that land in week 5 part 2
-    pub backends: Mutex<HashMap<AccountId, Arc<dyn MailBackend>>>,
+    /// Per-account backend cache. Populated lazily on first use,
+    /// aged out by `backend_factory::get_or_open` when the cached
+    /// entry is older than the OAuth access-token TTL window, and
+    /// evicted when an account is removed or a foreground command
+    /// catches `MailError::Auth`. The `OnceCell` slot single-flights
+    /// the per-account build so concurrent cache misses don't all
+    /// refresh tokens in parallel.
+    pub backends: Mutex<HashMap<AccountId, BackendSlot>>,
 
     /// Root of the on-disk data directory (blobs, logs, future
     /// attachment spill). Resolved once at startup via `directories`
