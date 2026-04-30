@@ -22,6 +22,10 @@ Thumbs.db
 apps/desktop/src-tauri/gen/
 apps/desktop/ui/dist/
 
+# Claude Code session state — runtime lock + scheduled-task ledger.
+# Committed once by mistake; pinning here so it can't slip back in.
+.claude/
+
 # Local env
 .env
 .env.local

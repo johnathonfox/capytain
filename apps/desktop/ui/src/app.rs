@@ -290,6 +290,68 @@ pub struct MessageContextMenu {
 // ---------- Root ----------
 
 #[component]
+/// Apply the persisted `appearance.theme` + `appearance.density`
+/// settings to `<html>` at boot and re-apply on every
+/// `app_settings_changed` event. Every Dioxus root (the main shell,
+/// the Settings window, the popup reader, the OAuth-add window)
+/// must call this so its `<html data-theme=…>` matches what the
+/// user picked — otherwise the window paints with the dark default
+/// regardless of the stored preference and clicking a Theme radio
+/// in Settings only updates whichever windows had subscribed.
+///
+/// Defaults: `system` (follows `prefers-color-scheme`) for theme,
+/// `comfortable` for density. Bad / missing values fall back to
+/// these so a corrupt setting can't trap the user.
+pub fn use_appearance_hooks() {
+    use_hook(|| {
+        wasm_bindgen_futures::spawn_local(async {
+            let theme = invoke::<Option<String>>(
+                "app_settings_get",
+                serde_json::json!({ "input": { "key": "appearance.theme" } }),
+            )
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "system".to_string());
+            set_root_theme(&theme);
+
+            let density = invoke::<Option<String>>(
+                "app_settings_get",
+                serde_json::json!({ "input": { "key": "appearance.density" } }),
+            )
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "comfortable".to_string());
+            set_root_density(&density);
+        });
+    });
+    use_hook(|| {
+        let cb = Closure::<dyn FnMut(JsValue)>::new(move |payload: JsValue| {
+            #[derive(serde::Deserialize)]
+            struct Changed {
+                key: String,
+                value: String,
+            }
+            let Ok(evt) = serde_wasm_bindgen::from_value::<Changed>(payload) else {
+                return;
+            };
+            match evt.key.as_str() {
+                "appearance.theme" => set_root_theme(&evt.value),
+                "appearance.density" => set_root_density(&evt.value),
+                _ => {}
+            }
+        });
+        wasm_bindgen_futures::spawn_local(async move {
+            let func = cb.as_ref().unchecked_ref::<js_sys::Function>();
+            if let Err(e) = tauri_listen("app_settings_changed", func).await {
+                web_sys_log(&format!("app_settings_changed listen failed: {e:?}"));
+            }
+            Box::leak(Box::new(cb));
+        });
+    });
+}
+
 pub fn App() -> Element {
     // Secondary-window detection: the Tauri popup `initialization_script`
     // injects either `window.__QSL_READER_ID__` (popup reader) or
@@ -470,65 +532,7 @@ fn full_app_shell() -> Element {
         install_reader_link_listener();
     });
 
-    // Theme + density: read both from `app_settings` at boot and
-    // apply to `<html>` via `data-theme` / `data-density` so the CSS
-    // tokens flip. Subscribe to `app_settings_changed` so a flip in
-    // the Settings window applies live across all open windows.
-    // Default to "system" theme (follows `prefers-color-scheme`) and
-    // "comfortable" density when the keys haven't been written.
-    use_hook(|| {
-        wasm_bindgen_futures::spawn_local(async {
-            // `app_settings_get` returns Option<String> — `None` when
-            // the user hasn't picked a value yet; default in that case.
-            let theme = invoke::<Option<String>>(
-                "app_settings_get",
-                serde_json::json!({ "input": { "key": "appearance.theme" } }),
-            )
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "system".to_string());
-            set_root_theme(&theme);
-
-            let density = invoke::<Option<String>>(
-                "app_settings_get",
-                serde_json::json!({ "input": { "key": "appearance.density" } }),
-            )
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "comfortable".to_string());
-            set_root_density(&density);
-        });
-    });
-    // Listen for live changes from the Settings window. The Tauri
-    // `app_settings_set` command emits `app_settings_changed` after
-    // every successful write — payload is `{ key, value }`. We only
-    // act on the two keys we care about; anything else falls through.
-    use_hook(|| {
-        let cb = Closure::<dyn FnMut(JsValue)>::new(move |payload: JsValue| {
-            #[derive(serde::Deserialize)]
-            struct Changed {
-                key: String,
-                value: String,
-            }
-            let Ok(evt) = serde_wasm_bindgen::from_value::<Changed>(payload) else {
-                return;
-            };
-            match evt.key.as_str() {
-                "appearance.theme" => set_root_theme(&evt.value),
-                "appearance.density" => set_root_density(&evt.value),
-                _ => {}
-            }
-        });
-        wasm_bindgen_futures::spawn_local(async move {
-            let func = cb.as_ref().unchecked_ref::<js_sys::Function>();
-            if let Err(e) = tauri_listen("app_settings_changed", func).await {
-                web_sys_log(&format!("app_settings_changed listen failed: {e:?}"));
-            }
-            Box::leak(Box::new(cb));
-        });
-    });
+    use_appearance_hooks();
 
     // Tell the Rust side the UI is mounted so the sync engine can
     // start its bootstrap pass. Without this signal the engine waits

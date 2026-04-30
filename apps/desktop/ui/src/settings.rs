@@ -62,6 +62,12 @@ type SettingsTick = Signal<u64>;
 
 #[component]
 pub fn SettingsApp() -> Element {
+    // Match `<html data-theme=…>` to the user's persisted preference
+    // and subscribe to live changes — otherwise the Settings window
+    // (which runs as its own webview with its own document) paints
+    // dark regardless of what the user picked, making the Theme
+    // radio look broken even when the main window flipped correctly.
+    crate::app::use_appearance_hooks();
     let active_tab = use_signal(|| Tab::Accounts);
     let tick: SettingsTick = use_signal(|| 0u64);
     rsx! {
@@ -296,11 +302,12 @@ fn AccountRow(account: Account, tick: SettingsTick) -> Element {
 #[component]
 fn NotifyToggle(account_id: AccountId, initial: bool, tick: SettingsTick) -> Element {
     let mut enabled = use_signal(|| initial);
+    let is_enabled = *enabled.read();
     rsx! {
         input {
             class: "settings-checkbox",
             r#type: "checkbox",
-            checked: "{enabled}",
+            checked: is_enabled,
             onchange: move |e: Event<FormData>| {
                 let next = matches!(e.value().as_str(), "true" | "on");
                 enabled.set(next);
@@ -408,7 +415,14 @@ fn SettingsRadioOption(
             input {
                 r#type: "radio",
                 name: "{setting_key}",
-                checked: "{selected}",
+                // Pass a real `bool` so dioxus uses the IDL property
+                // setter (`el.checked = bool`) rather than treating it
+                // as an HTML attribute. Stringifying produces
+                // `checked="false"`, which is still attribute-present
+                // and renders as checked — leaving every option in the
+                // group looking selected and the browser silently
+                // picking one. See ARCH-2026-04-30.
+                checked: selected,
                 onchange: {
                     let key = setting_key.clone();
                     let value = value.clone();
@@ -681,7 +695,7 @@ fn BoolSettingRow(
                 input {
                     class: "settings-checkbox",
                     r#type: "checkbox",
-                    checked: "{checked}",
+                    checked: checked,
                     onchange: {
                         let key = setting_key.to_string();
                         let mut tick = tick;
