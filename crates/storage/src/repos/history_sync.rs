@@ -231,6 +231,23 @@ pub async fn set_status(
     .map(|_| ())
 }
 
+/// Remove the history-sync row for `(account, folder)`. Used by the
+/// cancel path to drop the row entirely from the UI list rather than
+/// leaving a `Canceled` terminal entry the user has to clean up by
+/// hand. Idempotent — silently does nothing when no row exists.
+pub async fn delete(
+    conn: &dyn DbConn,
+    account: &AccountId,
+    folder: &FolderId,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "DELETE FROM history_sync_state WHERE account_id = ?1 AND folder_id = ?2",
+        Params(vec![Value::Text(&account.0), Value::Text(&folder.0)]),
+    )
+    .await
+    .map(|_| ())
+}
+
 /// Lookup one row.
 pub async fn get(
     conn: &dyn DbConn,
