@@ -417,7 +417,11 @@ impl MailBackend for JmapBackend {
         Ok(())
     }
 
-    async fn save_draft(&self, raw_rfc822: &[u8]) -> Result<MessageId, MailError> {
+    async fn save_draft(
+        &self,
+        raw_rfc822: &[u8],
+        replace: Option<&MessageId>,
+    ) -> Result<MessageId, MailError> {
         // Locate the Drafts mailbox via role (same look-up the
         // submit_message path does); JMAP wants the actual mailbox
         // id rather than a name.
@@ -439,12 +443,36 @@ impl MailBackend for JmapBackend {
             )
             .await
             .map_err(map_jmap_error)?;
-        drop(client);
         let id = email
             .id()
             .ok_or_else(|| MailError::Protocol("Email/import returned no id".into()))?
             .to_string();
         debug!(email_id = %id, drafts = %drafts_id.0, "JMAP save_draft import ok");
+
+        // Best-effort destroy of the prior copy via Email/set { destroy }.
+        // Same APPEND-then-destroy ordering as the IMAP path: a
+        // failure here leaves the user with a duplicate, never zero
+        // copies, and the next save_draft cycle retries with the
+        // freshly-stored server_id.
+        if let Some(prior) = replace {
+            let mut request = client.build();
+            let set_email = request.set_email();
+            set_email
+                .account_id(&jmap_account)
+                .destroy([prior.0.as_str()]);
+            match request.send_set_email().await {
+                Ok(_) => {
+                    debug!(prior = %prior.0, "JMAP save_draft: prior copy destroyed");
+                }
+                Err(e) => {
+                    warn!(
+                        prior = %prior.0,
+                        "JMAP save_draft: destroy failed (will retry next cycle): {e}"
+                    );
+                }
+            }
+        }
+        drop(client);
         Ok(MessageId(id))
     }
 
