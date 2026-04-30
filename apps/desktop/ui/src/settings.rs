@@ -124,12 +124,30 @@ fn SettingsTabButton(mut active: Signal<Tab>, tab: Tab) -> Element {
 // ---------- Accounts ----------
 
 #[component]
-fn AccountsTab(tick: SettingsTick) -> Element {
+fn AccountsTab(mut tick: SettingsTick) -> Element {
     let tick_value = *tick.read();
     let accounts = use_resource(use_reactive!(|tick_value| async move {
         let _ = tick_value;
         invoke::<Vec<Account>>("accounts_list", serde_json::json!({})).await
     }));
+
+    // Listen for the host's `accounts_changed` event so an OAuth add
+    // completed in the popup window propagates back here without
+    // requiring the user to close + reopen Settings. The Remove
+    // button bumps `tick` directly already; the event covers the
+    // cross-window add path.
+    use_hook(move || {
+        let cb = Closure::<dyn FnMut(JsValue)>::new(move |_payload: JsValue| {
+            tick.with_mut(|t| *t = t.wrapping_add(1));
+        });
+        wasm_bindgen_futures::spawn_local(async move {
+            let func = cb.as_ref().unchecked_ref::<js_sys::Function>();
+            if let Err(e) = tauri_listen("accounts_changed", func).await {
+                web_sys_log(&format!("settings accounts_changed listen failed: {e:?}"));
+            }
+            Box::leak(Box::new(cb));
+        });
+    });
     rsx! {
         div {
             class: "settings-section",

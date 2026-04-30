@@ -561,6 +561,26 @@ fn full_app_shell() -> Element {
         });
     });
 
+    // `accounts_changed` is fired by the host after an OAuth add
+    // succeeds and after `accounts_remove`. Bumping `sync_tick`
+    // refetches every reactive `accounts_list` consumer (sidebar,
+    // command palette folders) without waiting for the bootstrap
+    // sync's first FolderSynced event to arrive — that latency was
+    // the gap users were noticing as "I removed the account but
+    // it's still in the sidebar."
+    use_hook(move || {
+        let cb = Closure::<dyn FnMut(JsValue)>::new(move |_payload: JsValue| {
+            sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+        });
+        wasm_bindgen_futures::spawn_local(async move {
+            let func = cb.as_ref().unchecked_ref::<js_sys::Function>();
+            if let Err(e) = tauri_listen("accounts_changed", func).await {
+                web_sys_log(&format!("accounts_changed listen failed: {e:?}"));
+            }
+            Box::leak(Box::new(cb));
+        });
+    });
+
     // (Removed on the webkit-iframe branch: the rect tracker existed
     // to position the GTK Servo overlay surface; with the iframe
     // rendering email bodies in-DOM there's nothing to track.)
@@ -698,7 +718,7 @@ fn full_app_shell() -> Element {
             onmousemove: onmousemove_shell,
             onmouseup: onmouseup_shell,
             onmouseleave: onmouseup_shell,
-            TopBar { account_filter, palette_visible }
+            TopBar { account_filter, palette_visible, sync_tick }
             div {
                 class: "shell-pane shell-pane-sidebar",
                 SidebarV2 { selection, sync_tick, compose }
@@ -1774,9 +1794,21 @@ fn short_folder_label(folder_id: &str) -> String {
 /// list to a single account. `None` = show every account; clicking
 /// the chip opens a dropdown with the configured accounts plus an
 /// "all accounts" reset.
+///
+/// `sync_tick` drives the chip's account-list refetch on
+/// `accounts_changed` (host-emitted after add / remove) so the
+/// chip's options don't lag a deletion done in Settings.
 #[component]
-fn TopBar(account_filter: Signal<Option<AccountId>>, mut palette_visible: Signal<bool>) -> Element {
-    let accounts = use_resource(|| async { invoke::<Vec<Account>>("accounts_list", ()).await });
+fn TopBar(
+    account_filter: Signal<Option<AccountId>>,
+    mut palette_visible: Signal<bool>,
+    sync_tick: SyncTick,
+) -> Element {
+    let tick_value = sync_tick();
+    let accounts = use_resource(use_reactive!(|tick_value| async move {
+        let _ = tick_value;
+        invoke::<Vec<Account>>("accounts_list", ()).await
+    }));
     let mut chip_open: Signal<bool> = use_signal(|| false);
 
     let chip_label: String = match (
