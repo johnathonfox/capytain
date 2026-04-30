@@ -192,7 +192,10 @@ pub async fn history_sync_list(
 
 /// Spawn the per-folder driver on Tauri's async runtime. The
 /// closure owns its own DB handle (via `state.sync_db`) so it
-/// doesn't hold the IPC mutex while paging chunks.
+/// doesn't hold the IPC mutex while paging chunks. Acquires the
+/// per-account history-sync mutex before opening the backend so
+/// concurrent pulls on the same account queue cleanly instead of
+/// racing on the cached IMAP session.
 fn spawn_driver(
     app: AppHandle,
     account: AccountId,
@@ -203,6 +206,40 @@ fn spawn_driver(
 ) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
+
+        // Per-account serialization. Each account's cached IMAP
+        // session can only run one command at a time; without this
+        // gate, two parallel pulls on the same account would
+        // interleave their chunk fetches, halving each pull's
+        // throughput. Held for the entire driver run; released on
+        // exit (terminal status, cancel, or error).
+        let account_lock = {
+            let mut map = state.history_account_locks.lock().await;
+            map.entry(account.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _account_guard = account_lock.lock().await;
+
+        // Re-check cancel after the queue wait — the user may have
+        // canceled this folder while we were waiting for an earlier
+        // pull on the same account to finish. No point opening the
+        // backend just to bail in the first loop iteration.
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            tracing::info!(
+                account = %account.0,
+                folder = %folder.0,
+                "history sync canceled while queued"
+            );
+            let db = state.sync_db.lock().await;
+            let _ =
+                history_repo::set_status(&*db, &account, &folder, RepoStatus::Canceled, None).await;
+            drop(db);
+            drop_canceller(&state, &account, &folder).await;
+            emit_progress_for_account(&app, &state, &account).await;
+            return;
+        }
+
         let backend = match backend_factory::get_or_open(&state, &account).await {
             Ok(b) => b,
             Err(e) => {
