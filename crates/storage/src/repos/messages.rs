@@ -275,6 +275,25 @@ pub async fn count_unread_by_folder(
     Ok(c.max(0) as u32)
 }
 
+/// Every persisted message id in a folder. Drives the sync engine's
+/// server-side-deletion reconciliation pass: after the regular sync
+/// it diffs this against `MailBackend::list_known_ids` and deletes
+/// the ones the server no longer carries.
+pub async fn list_ids_by_folder(
+    conn: &dyn DbConn,
+    folder: &FolderId,
+) -> Result<Vec<MessageId>, StorageError> {
+    let rows = conn
+        .query(
+            "SELECT id FROM messages WHERE folder_id = ?1",
+            Params(vec![Value::Text(&folder.0)]),
+        )
+        .await?;
+    rows.iter()
+        .map(|r| Ok(MessageId(r.get_str("id")?.to_string())))
+        .collect()
+}
+
 pub async fn update_flags(
     conn: &dyn DbConn,
     id: &MessageId,

@@ -38,6 +38,10 @@ struct StubBackend {
     /// IDs that should fail their body fetch — simulates a UIDVALIDITY
     /// race or a server hiccup mid-cycle.
     failing_ids: std::collections::HashSet<String>,
+    /// Per-folder live id sets the reconciliation pass walks. `None`
+    /// signals "don't override the trait default" which the engine
+    /// then treats as backend-incapable and skips the prune.
+    live_ids: Option<std::collections::HashMap<String, Vec<MessageId>>>,
 }
 
 #[async_trait]
@@ -57,6 +61,13 @@ impl MailBackend for StubBackend {
             Err(MailError::Other("stub: no scripted responses left".into()))
         } else {
             Ok(q.remove(0))
+        }
+    }
+
+    async fn list_known_ids(&self, folder: &FolderId) -> Result<Vec<MessageId>, MailError> {
+        match &self.live_ids {
+            Some(map) => Ok(map.get(&folder.0).cloned().unwrap_or_default()),
+            None => Ok(Vec::new()),
         }
     }
 
@@ -198,6 +209,7 @@ fn sync_folder_inserts_new_headers_and_persists_cursor() {
             }]),
             raw_bodies: Default::default(),
             failing_ids: Default::default(),
+            live_ids: None,
         };
 
         let report = sync_folder(&conn, &backend, None, &folder, None)
@@ -264,6 +276,7 @@ fn sync_folder_updates_existing_headers() {
             ]),
             raw_bodies: Default::default(),
             failing_ids: Default::default(),
+            live_ids: None,
         };
 
         let r1 = sync_folder(&conn, &backend, None, &folder, None)
@@ -316,6 +329,7 @@ fn sync_folder_fetches_bodies_for_new_messages() {
             }]),
             raw_bodies: bodies,
             failing_ids: Default::default(),
+            live_ids: None,
         };
 
         let tmp = scratch_dir();
@@ -371,6 +385,7 @@ fn sync_folder_logs_and_skips_failed_body_fetches() {
             }]),
             raw_bodies: bodies,
             failing_ids: failing,
+            live_ids: None,
         };
 
         let tmp = scratch_dir();
@@ -439,6 +454,7 @@ fn sync_folder_applies_flag_updates_via_update_flags() {
             ]),
             raw_bodies: Default::default(),
             failing_ids: Default::default(),
+            live_ids: None,
         };
 
         let r1 = sync_folder(&conn, &backend, None, &folder, None)
@@ -493,6 +509,7 @@ fn sync_folder_skips_flag_updates_for_unknown_messages() {
             }]),
             raw_bodies: Default::default(),
             failing_ids: Default::default(),
+            live_ids: None,
         };
 
         let r = sync_folder(&conn, &backend, None, &folder, None)
@@ -552,6 +569,7 @@ fn sync_account_walks_every_folder_and_collects_outcomes() {
             ]),
             raw_bodies: Default::default(),
             failing_ids: Default::default(),
+            live_ids: None,
         };
 
         let outcomes = qsl_sync::sync_account(&conn, &backend, None, None)
@@ -620,6 +638,7 @@ fn sync_account_continues_after_per_folder_failures() {
             }]),
             raw_bodies: Default::default(),
             failing_ids: Default::default(),
+            live_ids: None,
         };
 
         let outcomes = qsl_sync::sync_account(&conn, &backend, None, None)
@@ -687,6 +706,7 @@ fn threading_attaches_via_in_reply_to() {
             ]),
             raw_bodies: Default::default(),
             failing_ids: Default::default(),
+            live_ids: None,
         };
 
         sync_folder(&conn, &backend, None, &folder, None)
@@ -752,6 +772,7 @@ fn threading_attaches_via_subject_when_references_chain_breaks() {
             ]),
             raw_bodies: Default::default(),
             failing_ids: Default::default(),
+            live_ids: None,
         };
 
         sync_folder(&conn, &backend, None, &folder, None)
@@ -795,6 +816,7 @@ fn threading_creates_new_thread_when_no_match() {
             }]),
             raw_bodies: Default::default(),
             failing_ids: Default::default(),
+            live_ids: None,
         };
 
         sync_folder(&conn, &backend, None, &folder, None)
@@ -820,11 +842,20 @@ fn scratch_dir() -> std::path::PathBuf {
 }
 
 #[test]
-fn sync_folder_reports_removed_count() {
+fn sync_folder_deletes_backend_reported_removals() {
     rt().block_on(async {
         let conn = TursoConn::in_memory().await.unwrap();
         run_migrations(&conn).await.unwrap();
-        let (_acct_id, folder) = seed_account(&conn).await;
+        let (acct_id, folder) = seed_account(&conn).await;
+
+        // Seed three rows that the backend will then say are gone.
+        for id in ["m_gone_1", "m_gone_2", "m_gone_3"] {
+            let h = header(id, &acct_id, &folder.id, "doomed");
+            messages_repo::insert(&conn, &h, None).await.unwrap();
+        }
+        // One row that should survive (backend doesn't mention it).
+        let keep = header("m_keep", &acct_id, &folder.id, "alive");
+        messages_repo::insert(&conn, &keep, None).await.unwrap();
 
         let backend = StubBackend {
             folders: vec![folder.clone()],
@@ -843,11 +874,154 @@ fn sync_folder_reports_removed_count() {
             }]),
             raw_bodies: Default::default(),
             failing_ids: Default::default(),
+            live_ids: None,
         };
 
         let report = sync_folder(&conn, &backend, None, &folder, None)
             .await
             .unwrap();
         assert_eq!(report.removed, 3);
+
+        // Doomed rows are gone, the other survives.
+        for id in ["m_gone_1", "m_gone_2", "m_gone_3"] {
+            assert!(
+                messages_repo::find(&conn, &MessageId(id.into()))
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{id} should have been deleted"
+            );
+        }
+        assert!(messages_repo::find(&conn, &keep.id)
+            .await
+            .unwrap()
+            .is_some());
+    });
+}
+
+/// Reconciliation pass: when the backend reports a non-empty live id
+/// set on a non-initial sync, anything in storage but not in that set
+/// is pruned. Catches Gmail-style deletes (no QRESYNC, no VANISHED).
+#[test]
+fn sync_folder_prunes_stale_rows_via_reconciliation() {
+    rt().block_on(async {
+        let conn = TursoConn::in_memory().await.unwrap();
+        run_migrations(&conn).await.unwrap();
+        let (acct_id, folder) = seed_account(&conn).await;
+
+        // Cycle 1: seed the cache with three rows.
+        let h1 = header("m1", &acct_id, &folder.id, "first");
+        let h2 = header("m2", &acct_id, &folder.id, "second");
+        let h3 = header("m3", &acct_id, &folder.id, "third");
+
+        let mut live_for_cycle2 = std::collections::HashMap::new();
+        live_for_cycle2.insert(folder.id.0.clone(), vec![h1.id.clone(), h3.id.clone()]);
+
+        let backend = StubBackend {
+            folders: vec![folder.clone()],
+            responses: Mutex::new(vec![
+                // First cycle: server has all three, no `since` cursor.
+                MessageList {
+                    messages: vec![h1.clone(), h2.clone(), h3.clone()],
+                    flag_updates: vec![],
+                    new_state: SyncState {
+                        folder_id: folder.id.clone(),
+                        backend_state: "{\"uidvalidity\":1,\"highestmodseq\":0,\"uidnext\":4}"
+                            .into(),
+                    },
+                    removed: vec![],
+                },
+                // Second cycle: server reports no deltas in messages
+                // but `list_known_ids` will only return m1 + m3.
+                MessageList {
+                    messages: vec![],
+                    flag_updates: vec![],
+                    new_state: SyncState {
+                        folder_id: folder.id.clone(),
+                        backend_state: "{\"uidvalidity\":1,\"highestmodseq\":1,\"uidnext\":4}"
+                            .into(),
+                    },
+                    removed: vec![],
+                },
+            ]),
+            raw_bodies: Default::default(),
+            failing_ids: Default::default(),
+            live_ids: Some(live_for_cycle2),
+        };
+
+        let r1 = sync_folder(&conn, &backend, None, &folder, None)
+            .await
+            .unwrap();
+        assert_eq!(r1.added, 3);
+        // Reconcile pass is gated on `prior.is_some()` — first cycle
+        // shouldn't prune anything even though `live_ids` is set.
+        assert_eq!(r1.removed, 0);
+
+        let r2 = sync_folder(&conn, &backend, None, &folder, None)
+            .await
+            .unwrap();
+        assert_eq!(r2.added, 0);
+        // m2 was missing from `list_known_ids` → pruned.
+        assert_eq!(r2.removed, 1);
+
+        assert!(messages_repo::find(&conn, &h1.id).await.unwrap().is_some());
+        assert!(messages_repo::find(&conn, &h2.id).await.unwrap().is_none());
+        assert!(messages_repo::find(&conn, &h3.id).await.unwrap().is_some());
+    });
+}
+
+/// `list_known_ids` returning empty is treated as "backend opted out"
+/// and the reconcile pass leaves the cache alone — even on a cycle
+/// where everything in storage is technically "missing from the live
+/// set." Without this guard, the default trait impl (returns empty)
+/// would wipe the entire folder on every JMAP sync.
+#[test]
+fn sync_folder_skips_reconcile_when_live_set_is_empty() {
+    rt().block_on(async {
+        let conn = TursoConn::in_memory().await.unwrap();
+        run_migrations(&conn).await.unwrap();
+        let (acct_id, folder) = seed_account(&conn).await;
+
+        let h1 = header("m1", &acct_id, &folder.id, "first");
+
+        let backend = StubBackend {
+            folders: vec![folder.clone()],
+            responses: Mutex::new(vec![
+                MessageList {
+                    messages: vec![h1.clone()],
+                    flag_updates: vec![],
+                    new_state: SyncState {
+                        folder_id: folder.id.clone(),
+                        backend_state: "{\"uidvalidity\":1,\"highestmodseq\":0,\"uidnext\":2}"
+                            .into(),
+                    },
+                    removed: vec![],
+                },
+                MessageList {
+                    messages: vec![],
+                    flag_updates: vec![],
+                    new_state: SyncState {
+                        folder_id: folder.id.clone(),
+                        backend_state: "{\"uidvalidity\":1,\"highestmodseq\":1,\"uidnext\":2}"
+                            .into(),
+                    },
+                    removed: vec![],
+                },
+            ]),
+            raw_bodies: Default::default(),
+            failing_ids: Default::default(),
+            live_ids: None, // trait default → empty vec → skip prune
+        };
+
+        sync_folder(&conn, &backend, None, &folder, None)
+            .await
+            .unwrap();
+        let r2 = sync_folder(&conn, &backend, None, &folder, None)
+            .await
+            .unwrap();
+        assert_eq!(r2.removed, 0);
+        // The cached row survives because the engine refused to
+        // interpret an empty live set as "everything is gone."
+        assert!(messages_repo::find(&conn, &h1.id).await.unwrap().is_some());
     });
 }

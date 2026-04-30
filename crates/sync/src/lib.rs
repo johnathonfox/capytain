@@ -170,7 +170,58 @@ pub async fn sync_folder(
             }
         }
     }
-    report.removed = result.removed.len();
+    // Apply backend-reported deletions (JMAP's `Email/changes.destroyed`
+    // is the only path that hits this today — IMAP's adapter can't
+    // surface VANISHED responses through async-imap, so it falls
+    // through to the reconciliation pass below).
+    for id in &result.removed {
+        match messages::delete(conn, id).await {
+            Ok(()) => report.removed += 1,
+            Err(StorageError::NotFound) => {
+                debug!(message = %id.0, "delete for unknown message — skipping");
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    // Reconciliation pass: ask the backend for the full live id set
+    // for the folder and prune anything in storage that isn't in it.
+    // Catches deletes IMAP-without-QRESYNC can't otherwise observe
+    // (Gmail) and serves as a belt-and-braces correctness check
+    // against JMAP's `Email/changes` (which can miss destroys past a
+    // server's state-history retention window).
+    //
+    // Skipped on the very first sync (`prior` is `None`) — there's
+    // nothing local to prune yet, and the bounded initial fetch
+    // intentionally leaves history we don't want to misclassify as
+    // server-side deletions.
+    if prior.is_some() {
+        match backend.list_known_ids(&folder.id).await {
+            Ok(live_ids) if live_ids.is_empty() => {
+                // Backend opted out (default impl returns empty) — we
+                // can't safely diff against an "empty" set or we'd
+                // wipe the whole folder. Skip silently.
+            }
+            Ok(live_ids) => {
+                use std::collections::HashSet;
+                let live: HashSet<&str> = live_ids.iter().map(|id| id.0.as_str()).collect();
+                let local = messages::list_ids_by_folder(conn, &folder.id).await?;
+                for id in local {
+                    if live.contains(id.0.as_str()) {
+                        continue;
+                    }
+                    match messages::delete(conn, &id).await {
+                        Ok(()) => report.removed += 1,
+                        Err(StorageError::NotFound) => {}
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(folder = %folder.id.0, "list_known_ids failed; skipping reconcile: {e}");
+            }
+        }
+    }
 
     for (id, flags) in &result.flag_updates {
         match messages::update_flags(conn, id, flags).await {
