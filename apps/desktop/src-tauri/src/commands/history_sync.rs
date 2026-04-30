@@ -261,11 +261,10 @@ async fn run_driver(
     total_estimate: Option<u64>,
     cancel: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Hold the sync_db mutex for the duration of the run. The driver
-    // does small per-chunk writes and the inter-chunk sleep gives
-    // any contending IPC reader plenty of room — but those still go
-    // through the IPC `db` connection, not `sync_db`, so this lock
-    // contends only with other sync-engine tasks.
+    // Pass the Mutex<TursoConn> handle through; `pull_history` locks
+    // per-chunk so the live sync engine and other tasks can use the
+    // same connection while we wait on IMAP fetches (which dominate
+    // the wall-clock time per chunk).
     let db_arc = state.sync_db.clone();
     let app_for_progress = app.clone();
     let account_for_progress = account.clone();
@@ -304,9 +303,8 @@ async fn run_driver(
         }
     };
 
-    let db = db_arc.lock().await;
     let result = qsl_sync::history::pull_history(
-        &*db,
+        db_arc,
         backend,
         account,
         folder,
@@ -316,7 +314,6 @@ async fn run_driver(
         progress_cb,
     )
     .await;
-    drop(db);
 
     // After the driver returns, emit one final event carrying the
     // *persisted* terminal status so the UI has a clean handoff

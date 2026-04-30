@@ -14,27 +14,28 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracing::{debug, info, warn};
+use tokio::sync::Mutex;
+use tracing::{info, warn};
 
 use qsl_core::{AccountId, FolderId, HistoryChunk, MailBackend, MessageHeaders};
 use qsl_storage::{
     repos::{
         history_sync as history_repo, history_sync::HistorySyncStatus as RepoStatus, messages,
     },
-    DbConn,
+    DbConn, TursoConn,
 };
 
 use crate::SyncError;
 
 /// How many headers to ask the backend for per chunk.
 ///
-/// 1000 is the upper end of what Gmail's IMAP frontend processes in a
-/// single UID FETCH without splitting the response. Bigger chunks
-/// amortize the per-FETCH SELECT + round-trip overhead, which
-/// dominates at smaller sizes. The trade-off: a transient network
-/// blip surrenders one chunk of progress, but resume picks up the
-/// persisted anchor on the next start.
-pub const HISTORY_CHUNK_SIZE: u32 = 1000;
+/// 500 balances throughput against responsiveness — large enough to
+/// amortize the per-FETCH SELECT + round-trip overhead, small enough
+/// that the user sees a progress tick within ~10s of clicking Start
+/// and Cancel takes effect within one chunk. Going higher (we tried
+/// 1000) made the first chunk take 30+ seconds on a fresh Gmail
+/// account, which reads to the user as "it's not pulling at all".
+pub const HISTORY_CHUNK_SIZE: u32 = 500;
 
 /// Sleep between chunks. Kept small so the network connection stays
 /// hot; Gmail's "Too many simultaneous connections" gate trips on
@@ -66,7 +67,7 @@ pub struct HistoryProgress {
 }
 
 /// Drive a full-history pull for `(account, folder)` against
-/// `backend`, persisting headers + threading them as they arrive.
+/// `backend`, persisting headers as they arrive.
 ///
 /// `start_anchor` is the UID strictly above which to fetch. The
 /// caller is responsible for picking it: usually `min(local UIDs in
@@ -74,17 +75,24 @@ pub struct HistoryProgress {
 /// resume. `total_estimate` is the upper bound for progress display
 /// (usually `uidnext - 1` captured at start).
 ///
+/// `db` is locked **per-chunk**, not for the whole pull, so the live
+/// sync engine and other commands can keep using the same connection
+/// while the IMAP fetch is in flight (which can take seconds per
+/// chunk). The IMAP backend has its own per-session mutex so
+/// concurrent commands queue cleanly there.
+///
 /// `cancel` flips when the user clicks cancel from the UI; checked
-/// between chunks. `progress` is invoked on every chunk so the UI
-/// can render percent-complete; failures emitting it are not fatal
-/// (a dropped event just means a stale UI label, not lost data).
+/// between chunks. `progress` is invoked at start and on every chunk
+/// so the UI can render percent-complete; the start invocation gives
+/// the user immediate "it's running" feedback before the first chunk
+/// returns.
 ///
 /// Returns when the historical tail is exhausted, the cancel flag
 /// flips, or an unrecoverable error trips the retry budget. The
 /// `history_sync_state` row reflects the terminal status either way.
 #[allow(clippy::too_many_arguments)]
 pub async fn pull_history<F>(
-    conn: &dyn DbConn,
+    db: Arc<Mutex<TursoConn>>,
     backend: &dyn MailBackend,
     account: &AccountId,
     folder: &FolderId,
@@ -96,17 +104,29 @@ pub async fn pull_history<F>(
 where
     F: FnMut(HistoryProgress),
 {
-    // Persist the running row up front. The caller already wrote a
-    // row in `start()`; this keeps `pull_history` defensive against
-    // direct invocations.
-    history_repo::start(
-        conn,
-        account,
-        folder,
-        start_anchor as i64,
-        total_estimate.map(|v| v as i64),
-    )
-    .await?;
+    // Persist the running row up front. Brief lock; release so the
+    // sync engine can use the connection while we wait on IMAP.
+    {
+        let conn = db.lock().await;
+        history_repo::start(
+            &*conn,
+            account,
+            folder,
+            start_anchor as i64,
+            total_estimate.map(|v| v as i64),
+        )
+        .await?;
+    }
+
+    // Emit a starting progress event so the UI shows "0 fetched"
+    // immediately on click rather than waiting tens of seconds for
+    // the first chunk to land.
+    progress(HistoryProgress {
+        fetched_total: 0,
+        anchor_uid: start_anchor as i64,
+        total_estimate: total_estimate.map(|v| v as i64),
+        finished: false,
+    });
 
     let mut anchor = start_anchor;
     let mut fetched_total: u32 = 0;
@@ -120,7 +140,9 @@ where
                 fetched = fetched_total,
                 "history sync canceled"
             );
-            history_repo::set_status(conn, account, folder, RepoStatus::Canceled, None).await?;
+            let conn = db.lock().await;
+            history_repo::set_status(&*conn, account, folder, RepoStatus::Canceled, None).await?;
+            drop(conn);
             progress(HistoryProgress {
                 fetched_total,
                 anchor_uid: anchor as i64,
@@ -137,7 +159,9 @@ where
                 fetched = fetched_total,
                 "history sync exhausted tail"
             );
-            history_repo::set_status(conn, account, folder, RepoStatus::Completed, None).await?;
+            let conn = db.lock().await;
+            history_repo::set_status(&*conn, account, folder, RepoStatus::Completed, None).await?;
+            drop(conn);
             progress(HistoryProgress {
                 fetched_total,
                 anchor_uid: 0,
@@ -147,6 +171,8 @@ where
             return Ok(());
         }
 
+        // Network fetch — explicitly NOT holding the DB lock. This
+        // is where the wall-clock seconds go on a big mailbox.
         let chunk = match backend
             .pull_history_chunk(folder, anchor, HISTORY_CHUNK_SIZE)
             .await
@@ -165,9 +191,17 @@ where
                     "history sync chunk failed: {e}"
                 );
                 if consecutive_failures >= MAX_CHUNK_RETRIES {
-                    let msg = format!("{} consecutive failures: {e}", consecutive_failures);
-                    history_repo::set_status(conn, account, folder, RepoStatus::Error, Some(&msg))
-                        .await?;
+                    let msg = format!("{consecutive_failures} consecutive failures: {e}");
+                    let conn = db.lock().await;
+                    history_repo::set_status(
+                        &*conn,
+                        account,
+                        folder,
+                        RepoStatus::Error,
+                        Some(&msg),
+                    )
+                    .await?;
+                    drop(conn);
                     progress(HistoryProgress {
                         fetched_total,
                         anchor_uid: anchor as i64,
@@ -186,13 +220,18 @@ where
             next_anchor,
         } = chunk;
 
-        let inserted = persist_chunk(conn, &headers).await?;
+        // Persist + update progress in a single locked window.
+        let inserted = {
+            let conn = db.lock().await;
+            let inserted = persist_chunk(&*conn, &headers).await?;
+            history_repo::update_progress(&*conn, account, folder, next_anchor as i64, inserted)
+                .await?;
+            inserted
+        };
         fetched_total = fetched_total.saturating_add(inserted);
 
         let advanced = next_anchor < anchor;
         anchor = next_anchor;
-
-        history_repo::update_progress(conn, account, folder, anchor as i64, inserted).await?;
 
         progress(HistoryProgress {
             fetched_total,
@@ -201,7 +240,7 @@ where
             finished: false,
         });
 
-        debug!(
+        info!(
             account = %account.0,
             folder = %folder.0,
             anchor,
@@ -217,7 +256,9 @@ where
         // the chunk equals the previous anchor minus 1 — that's
         // legitimate progress because subsequent loop reads anchor.
         if !advanced && headers.is_empty() {
-            history_repo::set_status(conn, account, folder, RepoStatus::Completed, None).await?;
+            let conn = db.lock().await;
+            history_repo::set_status(&*conn, account, folder, RepoStatus::Completed, None).await?;
+            drop(conn);
             progress(HistoryProgress {
                 fetched_total,
                 anchor_uid: 0,
