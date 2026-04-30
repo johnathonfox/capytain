@@ -16,6 +16,7 @@
 //! dependency direction.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use qsl_auth::{lookup as provider_lookup, refresh_access_token, TokenVault};
 use qsl_core::{Account, AccountId, BackendKind, MailBackend, MailError};
@@ -23,7 +24,20 @@ use qsl_imap_client::ImapBackend;
 use qsl_jmap_client::JmapBackend;
 use qsl_storage::repos;
 
-use crate::state::AppState;
+use crate::state::{AppState, CachedBackend};
+
+/// How long a cached backend may serve foreground commands before it
+/// gets rebuilt. Both major providers we support today (Google,
+/// Fastmail) issue OAuth access tokens with ~3600s TTLs; rebuilding
+/// at 30 minutes leaves a comfortable margin so a still-hot token
+/// gets refreshed long before the server starts 401ing.
+///
+/// The IDLE / EventSource watchers don't go through this cache —
+/// they run their own reconnect loop calling `fresh_imap_params` /
+/// `fresh_jmap_params` per dial — so push notifications are
+/// independently self-healing. This constant only affects the
+/// foreground sync + Tauri-command path.
+const MAX_BACKEND_AGE: Duration = Duration::from_secs(30 * 60);
 
 /// Connection parameters for opening a fresh IMAP session — used by
 /// the IDLE watcher to dial side connections without going through
@@ -45,17 +59,34 @@ pub struct JmapDialParams {
     pub access_token: String,
 }
 
-/// Look up `account_id` in the backend cache; on miss, fetch the
-/// account row, refresh its access token, dial the provider, and
-/// install the resulting handle in the cache.
+/// Look up `account_id` in the backend cache; on miss (or when the
+/// cached entry is older than [`MAX_BACKEND_AGE`]), fetch the account
+/// row, refresh its access token, dial the provider, and install
+/// the resulting handle in the cache.
+///
+/// The age-based rebuild is what keeps foreground commands working
+/// past the OAuth access-token TTL: without it, an app left running
+/// for an hour sees its first post-expiry IMAP / JMAP call return
+/// `MailError::Auth` and the cached backend stays poisoned forever.
 pub async fn get_or_open(
     state: &AppState,
     account_id: &AccountId,
 ) -> Result<Arc<dyn MailBackend>, MailError> {
     {
-        let cache = state.backends.lock().await;
-        if let Some(backend) = cache.get(account_id) {
-            return Ok(backend.clone());
+        let mut cache = state.backends.lock().await;
+        if let Some(entry) = cache.get(account_id) {
+            if entry.built_at.elapsed() < MAX_BACKEND_AGE {
+                return Ok(entry.backend.clone());
+            }
+            // Cached backend is past the OAuth-TTL window. Drop it
+            // so the open below builds a fresh one with a refreshed
+            // access token.
+            tracing::debug!(
+                account = %account_id.0,
+                age_secs = entry.built_at.elapsed().as_secs(),
+                "evicting aged backend cache entry; will rebuild"
+            );
+            cache.remove(account_id);
         }
     }
 
@@ -71,8 +102,25 @@ pub async fn get_or_open(
     let backend = open(&account).await?;
 
     let mut cache = state.backends.lock().await;
-    let entry = cache.entry(account_id.clone()).or_insert(backend);
-    Ok(entry.clone())
+    let entry = cache
+        .entry(account_id.clone())
+        .or_insert_with(|| CachedBackend {
+            backend: backend.clone(),
+            built_at: Instant::now(),
+        });
+    Ok(entry.backend.clone())
+}
+
+/// Drop the cached backend for `account_id` if any. Called when the
+/// account is removed by the user or — in a future iteration — when
+/// a foreground command catches an explicit `MailError::Auth` and
+/// wants to force a rebuild on the next call.
+#[allow(dead_code)] // call sites land in the W19 follow-up
+pub async fn evict(state: &AppState, account_id: &AccountId) {
+    let mut cache = state.backends.lock().await;
+    if cache.remove(account_id).is_some() {
+        tracing::debug!(account = %account_id.0, "evicted backend cache entry");
+    }
 }
 
 /// Build a fresh `MailBackend` for `account` without going through
