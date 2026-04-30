@@ -13,6 +13,7 @@
 //! JMAP-specific quirks: a backend either returns the right shape or
 //! it raises a `MailError` the caller can act on.
 
+pub mod history;
 pub mod outbox_drain;
 pub mod threading;
 

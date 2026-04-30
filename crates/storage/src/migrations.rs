@@ -79,6 +79,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "drafts_server_id",
         sql: include_str!("../migrations/0009_drafts_server_id.sql"),
     },
+    Migration {
+        version: 10,
+        name: "history_sync",
+        sql: include_str!("../migrations/0010_history_sync.sql"),
+    },
 ];
 
 /// Bookkeeping table. Created lazily by [`run_migrations`] on first run.

@@ -16,6 +16,7 @@ pub mod attachments;
 pub mod contacts;
 pub mod drafts;
 pub mod folders;
+pub mod history_sync;
 pub mod messages;
 pub mod outbox;
 pub mod remote_content_opt_ins;

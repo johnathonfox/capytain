@@ -141,6 +141,13 @@ async fn run(app: &AppHandle) -> Result<(), String> {
         }
     }
 
+    // Resume any history-sync ("Pull full mail history") jobs that
+    // were running at the previous app exit. Done here, after
+    // bootstrap, so the resumed pulls don't compete with the
+    // bootstrap pass for the shared backend connection but do start
+    // before the live watcher loop kicks in.
+    crate::commands::history_sync::resume_running_jobs(app).await;
+
     let any_imap = imap_accounts.iter().any(|(_, fs)| !fs.is_empty());
     if !any_imap && jmap_accounts.is_empty() {
         info!("sync engine: nothing to watch — exiting");

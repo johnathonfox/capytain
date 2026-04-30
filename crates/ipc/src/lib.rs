@@ -123,6 +123,37 @@ pub enum SyncEvent {
         folder: FolderId,
         error: String,
     },
+    /// Progress update from the "pull full mail history" backfill.
+    /// Emitted on every chunk + on terminal transitions (completed,
+    /// canceled, error). The Settings UI listens for these to advance
+    /// per-folder progress bars.
+    HistorySyncProgress {
+        account: AccountId,
+        folder: FolderId,
+        status: String,
+        fetched: u32,
+        total_estimate: Option<u32>,
+        last_error: Option<String>,
+    },
+}
+
+/// One row of `history_sync_state` shaped for the wire. Mirrors
+/// `qsl_storage::repos::history_sync::HistorySyncRow` minus the chrono
+/// types so the wasm UI can deserialize without pulling those.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistorySyncStatus {
+    pub account: AccountId,
+    pub folder: FolderId,
+    pub folder_label: String,
+    pub status: String,
+    pub fetched: u32,
+    pub total_estimate: Option<u32>,
+    pub last_error: Option<String>,
+    /// Unix timestamp seconds. UIs format relative to "now" so the
+    /// raw int avoids dragging chrono into the wasm bundle.
+    pub started_at: i64,
+    pub updated_at: i64,
+    pub completed_at: Option<i64>,
 }
 
 /// One row in the compose pane's autocomplete dropdown.
