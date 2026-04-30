@@ -27,11 +27,29 @@ pub fn compose_reader_html(body_html: Option<&str>, body_text: Option<&str>) -> 
     // Headers (subject / from / date / recipients) are rendered by
     // the Dioxus side as a styled card; the iframe contains body
     // markup only so the user sees each piece of info exactly once.
+    // CSP applied inside the iframe srcdoc as a defence-in-depth layer
+    // behind the ammonia allowlist + adblock filter. `default-src 'none'`
+    // blocks every fetch except what we explicitly permit:
+    //   - `img-src data: https:` so per-sender opt-in remote images and
+    //     inline data URIs render; `http:` and other schemes are blocked.
+    //   - `style-src 'unsafe-inline'` because the wrapper's <style>
+    //     block is inline and email content keeps its `style="..."`
+    //     attributes.
+    //   - `script-src 'unsafe-inline'` for the click forwarder below;
+    //     the iframe sandbox is `allow-scripts` already, so this only
+    //     scopes which scripts can run, not whether scripts run at all.
+    //   - `base-uri 'none'` and `form-action 'none'` shut off two
+    //     classic exfil channels (rewriting the document base, posting
+    //     a smuggled form to an attacker URL).
+    // If the sanitizer ever lets a tag through that fetches against
+    // `connect-src`, `frame-src`, `font-src`, etc., the CSP shuts it
+    // off rather than relying solely on ammonia's allowlist.
     format!(
         r#"<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: https:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
   <style>
     body {{
       font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;

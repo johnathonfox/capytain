@@ -589,10 +589,17 @@ async fn emit_folder_outcome(
                 let preview = if report.added == 1 {
                     let state: tauri::State<'_, AppState> = app.state();
                     let db = state.sync_db.lock().await;
-                    qsl_storage::repos::messages::list_by_folder(&*db, folder, 1, 0)
-                        .await
-                        .ok()
-                        .and_then(|mut v| v.pop())
+                    match qsl_storage::repos::messages::list_by_folder(&*db, folder, 1, 0).await {
+                        Ok(mut v) => v.pop(),
+                        Err(e) => {
+                            warn!(
+                                account = %account.0,
+                                folder = %folder.0,
+                                "preview lookup failed: {e}; firing notification without sender/subject"
+                            );
+                            None
+                        }
+                    }
                 } else {
                     None
                 };

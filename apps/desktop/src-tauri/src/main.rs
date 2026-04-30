@@ -35,6 +35,32 @@ use tauri::Manager;
 use crate::state::AppState;
 
 fn main() {
+    // Linux webview workaround. webkit2gtk's DMA-BUF renderer asks
+    // libgbm for framebuffers; on hybrid AMD/NVIDIA boxes (or any rig
+    // where libgbm lands on the NVIDIA proprietary stack) the GBM
+    // allocator returns `Invalid argument` because the proprietary
+    // driver doesn't expose the format modifiers webkit wants, and the
+    // webview paints nothing — the chrome shows but the body is blank.
+    // Rolling webkit back to its SHM rendering path bypasses GBM
+    // entirely and makes the webview render normally. The path is a
+    // shade slower than DMA-BUF on hardware where DMA-BUF actually
+    // works, but the performance hit is negligible for an email client.
+    //
+    // Gated on `is_none()` so a user export still wins, and confined
+    // to Linux because macOS / Windows webviews don't go through this
+    // path at all.
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+            // SAFETY: called pre-main, before any other thread can
+            // observe or mutate the process environment.
+            #[allow(unsafe_code)]
+            unsafe {
+                std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+            }
+        }
+    }
+
     // Telemetry: route Tauri / plugin logs through `tracing`. Matches
     // the mailcli pattern so operators can use the same `RUST_LOG`
     // filters. `init` returns an error if it has already been called in
