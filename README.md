@@ -97,6 +97,30 @@ cargo run -p mailcli -- list-messages your@gmail.com INBOX
 
 Until then, `cargo run -p mailcli -- --log-level debug` exercises the binary stub and shared tracing init.
 
+### Resetting local data
+
+QSL's local cache (the Turso database, fetched message blobs, and queued outbox items) lives in the OS data directory:
+
+| Platform | Path |
+|---|---|
+| **Linux** | `~/.local/share/qsl/` |
+| **macOS** | `~/Library/Application Support/app.qsl.qsl/` |
+| **Windows** | `%APPDATA%\qsl\qsl\data\` |
+
+To wipe the cache (e.g. after a schema migration wedge or to clear a corrupted state), quit the app and remove that directory. The next launch starts from scratch and re-syncs.
+
+OAuth refresh tokens live in the OS keychain under service `com.qsl.app`, separate from the cache. Clear them with:
+
+```sh
+# Linux (libsecret / GNOME Keyring / KWallet)
+secret-tool clear service com.qsl.app
+
+# macOS
+security delete-generic-password -s com.qsl.app
+
+# Windows: Credential Manager → Generic Credentials → entries starting with com.qsl.app
+```
+
 ## Project structure
 
 See [`DESIGN.md` §8](./DESIGN.md#8-project-structure-cargo-workspace) for the full layout. At a glance:
