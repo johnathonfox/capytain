@@ -1,21 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `drafts_*` Tauri commands. Phase 2 Week 17.
+//! `drafts_*` Tauri commands. Phase 2 Week 17 + Week 20.
 //!
-//! Local-only persistence for outgoing messages-in-progress. The
-//! upstream-sync side (writing to the server's Drafts mailbox) lands
-//! in Week 20 via a `save_draft` outbox op; today these commands
-//! never touch the network. The compose pane uses
-//! `drafts_save` on every keystroke-debounced auto-save tick and on
-//! manual Save / Discard, `drafts_load` to round-trip a draft after
-//! window close + re-open or process restart, and `drafts_list` to
-//! populate a "Drafts" sidebar entry.
+//! Local-first persistence for outgoing messages-in-progress, plus
+//! best-effort upstream sync to the account's Drafts mailbox via the
+//! outbox. The compose pane calls `drafts_save` on every
+//! keystroke-debounced auto-save tick and on manual Save / Discard;
+//! every save persists locally and (when the draft has at least one
+//! recipient and a from-able account) enqueues a coalescing
+//! `OP_SAVE_DRAFT` outbox row keyed by the local draft id, so a
+//! flurry of typing doesn't generate a flurry of server APPENDs.
+//! The drain dispatches each row to `MailBackend::save_draft`.
 
+use base64::engine::general_purpose::STANDARD as base64_engine;
+use base64::Engine as _;
 use chrono::Utc;
 
 use qsl_core::{Draft, DraftAttachment, DraftBodyKind, EmailAddress};
 use qsl_ipc::{AccountId, DraftId, IpcResult};
-use qsl_storage::repos::drafts as drafts_repo;
+use qsl_mime::compose::build_rfc5322;
+use qsl_storage::repos::{accounts as accounts_repo, drafts as drafts_repo, outbox as outbox_repo};
 use serde::Deserialize;
 use tauri::State;
 
@@ -93,6 +97,58 @@ pub async fn drafts_save(state: State<'_, AppState>, input: DraftsSaveInput) -> 
         updated_at: now,
     };
     drafts_repo::save(&*db, &row).await?;
+
+    // Best-effort upstream sync. We only enqueue when:
+    //   1. The draft has at least one recipient — `build_rfc5322`
+    //      rejects empty-recipient messages, and a freshly opened
+    //      compose with no To/Cc/Bcc set yet would just bounce off
+    //      that check and DLQ. Skipping silently here keeps the
+    //      auto-save tick noise-free until the user starts typing
+    //      addresses.
+    //   2. The account is still around — accounts_repo::find returns
+    //      None mid-removal, in which case there's nothing to APPEND
+    //      to.
+    //
+    // Failure to enqueue is logged-and-swallowed: the local draft is
+    // already persisted, that's the source of truth. The user will
+    // see their draft locally regardless of whether the server-side
+    // copy ever lands.
+    if !row.to.is_empty() || !row.cc.is_empty() || !row.bcc.is_empty() {
+        if let Some(account) = accounts_repo::find(&*db, &row.account_id).await? {
+            let from = EmailAddress {
+                address: account.email_address.clone(),
+                display_name: Some(account.display_name.clone()),
+            };
+            match build_rfc5322(&row, &from) {
+                Ok(built) => {
+                    let payload = serde_json::json!({
+                        "draft_id": id.0,
+                        "raw_b64": base64_engine.encode(&built.bytes),
+                    });
+                    if let Err(e) = outbox_repo::enqueue_dedup(
+                        &*db,
+                        &row.account_id,
+                        qsl_sync::outbox_drain::OP_SAVE_DRAFT,
+                        &payload.to_string(),
+                        &id.0,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            id = %id.0,
+                            "drafts_save: outbox enqueue failed: {e}"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        id = %id.0,
+                        "drafts_save: skipping upstream sync (build_rfc5322: {e})"
+                    );
+                }
+            }
+        }
+    }
     drop(db);
 
     tracing::debug!(id = %id.0, "drafts_save");

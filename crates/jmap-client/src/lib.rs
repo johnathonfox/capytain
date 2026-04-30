@@ -418,10 +418,34 @@ impl MailBackend for JmapBackend {
     }
 
     async fn save_draft(&self, raw_rfc822: &[u8]) -> Result<MessageId, MailError> {
-        let _ = raw_rfc822;
-        Err(MailError::Other(
-            "JMAP write path arrives in Phase 1 Week 2".into(),
-        ))
+        // Locate the Drafts mailbox via role (same look-up the
+        // submit_message path does); JMAP wants the actual mailbox
+        // id rather than a name.
+        let folders = self.list_folders().await?;
+        let drafts_id = folders
+            .into_iter()
+            .find_map(|f| (f.role == Some(FolderRole::Drafts)).then_some(f.id))
+            .ok_or_else(|| MailError::NotFound("JMAP save_draft: no Drafts mailbox".into()))?;
+
+        let client = self.client.lock().await;
+        let jmap_account = self.account_id.0.clone();
+        let email = client
+            .email_import_account(
+                &jmap_account,
+                raw_rfc822.to_vec(),
+                [drafts_id.0.as_str()],
+                Some(["$draft"]),
+                None,
+            )
+            .await
+            .map_err(map_jmap_error)?;
+        drop(client);
+        let id = email
+            .id()
+            .ok_or_else(|| MailError::Protocol("Email/import returned no id".into()))?
+            .to_string();
+        debug!(email_id = %id, drafts = %drafts_id.0, "JMAP save_draft import ok");
+        Ok(MessageId(id))
     }
 
     async fn submit_message(&self, raw_rfc822: &[u8]) -> Result<Option<MessageId>, MailError> {

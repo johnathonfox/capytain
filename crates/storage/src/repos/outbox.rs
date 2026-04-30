@@ -110,6 +110,80 @@ pub async fn enqueue(
     Ok(id)
 }
 
+/// Append-or-replace by `dedup_key`. If a row with the same
+/// `(account_id, op_kind, dedup_key)` already exists, overwrite its
+/// `payload_json` with the latest value, reset `attempts`,
+/// `next_attempt_at`, and `last_error` so a previously DLQ'd row
+/// gets one more chance, and return its existing id. Otherwise
+/// insert a fresh row.
+///
+/// Used by producers that fire repeatedly for the same logical
+/// mutation — the compose pane's auto-save tick is the textbook
+/// example: every 5 seconds it wants the *latest* draft bytes
+/// uploaded, not a queue of every intermediate keystroke. Without
+/// this coalesce a busy editing session would generate a `save_draft`
+/// per tick and, after the drain runs, that many server-side draft
+/// copies.
+pub async fn enqueue_dedup(
+    conn: &dyn DbConn,
+    account: &AccountId,
+    op_kind: &str,
+    payload_json: &str,
+    dedup_key: &str,
+) -> Result<String, StorageError> {
+    let now = Utc::now();
+    // Check for an existing row first. UPSERT-via-unique-index would
+    // be tighter but the partial index doesn't play nicely with
+    // SQLite's `ON CONFLICT` clause across all the storage backends
+    // we target; an explicit lookup keeps the path uniform.
+    let existing = conn
+        .query_opt(
+            "SELECT id FROM outbox \
+              WHERE account_id = ?1 AND op_kind = ?2 AND dedup_key = ?3",
+            Params(vec![
+                Value::Text(&account.0),
+                Value::OwnedText(op_kind.to_string()),
+                Value::OwnedText(dedup_key.to_string()),
+            ]),
+        )
+        .await?;
+    if let Some(row) = existing {
+        let id = row.get_str("id")?.to_string();
+        conn.execute(
+            "UPDATE outbox \
+                SET payload_json    = ?2, \
+                    attempts        = 0, \
+                    next_attempt_at = ?3, \
+                    last_error      = NULL \
+              WHERE id = ?1",
+            Params(vec![
+                Value::Text(&id),
+                Value::OwnedText(payload_json.to_string()),
+                Value::Integer(now.timestamp()),
+            ]),
+        )
+        .await?;
+        return Ok(id);
+    }
+    let id = new_id();
+    conn.execute(
+        "INSERT INTO outbox \
+            (id, account_id, op_kind, payload_json, created_at, \
+             attempts, next_attempt_at, last_error, dedup_key) \
+            VALUES (?1, ?2, ?3, ?4, ?5, 0, ?5, NULL, ?6)",
+        Params(vec![
+            Value::Text(&id),
+            Value::Text(&account.0),
+            Value::OwnedText(op_kind.to_string()),
+            Value::OwnedText(payload_json.to_string()),
+            Value::Integer(now.timestamp()),
+            Value::OwnedText(dedup_key.to_string()),
+        ]),
+    )
+    .await?;
+    Ok(id)
+}
+
 /// Pull every row whose `next_attempt_at` is at or before `now`,
 /// in oldest-first order, capped at `limit`. The drain worker
 /// calls this on a timer and processes each row in turn.

@@ -28,6 +28,7 @@ use qsl_sync::outbox_drain::{
 /// fails for the first N invocations to exercise the retry path.
 type MoveLog = std::sync::Mutex<Vec<(Vec<MessageId>, FolderId)>>;
 type DeleteLog = std::sync::Mutex<Vec<Vec<MessageId>>>;
+type DraftLog = std::sync::Mutex<Vec<Vec<u8>>>;
 
 struct FailingFlagsBackend {
     fail_count: AtomicUsize,
@@ -38,6 +39,9 @@ struct FailingFlagsBackend {
     move_observer: Option<MoveLog>,
     /// Same for `delete_messages`.
     delete_observer: Option<DeleteLog>,
+    /// Records each `save_draft` call's raw bytes — exercises the
+    /// `OP_SAVE_DRAFT` dispatch arm.
+    save_draft_observer: Option<DraftLog>,
 }
 
 impl FailingFlagsBackend {
@@ -48,6 +52,7 @@ impl FailingFlagsBackend {
             fail_first_n,
             move_observer: None,
             delete_observer: None,
+            save_draft_observer: None,
         }
     }
 
@@ -58,6 +63,11 @@ impl FailingFlagsBackend {
 
     fn with_delete_observer(mut self) -> Self {
         self.delete_observer = Some(std::sync::Mutex::new(Vec::new()));
+        self
+    }
+
+    fn with_save_draft_observer(mut self) -> Self {
+        self.save_draft_observer = Some(std::sync::Mutex::new(Vec::new()));
         self
     }
 }
@@ -114,8 +124,11 @@ impl MailBackend for FailingFlagsBackend {
         }
         Ok(())
     }
-    async fn save_draft(&self, _: &[u8]) -> Result<MessageId, MailError> {
-        unimplemented!()
+    async fn save_draft(&self, raw: &[u8]) -> Result<MessageId, MailError> {
+        if let Some(observer) = self.save_draft_observer.as_ref() {
+            observer.lock().unwrap().push(raw.to_vec());
+        }
+        Ok(MessageId("draft-saved".into()))
     }
     async fn submit_message(&self, _: &[u8]) -> Result<Option<MessageId>, MailError> {
         unimplemented!()
@@ -339,5 +352,108 @@ fn drain_dispatches_delete_messages() {
         let observed = backend.delete_observer.as_ref().unwrap().lock().unwrap();
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0], payload.ids);
+    });
+}
+
+///  collapses repeated calls for the same key into a
+/// single row. The compose pane's auto-save tick relies on this so a
+/// burst of typing produces one APPEND per drain cycle rather than
+/// one per keystroke.
+#[test]
+fn enqueue_dedup_collapses_repeated_calls() {
+    rt().block_on(async {
+        let conn = TursoConn::in_memory().await.unwrap();
+        run_migrations(&conn).await.unwrap();
+        let account = seed_account(&conn).await;
+
+        let id1 = outbox_repo::enqueue_dedup(
+            &conn,
+            &account,
+            "save_draft",
+            r#"{"version":1}"#,
+            "draft-7",
+        )
+        .await
+        .unwrap();
+        let id2 = outbox_repo::enqueue_dedup(
+            &conn,
+            &account,
+            "save_draft",
+            r#"{"version":2}"#,
+            "draft-7",
+        )
+        .await
+        .unwrap();
+        assert_eq!(id1, id2, "same dedup_key must reuse the row");
+
+        // Different key → different row.
+        let id3 = outbox_repo::enqueue_dedup(
+            &conn,
+            &account,
+            "save_draft",
+            r#"{"version":1}"#,
+            "draft-8",
+        )
+        .await
+        .unwrap();
+        assert_ne!(id1, id3);
+
+        let due = outbox_repo::list_due(&conn, Utc::now(), 32).await.unwrap();
+        assert_eq!(due.len(), 2, "only two distinct rows after three enqueues");
+        let row7 = due.iter().find(|e| e.id == id1).unwrap();
+        assert!(
+            row7.payload_json.contains("\"version\":2"),
+            "latest payload must win: {}",
+            row7.payload_json
+        );
+    });
+}
+
+/// End-to-end: enqueue a save_draft row + drain it; the backend's
+/// save_draft observer should see the decoded RFC 5322 bytes.
+#[test]
+fn drain_dispatches_save_draft_with_raw_bytes() {
+    use base64::engine::general_purpose::STANDARD as base64_engine;
+    use base64::Engine as _;
+    rt().block_on(async {
+        let conn = TursoConn::in_memory().await.unwrap();
+        run_migrations(&conn).await.unwrap();
+        let account = seed_account(&conn).await;
+
+        let raw = b"From: test
+Subject: hi
+
+body
+";
+        let payload = serde_json::json!({
+            "draft_id": "draft-99",
+            "raw_b64": base64_engine.encode(raw),
+        });
+        outbox_repo::enqueue_dedup(
+            &conn,
+            &account,
+            outbox_drain::OP_SAVE_DRAFT,
+            &payload.to_string(),
+            "draft-99",
+        )
+        .await
+        .unwrap();
+
+        let backend = Arc::new(FailingFlagsBackend::new(0).with_save_draft_observer());
+        let resolver = StubResolver {
+            backend: backend.clone(),
+        };
+        let outcomes = outbox_drain::drain(&conn, &resolver, 32).await.unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(&outcomes[0], DrainOutcome::Sent { .. }));
+
+        let observed = backend
+            .save_draft_observer
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0], raw.to_vec());
     });
 }
