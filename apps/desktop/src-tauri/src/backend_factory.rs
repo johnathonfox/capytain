@@ -15,6 +15,7 @@
 //! `qsl-jmap-client` into the engine would invert the
 //! dependency direction.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -23,8 +24,9 @@ use qsl_core::{Account, AccountId, BackendKind, MailBackend, MailError};
 use qsl_imap_client::ImapBackend;
 use qsl_jmap_client::JmapBackend;
 use qsl_storage::repos;
+use tokio::sync::OnceCell;
 
-use crate::state::{AppState, CachedBackend};
+use crate::state::{AppState, BackendSlot, CachedBackend};
 
 /// How long a cached backend may serve foreground commands before it
 /// gets rebuilt. Both major providers we support today (Google,
@@ -64,6 +66,13 @@ pub struct JmapDialParams {
 /// row, refresh its access token, dial the provider, and install
 /// the resulting handle in the cache.
 ///
+/// Single-flighted via `OnceCell` per account: if N concurrent
+/// commands all hit a cold cache for the same account, the first
+/// runs `refresh_access_token` + `connect`, and the rest park on the
+/// shared `OnceCell::get_or_try_init` future. They all return the
+/// same `Arc<dyn MailBackend>` once it resolves. Different accounts
+/// initialize in parallel.
+///
 /// The age-based rebuild is what keeps foreground commands working
 /// past the OAuth access-token TTL: without it, an app left running
 /// for an hour sees its first post-expiry IMAP / JMAP call return
@@ -72,24 +81,53 @@ pub async fn get_or_open(
     state: &AppState,
     account_id: &AccountId,
 ) -> Result<Arc<dyn MailBackend>, MailError> {
-    {
+    let slot: BackendSlot = {
         let mut cache = state.backends.lock().await;
-        if let Some(entry) = cache.get(account_id) {
-            if entry.built_at.elapsed() < MAX_BACKEND_AGE {
-                return Ok(entry.backend.clone());
+        match cache.get(account_id) {
+            // Already initialized and still fresh — fast path.
+            Some(slot)
+                if slot
+                    .get()
+                    .is_some_and(|e| e.built_at.elapsed() < MAX_BACKEND_AGE) =>
+            {
+                return Ok(slot.get().unwrap().backend.clone());
             }
-            // Cached backend is past the OAuth-TTL window. Drop it
-            // so the open below builds a fresh one with a refreshed
-            // access token.
-            tracing::debug!(
-                account = %account_id.0,
-                age_secs = entry.built_at.elapsed().as_secs(),
-                "evicting aged backend cache entry; will rebuild"
-            );
-            cache.remove(account_id);
+            // Initialized but aged — replace with a fresh empty slot.
+            Some(slot) if slot.get().is_some() => {
+                let age_secs = slot.get().unwrap().built_at.elapsed().as_secs();
+                tracing::debug!(
+                    account = %account_id.0,
+                    age_secs,
+                    "evicting aged backend cache entry; will rebuild"
+                );
+                let new_slot: BackendSlot = Arc::new(OnceCell::new());
+                cache.insert(account_id.clone(), new_slot.clone());
+                new_slot
+            }
+            // Mid-init — share the slot so we wait on the same future.
+            Some(slot) => slot.clone(),
+            // Cold miss — install an empty slot we'll initialize.
+            None => {
+                let new_slot: BackendSlot = Arc::new(OnceCell::new());
+                cache.insert(account_id.clone(), new_slot.clone());
+                new_slot
+            }
         }
-    }
+    };
 
+    let entry = slot
+        .get_or_try_init(|| build_cached_backend(state, account_id))
+        .await?;
+    Ok(entry.backend.clone())
+}
+
+/// Build a fresh `CachedBackend` for `account_id`. Loads the account
+/// row, refreshes the access token, dials the provider, stamps an
+/// `Instant` for the age check.
+async fn build_cached_backend(
+    state: &AppState,
+    account_id: &AccountId,
+) -> Result<CachedBackend, MailError> {
     let db = state.db.lock().await;
     let account = repos::accounts::get(&*db, account_id).await.map_err(|e| {
         MailError::Other(format!(
@@ -100,26 +138,62 @@ pub async fn get_or_open(
     drop(db);
 
     let backend = open(&account).await?;
-
-    let mut cache = state.backends.lock().await;
-    let entry = cache
-        .entry(account_id.clone())
-        .or_insert_with(|| CachedBackend {
-            backend: backend.clone(),
-            built_at: Instant::now(),
-        });
-    Ok(entry.backend.clone())
+    Ok(CachedBackend {
+        backend,
+        built_at: Instant::now(),
+    })
 }
 
 /// Drop the cached backend for `account_id` if any. Called when the
-/// account is removed by the user or — in a future iteration — when
-/// a foreground command catches an explicit `MailError::Auth` and
-/// wants to force a rebuild on the next call.
-#[allow(dead_code)] // call sites land in the W19 follow-up
+/// account is removed by the user, or by [`with_auth_retry`] after a
+/// foreground op returns `MailError::Auth` so the next call rebuilds
+/// against a freshly-refreshed token.
 pub async fn evict(state: &AppState, account_id: &AccountId) {
     let mut cache = state.backends.lock().await;
     if cache.remove(account_id).is_some() {
         tracing::debug!(account = %account_id.0, "evicted backend cache entry");
+    }
+}
+
+/// Run a backend operation with one-shot retry on `MailError::Auth`.
+///
+/// On the first call this is just `op(get_or_open(...))`. If the op
+/// returns `MailError::Auth`, the cached backend is evicted (forcing
+/// a fresh `refresh_access_token` on the next `get_or_open`) and the
+/// op is run a second time. Any non-auth error from either attempt
+/// surfaces unchanged. A second consecutive `Auth` after the
+/// rebuild means the refresh token itself is bad and we surface that
+/// — the user will need to re-auth via Settings.
+///
+/// `op` is `Fn` (not `FnOnce`) because it may run twice. Closure
+/// callers should clone whatever they need to capture before passing
+/// to `op` so each invocation gets its own copy.
+///
+/// Use this for foreground operations whose retry is safe (idempotent
+/// reads, safe-to-double writes). The outbox drain has its own
+/// attempt counting and should NOT use this — `submit_message` is
+/// not safely retryable here without dedup at a higher layer.
+pub async fn with_auth_retry<T, F, Fut>(
+    state: &AppState,
+    account_id: &AccountId,
+    op: F,
+) -> Result<T, MailError>
+where
+    F: Fn(Arc<dyn MailBackend>) -> Fut,
+    Fut: Future<Output = Result<T, MailError>>,
+{
+    let backend = get_or_open(state, account_id).await?;
+    match op(backend.clone()).await {
+        Err(MailError::Auth(msg)) => {
+            tracing::info!(
+                account = %account_id.0,
+                "MailError::Auth from foreground op; evicting cache and retrying once: {msg}"
+            );
+            evict(state, account_id).await;
+            let backend = get_or_open(state, account_id).await?;
+            op(backend).await
+        }
+        other => other,
     }
 }
 

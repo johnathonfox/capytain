@@ -543,18 +543,18 @@ async fn lazy_fetch_body(
     blobs: &BlobStore,
     headers: &MessageHeaders,
 ) -> Option<Vec<u8>> {
-    let backend = match backend_factory::get_or_open(state, &headers.account_id).await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(
-                account = %headers.account_id.0,
-                "messages_get: cannot open backend for lazy fetch: {e}"
-            );
-            return None;
-        }
-    };
-
-    let raw = match backend.fetch_raw_message(&headers.id).await {
+    // Wrap the fetch in `with_auth_retry` so a `MailError::Auth`
+    // mid-call (token revoked, server clock skew, anything that's not
+    // caught by the 30-min proactive eviction) gets one transparent
+    // retry against a freshly-rebuilt backend. `fetch_raw_message` is
+    // an idempotent read so re-running it is safe.
+    let id = headers.id.clone();
+    let raw = match backend_factory::with_auth_retry(state, &headers.account_id, |backend| {
+        let id = id.clone();
+        async move { backend.fetch_raw_message(&id).await }
+    })
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(id = %headers.id.0, "messages_get: lazy fetch failed: {e}");
