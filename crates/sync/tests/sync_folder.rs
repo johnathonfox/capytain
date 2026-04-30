@@ -117,7 +117,11 @@ impl MailBackend for StubBackend {
         unimplemented!()
     }
 
-    async fn save_draft(&self, _raw_rfc822: &[u8]) -> Result<MessageId, MailError> {
+    async fn save_draft(
+        &self,
+        _raw_rfc822: &[u8],
+        _replace: Option<&MessageId>,
+    ) -> Result<MessageId, MailError> {
         unimplemented!()
     }
 

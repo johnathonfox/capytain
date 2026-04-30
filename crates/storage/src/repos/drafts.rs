@@ -10,7 +10,8 @@
 use chrono::{TimeZone, Utc};
 
 use qsl_core::{
-    AccountId, Draft, DraftAttachment, DraftBodyKind, DraftId, EmailAddress, StorageError,
+    AccountId, Draft, DraftAttachment, DraftBodyKind, DraftId, EmailAddress, MessageId,
+    StorageError,
 };
 
 use super::json;
@@ -124,6 +125,54 @@ pub async fn delete(conn: &dyn DbConn, id: &DraftId) -> Result<(), StorageError>
     conn.execute(DELETE_BY_ID, Params(vec![Value::Text(&id.0)]))
         .await
         .map(|_| ())
+}
+
+/// Look up the canonical server-side id for this draft. `Some` once
+/// at least one upstream sync has succeeded; the next save_draft pass
+/// destroys this id after the new APPEND / Email/import lands so the
+/// server's Drafts mailbox doesn't accumulate every intermediate
+/// version.
+pub async fn get_server_id(
+    conn: &dyn DbConn,
+    id: &DraftId,
+) -> Result<Option<MessageId>, StorageError> {
+    let row = conn
+        .query_opt(
+            "SELECT server_id FROM drafts WHERE id = ?1",
+            Params(vec![Value::Text(&id.0)]),
+        )
+        .await?;
+    match row {
+        Some(r) => Ok(r
+            .get_optional_str("server_id")?
+            .map(|s| MessageId(s.to_string()))),
+        None => Ok(None),
+    }
+}
+
+/// Persist the canonical server-side id for this draft. Called by
+/// the outbox drain on a successful `save_draft` so the next cycle
+/// can look it up via [`get_server_id`] and pass it in as the
+/// `replace` argument.
+///
+/// Returns `Ok(())` even if the draft row no longer exists — the
+/// user may have discarded the local draft while its outbox row was
+/// in flight; persisting the server id then would either need the
+/// row to be re-created (silently surprising) or the value dropped.
+/// Dropping is the right move here: the server-side copy will
+/// eventually be deleted manually or get cleaned up by a future
+/// orphan sweep.
+pub async fn set_server_id(
+    conn: &dyn DbConn,
+    id: &DraftId,
+    server_id: &MessageId,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE drafts SET server_id = ?2 WHERE id = ?1",
+        Params(vec![Value::Text(&id.0), Value::Text(&server_id.0)]),
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Mint a fresh [`DraftId`]. Format is `dr-<16-hex>` mirroring the

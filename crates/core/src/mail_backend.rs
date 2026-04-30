@@ -195,7 +195,24 @@ pub trait MailBackend: Send + Sync {
 
     // ---------- Compose / Send (Phase 2) ----------
 
-    async fn save_draft(&self, raw_rfc822: &[u8]) -> Result<MessageId, MailError>;
+    /// Append a draft to the account's Drafts mailbox. When `replace`
+    /// is `Some`, the backend MUST delete (IMAP `\Deleted` + EXPUNGE)
+    /// or destroy (JMAP `Email/set { destroy }`) the prior server-side
+    /// copy *after* the new one lands. Post-write order matters: a
+    /// transient failure between APPEND and DELETE leaves the user
+    /// with a duplicate, never zero copies.
+    ///
+    /// Returns the canonical id of the newly-saved server-side draft.
+    /// `qsl-sync`'s outbox drain stores it via
+    /// `qsl_storage::repos::drafts::set_server_id` and feeds it back
+    /// as `replace` on the next save so the server's Drafts mailbox
+    /// converges to one row per local draft instead of accumulating
+    /// every intermediate version.
+    async fn save_draft(
+        &self,
+        raw_rfc822: &[u8],
+        replace: Option<&MessageId>,
+    ) -> Result<MessageId, MailError>;
 
     async fn submit_message(&self, raw_rfc822: &[u8]) -> Result<Option<MessageId>, MailError>;
 

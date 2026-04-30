@@ -124,7 +124,11 @@ impl MailBackend for FailingFlagsBackend {
         }
         Ok(())
     }
-    async fn save_draft(&self, raw: &[u8]) -> Result<MessageId, MailError> {
+    async fn save_draft(
+        &self,
+        raw: &[u8],
+        _replace: Option<&MessageId>,
+    ) -> Result<MessageId, MailError> {
         if let Some(observer) = self.save_draft_observer.as_ref() {
             observer.lock().unwrap().push(raw.to_vec());
         }
@@ -455,5 +459,165 @@ body
             .unwrap();
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0], raw.to_vec());
+    });
+}
+
+/// `OP_SAVE_DRAFT` must read `drafts.server_id` at execution time
+/// and feed it to the backend as `replace`, then persist the
+/// returned id. This is the dedup contract — without it the server
+/// would accumulate one draft copy per save.
+#[test]
+fn save_draft_threads_server_id_through_dispatch() {
+    use base64::engine::general_purpose::STANDARD as base64_engine;
+    use base64::Engine as _;
+    use qsl_core::{Draft, DraftBodyKind, DraftId, EmailAddress};
+    use qsl_storage::repos::drafts as drafts_repo;
+
+    /// Stub backend that asserts the prior `replace` it gets matches
+    /// the `expected_prior` it was constructed with, then returns
+    /// the configured `next_id`.
+    struct DraftDedupBackend {
+        expected_prior: Option<MessageId>,
+        next_id: MessageId,
+    }
+    #[async_trait]
+    impl MailBackend for DraftDedupBackend {
+        async fn list_folders(&self) -> Result<Vec<Folder>, MailError> {
+            Ok(vec![])
+        }
+        async fn list_messages(
+            &self,
+            _: &FolderId,
+            _: Option<&SyncState>,
+            _: Option<u32>,
+        ) -> Result<MessageList, MailError> {
+            unimplemented!()
+        }
+        async fn fetch_message(&self, _: &MessageId) -> Result<MessageBody, MailError> {
+            unimplemented!()
+        }
+        async fn fetch_attachment(
+            &self,
+            _: &MessageId,
+            _: &AttachmentRef,
+        ) -> Result<Vec<u8>, MailError> {
+            unimplemented!()
+        }
+        async fn update_flags(
+            &self,
+            _: &[MessageId],
+            _: MessageFlags,
+            _: MessageFlags,
+        ) -> Result<(), MailError> {
+            unimplemented!()
+        }
+        async fn move_messages(&self, _: &[MessageId], _: &FolderId) -> Result<(), MailError> {
+            unimplemented!()
+        }
+        async fn delete_messages(&self, _: &[MessageId]) -> Result<(), MailError> {
+            unimplemented!()
+        }
+        async fn save_draft(
+            &self,
+            _raw: &[u8],
+            replace: Option<&MessageId>,
+        ) -> Result<MessageId, MailError> {
+            assert_eq!(replace.cloned(), self.expected_prior);
+            Ok(self.next_id.clone())
+        }
+        async fn submit_message(&self, _: &[u8]) -> Result<Option<MessageId>, MailError> {
+            unimplemented!()
+        }
+    }
+    struct DraftResolver {
+        backend: Arc<DraftDedupBackend>,
+    }
+    #[async_trait]
+    impl BackendResolver for DraftResolver {
+        async fn open(&self, _: &AccountId) -> Result<Arc<dyn MailBackend>, MailError> {
+            Ok(self.backend.clone())
+        }
+    }
+
+    rt().block_on(async {
+        let conn = TursoConn::in_memory().await.unwrap();
+        run_migrations(&conn).await.unwrap();
+        let account = seed_account(&conn).await;
+
+        // Seed a local draft. No server_id yet.
+        let draft = Draft {
+            id: DraftId("dr-test1".into()),
+            account_id: account.clone(),
+            in_reply_to: None,
+            references: vec![],
+            to: vec![EmailAddress {
+                address: "to@example.com".into(),
+                display_name: None,
+            }],
+            cc: vec![],
+            bcc: vec![],
+            subject: "test".into(),
+            body: "body".into(),
+            body_kind: DraftBodyKind::Plain,
+            attachments: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        drafts_repo::save(&conn, &draft).await.unwrap();
+
+        // Cycle 1: no prior. Backend asserts replace == None.
+        let raw = b"From: a\r\nMessage-ID: <m1@x>\r\nTo: b\r\nSubject: x\r\n\r\nbody\r\n";
+        let payload = serde_json::json!({
+            "draft_id": draft.id.0,
+            "raw_b64": base64_engine.encode(raw),
+        });
+        outbox_repo::enqueue_dedup(
+            &conn,
+            &account,
+            outbox_drain::OP_SAVE_DRAFT,
+            &payload.to_string(),
+            &draft.id.0,
+        )
+        .await
+        .unwrap();
+
+        let backend = Arc::new(DraftDedupBackend {
+            expected_prior: None,
+            next_id: MessageId("server-v1".into()),
+        });
+        let resolver = DraftResolver {
+            backend: backend.clone(),
+        };
+        let outcomes = outbox_drain::drain(&conn, &resolver, 32).await.unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(&outcomes[0], DrainOutcome::Sent { .. }));
+
+        // server_id was written.
+        let stored = drafts_repo::get_server_id(&conn, &draft.id).await.unwrap();
+        assert_eq!(stored, Some(MessageId("server-v1".into())));
+
+        // Cycle 2: backend now expects replace == Some("server-v1").
+        outbox_repo::enqueue_dedup(
+            &conn,
+            &account,
+            outbox_drain::OP_SAVE_DRAFT,
+            &payload.to_string(),
+            &draft.id.0,
+        )
+        .await
+        .unwrap();
+        let backend2 = Arc::new(DraftDedupBackend {
+            expected_prior: Some(MessageId("server-v1".into())),
+            next_id: MessageId("server-v2".into()),
+        });
+        let resolver2 = DraftResolver {
+            backend: backend2.clone(),
+        };
+        let outcomes = outbox_drain::drain(&conn, &resolver2, 32).await.unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(&outcomes[0], DrainOutcome::Sent { .. }));
+
+        let stored = drafts_repo::get_server_id(&conn, &draft.id).await.unwrap();
+        assert_eq!(stored, Some(MessageId("server-v2".into())));
     });
 }

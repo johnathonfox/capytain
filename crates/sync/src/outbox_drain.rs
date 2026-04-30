@@ -22,8 +22,11 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument, warn};
 
-use qsl_core::{FolderId, MailError, MessageFlags, MessageId, StorageError};
-use qsl_storage::{repos::outbox as outbox_repo, DbConn};
+use qsl_core::{DraftId, FolderId, MailError, MessageFlags, MessageId, StorageError};
+use qsl_storage::{
+    repos::{drafts as drafts_repo, outbox as outbox_repo},
+    DbConn,
+};
 
 /// Op-kind tag used for `update_flags` payloads.
 pub const OP_UPDATE_FLAGS: &str = "update_flags";
@@ -157,7 +160,7 @@ async fn process_one(
     resolver: &dyn BackendResolver,
     entry: &outbox_repo::OutboxEntry,
 ) -> DrainOutcome {
-    let result = dispatch(resolver, entry).await;
+    let result = dispatch(conn, resolver, entry).await;
     match result {
         Ok(()) => match outbox_repo::delete(conn, &entry.id).await {
             Ok(()) => DrainOutcome::Sent {
@@ -205,6 +208,7 @@ async fn process_one(
 }
 
 async fn dispatch(
+    conn: &dyn DbConn,
     resolver: &dyn BackendResolver,
     entry: &outbox_repo::OutboxEntry,
 ) -> Result<(), MailError> {
@@ -241,7 +245,27 @@ async fn dispatch(
             let raw = base64_engine
                 .decode(&payload.raw_b64)
                 .map_err(|e| MailError::Parse(format!("outbox.save_draft base64: {e}")))?;
-            backend.save_draft(&raw).await.map(|_| ())
+            // Read the prior server id at execution time, not enqueue
+            // time, so a flurry of auto-saves coalesced under
+            // `enqueue_dedup` always destroys the latest known prior
+            // copy rather than something stale that an earlier
+            // overwritten payload was carrying.
+            let draft_id = DraftId(payload.draft_id);
+            let prior = drafts_repo::get_server_id(conn, &draft_id)
+                .await
+                .map_err(|e| MailError::Other(format!("drafts.get_server_id: {e}")))?;
+            let new_id = backend.save_draft(&raw, prior.as_ref()).await?;
+            // Persist the new server id so the next save_draft cycle
+            // can destroy this copy. NotFound (the user discarded the
+            // draft while the row was in flight) is silently OK; the
+            // server-side draft is now an orphan that the user (or a
+            // future orphan sweep) cleans up. Other errors surface as
+            // dispatch failures so the outbox row sticks around for
+            // retry.
+            drafts_repo::set_server_id(conn, &draft_id, &new_id)
+                .await
+                .map_err(|e| MailError::Other(format!("drafts.set_server_id: {e}")))?;
+            Ok(())
         }
         other => Err(MailError::Other(format!("outbox: unknown op_kind {other}"))),
     }

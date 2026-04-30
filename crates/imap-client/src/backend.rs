@@ -884,7 +884,11 @@ impl MailBackend for ImapBackend {
         Ok(())
     }
 
-    async fn save_draft(&self, raw_rfc822: &[u8]) -> Result<MessageId, MailError> {
+    async fn save_draft(
+        &self,
+        raw_rfc822: &[u8],
+        replace: Option<&MessageId>,
+    ) -> Result<MessageId, MailError> {
         // Find the Drafts mailbox by role. We can't hardcode the path
         // because Gmail uses `[Gmail]/Drafts` while a generic IMAP
         // server might just use `Drafts` or a localized name; the
@@ -896,6 +900,21 @@ impl MailBackend for ImapBackend {
             .into_iter()
             .find(|f| f.role == Some(FolderRole::Drafts))
             .ok_or_else(|| MailError::NotFound("IMAP save_draft: no Drafts mailbox".into()))?;
+
+        // Pull the Message-ID *before* APPEND. We use it after to
+        // resolve the new copy's UID via `UID SEARCH HEADER Message-ID`
+        // since async-imap's high-level `append` doesn't surface
+        // APPENDUID. Failing to find a Message-ID is fatal because
+        // without it we have no way to locate the just-written copy
+        // and would have to return a stale or synthetic id — that
+        // breaks the dedup contract on the next save.
+        let message_id = qsl_mime::extract_message_id(raw_rfc822).ok_or_else(|| {
+            MailError::Parse(
+                "IMAP save_draft: outgoing bytes had no Message-ID header — refusing to APPEND \
+                 since the new UID can't be resolved without one"
+                    .into(),
+            )
+        })?;
 
         let mut session = self.lock_session_alive().await?;
         // `\Seen` keeps the draft from showing up as unread (the user
@@ -910,14 +929,57 @@ impl MailBackend for ImapBackend {
             .await
             .map_err(|e| MailError::Protocol(format!("APPEND {}: {e}", drafts.id.0)))?;
         debug!(folder = %drafts.id.0, "IMAP save_draft APPEND ok");
-        // Synthetic id — the new UID is available via APPENDUID
-        // (UIDPLUS extension) but async-imap's high-level `append`
-        // doesn't surface the response code. The next sync round-trip
-        // will pick the message up via the Drafts folder watcher and
-        // we'll see the canonical `imap|<uv>|<uid>|<folder>` form
-        // there. For now, return a placeholder so the trait shape
-        // holds; the outbox drain ignores the value.
-        Ok(MessageId(format!("imap-draft|pending|{}", drafts.id.0)))
+
+        // Resolve the canonical id we just wrote. SELECT is required
+        // before UID SEARCH; we then look up by the Message-ID header
+        // we extracted before the APPEND. UIDVALIDITY comes back from
+        // SELECT and pairs with the UID to form the
+        // `imap|<uv>|<uid>|<folder>` MessageId.
+        let mbox = session
+            .select(&drafts.id.0)
+            .await
+            .map_err(|e| MailError::Protocol(format!("SELECT {}: {e}", drafts.id.0)))?;
+        let uidvalidity = mbox
+            .uid_validity
+            .ok_or_else(|| MailError::Protocol("SELECT missing UIDVALIDITY".into()))?;
+        // `UID SEARCH HEADER` quotes the value as an IMAP astring.
+        // The Message-ID we extracted is bracket-wrapped (`<id>`); IMAP
+        // SEARCH HEADER expects the *substring* it's matching against,
+        // and brackets work fine because the server compares the
+        // entire header value (or substring of it, server-discretion)
+        // against what we send.
+        let query = format!("HEADER Message-ID {}", quote_imap_astring(&message_id));
+        let uids = session
+            .uid_search(&query)
+            .await
+            .map_err(|e| MailError::Protocol(format!("UID SEARCH {query}: {e}")))?;
+        let uid = uids.into_iter().max().ok_or_else(|| {
+            MailError::Protocol(format!(
+                "IMAP save_draft: APPEND ok but UID SEARCH for {message_id} returned no rows"
+            ))
+        })?;
+        let new_id = MessageRef {
+            uidvalidity,
+            uid,
+            folder: drafts.id.0.clone(),
+        }
+        .encode();
+
+        // Best-effort destroy of the prior copy. We APPEND first so a
+        // transient failure here leaves the user with a duplicate,
+        // never zero copies; the next save_draft cycle will retry the
+        // delete via the freshly-stored server_id. Mismatched
+        // UIDVALIDITY (rare; Drafts-folder rebuilds) means the prior
+        // UID is no longer valid — log and skip rather than fail.
+        if let Some(prior) = replace {
+            if let Err(e) =
+                destroy_prior_draft(&mut session, &drafts.id.0, uidvalidity, prior).await
+            {
+                warn!("IMAP save_draft: destroy of prior copy failed (will retry next cycle): {e}");
+            }
+        }
+
+        Ok(new_id)
     }
 
     async fn submit_message(&self, raw_rfc822: &[u8]) -> Result<Option<MessageId>, MailError> {
@@ -1018,6 +1080,82 @@ impl ImapBackend {
 }
 
 // ---------- helpers ----------
+
+/// Quote a string for IMAP's `astring` syntax (RFC 3501 §4.3).
+/// Wraps in double quotes and backslash-escapes any embedded `"` or
+/// `\`. Used for `UID SEARCH HEADER Message-ID <quoted>` so a
+/// `Message-ID` containing whitespace, brackets, or other characters
+/// the IMAP parser would reject as a bare atom round-trips correctly.
+fn quote_imap_astring(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        if ch == '"' || ch == '\\' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+    out
+}
+
+/// Mark a prior draft `\Deleted` and `UID EXPUNGE` it. Caller has
+/// already SELECTed `drafts_folder` and confirmed it matches the
+/// folder portion of `prior`. Mismatched UIDVALIDITY is fatal because
+/// the UID we'd issue STORE for would silently target an unrelated
+/// message — better to surface the mismatch and skip than corrupt the
+/// folder. UIDPLUS' `UID EXPUNGE` (RFC 4315) scopes the expunge to
+/// just the supplied UIDs, so we don't accidentally sweep up other
+/// already-`\Deleted` rows another client left behind.
+async fn destroy_prior_draft(
+    session: &mut Session<StreamT>,
+    drafts_folder: &str,
+    current_uidvalidity: u32,
+    prior: &MessageId,
+) -> Result<(), MailError> {
+    let prior_ref = MessageRef::decode(prior)?;
+    if prior_ref.folder != drafts_folder {
+        return Err(MailError::Other(format!(
+            "prior draft folder {} != current drafts folder {drafts_folder}; skipping",
+            prior_ref.folder
+        )));
+    }
+    if prior_ref.uidvalidity != current_uidvalidity {
+        return Err(MailError::Other(format!(
+            "prior UIDVALIDITY {} != current {current_uidvalidity}; the prior UID is no longer \
+             valid",
+            prior_ref.uidvalidity
+        )));
+    }
+
+    let uid_set = prior_ref.uid.to_string();
+    let store_stream = session
+        .uid_store(&uid_set, "+FLAGS (\\Deleted)")
+        .await
+        .map_err(|e| MailError::Protocol(format!("UID STORE \\Deleted {uid_set}: {e}")))?;
+    let mut store_stream = Box::pin(store_stream);
+    while let Some(r) = store_stream.next().await {
+        r.map_err(|e| MailError::Protocol(format!("UID STORE response: {e}")))?;
+    }
+    drop(store_stream);
+
+    let expunge_stream = session
+        .uid_expunge(&uid_set)
+        .await
+        .map_err(|e| MailError::Protocol(format!("UID EXPUNGE {uid_set}: {e}")))?;
+    let mut expunge_stream = Box::pin(expunge_stream);
+    while let Some(r) = expunge_stream.next().await {
+        r.map_err(|e| MailError::Protocol(format!("UID EXPUNGE response: {e}")))?;
+    }
+    drop(expunge_stream);
+
+    debug!(
+        uid = prior_ref.uid,
+        folder = drafts_folder,
+        "destroyed prior draft"
+    );
+    Ok(())
+}
 
 fn name_to_folder(name: &async_imap::types::Name, account: &AccountId) -> Folder {
     // IMAP's LIST response hands us a hierarchical path delimited by
