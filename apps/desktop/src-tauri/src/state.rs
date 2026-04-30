@@ -110,6 +110,18 @@ pub struct AppState {
     /// transitions so a future re-start gets a fresh token.
     pub history_cancellers: Mutex<HashMap<(AccountId, FolderId), Arc<AtomicBool>>>,
 
+    /// Per-account serialization for history-sync pulls. Each
+    /// account has ONE cached IMAP session (single
+    /// `MailBackend::pull_history_chunk` in flight at a time on the
+    /// connection); two parallel pulls on the same account would
+    /// fight for it and split each pull's chunks across long gaps.
+    /// The driver task acquires this mutex before its loop and
+    /// holds it for the full pull, so a second pull on the same
+    /// account queues until the first finishes (or is canceled).
+    /// Different accounts are unaffected — they have separate
+    /// sessions and progress in parallel.
+    pub history_account_locks: Mutex<HashMap<AccountId, Arc<Mutex<()>>>>,
+
     /// Fired by the `ui_ready` IPC command once the Dioxus app has
     /// mounted in the webview. The sync engine awaits this (with a
     /// short safety timeout) before its bootstrap pass so the
@@ -130,6 +142,7 @@ impl AppState {
             backends: Mutex::new(HashMap::new()),
             data_dir,
             history_cancellers: Mutex::new(HashMap::new()),
+            history_account_locks: Mutex::new(HashMap::new()),
             last_rendered: Mutex::new(None),
             ui_ready: Arc::new(Notify::new()),
         }
