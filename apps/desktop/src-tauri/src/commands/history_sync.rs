@@ -134,30 +134,63 @@ pub async fn history_sync_start(
     Ok(())
 }
 
-/// `history_sync_cancel` — flip the cancel token. The driver picks
-/// it up at the next chunk boundary and persists a `canceled` row.
-/// No-op if no job is running for the (account, folder).
+/// `history_sync_cancel` — flip the cancel token AND immediately
+/// flip the row's status to `canceled` in the database, so the UI
+/// can render the Resume button right away without waiting for the
+/// driver's in-flight chunk to complete (an IMAP FETCH on a slow
+/// connection can take 30+ seconds, which felt like the cancel
+/// button was broken).
+///
+/// The driver checks the AtomicBool between chunks and exits
+/// cleanly. Its own `set_status(Canceled)` write is then idempotent
+/// — the row's already canceled.
+///
+/// No-op for unknown (account, folder) pairs.
 #[tauri::command]
 pub async fn history_sync_cancel(
     state: State<'_, AppState>,
     input: HistorySyncCancelInput,
 ) -> IpcResult<()> {
     let HistorySyncCancelInput { account, folder } = input;
-    let cancellers = state.history_cancellers.lock().await;
-    if let Some(token) = cancellers.get(&(account.clone(), folder.clone())) {
-        token.store(true, Ordering::Relaxed);
-        tracing::info!(
-            account = %account.0,
-            folder = %folder.0,
-            "history sync cancel requested"
-        );
-    } else {
+    let token_present = {
+        let cancellers = state.history_cancellers.lock().await;
+        match cancellers.get(&(account.clone(), folder.clone())) {
+            Some(token) => {
+                token.store(true, Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    };
+    if !token_present {
         tracing::debug!(
             account = %account.0,
             folder = %folder.0,
             "history sync cancel for non-running folder — ignored"
         );
+        return Ok(());
     }
+
+    // Persist the canceled status immediately so the UI's next
+    // refetch (bumped by the cancel-button onclick handler) sees
+    // the row in its final state and switches Cancel → Resume.
+    {
+        let db = state.db.lock().await;
+        if let Err(e) =
+            history_repo::set_status(&*db, &account, &folder, RepoStatus::Canceled, None).await
+        {
+            tracing::warn!(
+                account = %account.0,
+                folder = %folder.0,
+                "history sync cancel: persist status failed: {e}"
+            );
+        }
+    }
+    tracing::info!(
+        account = %account.0,
+        folder = %folder.0,
+        "history sync cancel requested"
+    );
     Ok(())
 }
 
