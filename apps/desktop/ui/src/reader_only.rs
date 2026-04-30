@@ -52,6 +52,7 @@ fn take_reader_preload() -> Option<RenderedMessage> {
 
 #[component]
 pub fn ReaderOnlyApp(message_id: MessageId) -> Element {
+    crate::app::use_appearance_hooks();
     let id_for_resource = message_id.clone();
     // `use_hook` runs the closure exactly once when the component
     // first mounts — perfect for draining `__QSL_READER_PRELOAD__`,

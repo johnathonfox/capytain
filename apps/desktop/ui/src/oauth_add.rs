@@ -44,6 +44,7 @@ enum FlowState {
 
 #[component]
 pub fn OAuthAddApp() -> Element {
+    crate::app::use_appearance_hooks();
     let providers = use_resource(|| async {
         invoke::<Vec<ProviderInfo>>("oauth_providers_list", serde_json::json!({})).await
     });
