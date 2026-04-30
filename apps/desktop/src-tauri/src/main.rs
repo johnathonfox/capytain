@@ -124,6 +124,7 @@ fn main() {
             commands::messages::messages_refresh_folder,
             commands::messages::messages_send,
             commands::messages::messages_open_in_window,
+            commands::messages::messages_open_attachment,
             commands::drafts::drafts_save,
             commands::drafts::drafts_load,
             commands::drafts::drafts_list,

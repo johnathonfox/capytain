@@ -4608,7 +4608,10 @@ fn ReaderV2(
                             }
                         }
                         if !rendered.attachments.is_empty() {
-                            ReaderAttachments { attachments: rendered.attachments.clone() }
+                            ReaderAttachments {
+                                attachments: rendered.attachments.clone(),
+                                message_id: rendered.headers.id.clone(),
+                            }
                         }
                         if rendered.remote_content_blocked {
                             RemoteContentBanner {
@@ -4772,7 +4775,7 @@ fn RemoteContentBanner(
 }
 
 #[component]
-fn ReaderAttachments(attachments: Vec<Attachment>) -> Element {
+fn ReaderAttachments(attachments: Vec<Attachment>, message_id: MessageId) -> Element {
     rsx! {
         div {
             class: "reader-attachments",
@@ -4784,10 +4787,36 @@ fn ReaderAttachments(attachments: Vec<Attachment>) -> Element {
                         a.filename.clone()
                     };
                     let size = format_bytes(a.size);
+                    let attachment_id = a.id.clone();
+                    let message_id = message_id.clone();
+                    let title = format!("{name} · {size} — click to open");
                     rsx! {
-                        span {
+                        button {
                             class: "reader-attachment",
-                            title: "{name} · {size}",
+                            r#type: "button",
+                            title: "{title}",
+                            onclick: move |_| {
+                                let attachment_id = attachment_id.clone();
+                                let message_id = message_id.clone();
+                                wasm_bindgen_futures::spawn_local(async move {
+                                    match invoke::<String>(
+                                        "messages_open_attachment",
+                                        serde_json::json!({
+                                            "input": {
+                                                "message_id": message_id,
+                                                "attachment_id": attachment_id,
+                                            }
+                                        }),
+                                    ).await {
+                                        Ok(path) => {
+                                            web_sys_log(&format!("messages_open_attachment: {path}"));
+                                        }
+                                        Err(e) => {
+                                            web_sys_log(&format!("messages_open_attachment: {e}"));
+                                        }
+                                    }
+                                });
+                            },
                             "📎 {name} · {size}"
                         }
                     }

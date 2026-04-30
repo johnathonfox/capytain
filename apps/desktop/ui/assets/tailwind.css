@@ -1607,6 +1607,16 @@ ul {
   border-radius: var(--radius-input);
   font-size: var(--fs-11);
   color: var(--text-secondary);
+  cursor: pointer;
+  font-family: inherit;
+}
+.reader-attachment:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+.reader-attachment:focus-visible {
+  outline: 1px solid var(--accent-blue);
+  outline-offset: 1px;
 }
 
 .reader-remote-banner {

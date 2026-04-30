@@ -2,20 +2,22 @@
 
 //! `messages_*` Tauri commands.
 //!
-//! Implements the Phase 0 Week 5 read-path surface of
-//! `COMMANDS.md §Messages`: `messages_list` and `messages_get`. The
-//! write-path commands (`messages_mark_read`, `messages_flag`,
-//! `messages_move`, `messages_archive`, `messages_delete`,
-//! `messages_download_attachment`) land in Phase 1 alongside the
-//! outbox / optimistic-mutation engine.
+//! Implements the read-path surface of `COMMANDS.md §Messages`:
+//! `messages_list`, `messages_list_unified`, `messages_search`,
+//! `messages_get`, plus the write-path / mutation commands
+//! (`messages_mark_read`, `messages_flag`, `messages_move`,
+//! `messages_archive`, `messages_delete`, `messages_send`) and the
+//! `messages_open_attachment` extractor that pulls attachment bytes
+//! out of cached message blobs and hands them to the OS default
+//! application via the user's Downloads directory.
 
 use base64::engine::general_purpose::STANDARD as base64_engine;
 use base64::Engine as _;
 use qsl_core::{EmailAddress, FolderRole, MessageFlags, MessageHeaders};
 use qsl_ipc::{DraftId, FolderId, IpcResult, MessageId, MessagePage, RenderedMessage, SortOrder};
 use qsl_mime::{
-    compose::build_rfc5322, parse_rfc822, sanitize_email_html, sanitize_email_html_trusted,
-    MessageIdentity,
+    compose::build_rfc5322, extract_attachment_bytes, parse_rfc822, sanitize_email_html,
+    sanitize_email_html_trusted, MessageIdentity,
 };
 use qsl_storage::{
     repos::accounts as accounts_repo, repos::drafts as drafts_repo, repos::folders as folders_repo,
@@ -339,6 +341,181 @@ pub async fn messages_trust_sender(
     drop(db);
     tracing::info!(account = %account_id.0, %email_address, "messages_trust_sender: added opt-in");
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MessagesOpenAttachmentInput {
+    pub message_id: MessageId,
+    /// `AttachmentRef` from `messages_get`'s `RenderedMessage.attachments`.
+    /// Currently encoded as `"part/{i}"`; this command parses the suffix
+    /// and looks up the part by index.
+    pub attachment_id: qsl_core::AttachmentRef,
+}
+
+/// `messages_open_attachment` — extract one attachment's bytes, write
+/// them to the user's Downloads folder under the suggested filename
+/// (suffixed `(1)`, `(2)`, … on collision), and open the resulting
+/// file with the system default application.
+///
+/// Reuses the same `load_cached_body` + `lazy_fetch_body` path as
+/// [`messages_get`] so we never re-fetch when the body blob is
+/// already on disk. The MIME walk is delegated to
+/// `qsl_mime::extract_attachment_bytes`, which uses the same part-index
+/// numbering [`parse_rfc822`] burns into each `AttachmentRef`.
+///
+/// On any failure (no body bytes, malformed MIME, index out of range,
+/// I/O error, missing Downloads dir) returns an `IpcError` with a
+/// short message — the UI surfaces that as a toast.
+#[tauri::command]
+pub async fn messages_open_attachment(
+    state: State<'_, AppState>,
+    input: MessagesOpenAttachmentInput,
+) -> IpcResult<String> {
+    use qsl_ipc::{IpcError, IpcErrorKind};
+
+    let MessagesOpenAttachmentInput {
+        message_id,
+        attachment_id,
+    } = input;
+    tracing::debug!(id = %message_id.0, attachment = %attachment_id.0, "messages_open_attachment");
+
+    // Resolve the part index baked into the attachment id by
+    // `qsl_mime::body_from`. The format is `"part/{i}"`; anything
+    // else is an unsupported (or stale) shape.
+    let part_index: usize = attachment_id
+        .0
+        .strip_prefix("part/")
+        .and_then(|s| s.parse::<usize>().ok())
+        .ok_or_else(|| {
+            IpcError::new(
+                IpcErrorKind::Internal,
+                format!(
+                    "messages_open_attachment: unrecognized attachment id `{}`",
+                    attachment_id.0
+                ),
+            )
+        })?;
+
+    // Pull headers + cached body path. Same shape as `messages_get`.
+    let db = state.db.lock().await;
+    let headers = messages_repo::get(&*db, &message_id).await?;
+    let body_path = messages_repo::body_path(&*db, &message_id).await?;
+    drop(db);
+
+    let blobs = BlobStore::new(state.data_dir.join("blobs"));
+    let bytes = if body_path.is_some() {
+        load_cached_body(&blobs, &headers).await
+    } else {
+        lazy_fetch_body(&state, &blobs, &headers).await
+    };
+    let bytes = bytes.ok_or_else(|| {
+        IpcError::new(
+            IpcErrorKind::NotFound,
+            format!(
+                "messages_open_attachment: could not load body for {}",
+                message_id.0
+            ),
+        )
+    })?;
+
+    let (filename, payload) = extract_attachment_bytes(&bytes, part_index).ok_or_else(|| {
+        IpcError::new(
+            IpcErrorKind::NotFound,
+            format!("messages_open_attachment: no binary part at index {part_index}"),
+        )
+    })?;
+
+    // Resolve Downloads dir. UserDirs::download_dir() returns Some on
+    // platforms that publish `XDG_DOWNLOAD_DIR` / Known Folder /
+    // similar; fall back to data_dir for headless setups so the
+    // command still produces *something* useful.
+    let download_dir = directories::UserDirs::new()
+        .and_then(|d| d.download_dir().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| state.data_dir.join("downloads"));
+    if let Err(e) = std::fs::create_dir_all(&download_dir) {
+        return Err(IpcError::new(
+            IpcErrorKind::Storage,
+            format!(
+                "messages_open_attachment: create {}: {e}",
+                download_dir.display()
+            ),
+        ));
+    }
+
+    let safe_name = sanitize_attachment_filename(&filename);
+    let target_path = unique_path(&download_dir, &safe_name);
+    let bytes_written = payload.len();
+    if let Err(e) = std::fs::write(&target_path, payload) {
+        return Err(IpcError::new(
+            IpcErrorKind::Storage,
+            format!(
+                "messages_open_attachment: write {}: {e}",
+                target_path.display()
+            ),
+        ));
+    }
+
+    let target_str = target_path.to_string_lossy().into_owned();
+    if let Err(e) = webbrowser::open(&target_str) {
+        // The file is written even if open failed — caller can still
+        // navigate to Downloads manually. Log and surface a soft
+        // error so the UI shows "saved but couldn't open".
+        tracing::warn!(path = %target_str, "open attachment via webbrowser::open failed: {e}");
+        return Err(IpcError::new(
+            IpcErrorKind::Internal,
+            format!("saved to {target_str} but failed to open: {e}"),
+        ));
+    }
+
+    tracing::info!(path = %target_str, size = bytes_written, "attachment opened");
+    Ok(target_str)
+}
+
+/// Strip path separators and other shell-hostile characters so a
+/// suggested filename from a remote sender can't escape the Downloads
+/// directory or get interpreted by the shell. Replaces `/` `\` `:` and
+/// any control character with `_`. Empty result falls back to
+/// `attachment.bin`.
+fn sanitize_attachment_filename(raw: &str) -> String {
+    let mut out: String = raw
+        .chars()
+        .map(|c| {
+            if c == '/' || c == '\\' || c == ':' || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    out = out
+        .trim_matches(|c: char| c == '.' || c.is_whitespace())
+        .to_string();
+    if out.is_empty() {
+        "attachment.bin".to_string()
+    } else {
+        out
+    }
+}
+
+/// Find a non-existing path inside `dir` for `filename`. If the file
+/// exists, append ` (1)`, ` (2)`, … before the extension. Caps at 999
+/// before falling back to the bare name (callers will then overwrite).
+fn unique_path(dir: &std::path::Path, filename: &str) -> std::path::PathBuf {
+    let candidate = dir.join(filename);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let (stem, ext) = match filename.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (filename.to_string(), String::new()),
+    };
+    for n in 1..1000 {
+        let p = dir.join(format!("{stem} ({n}){ext}"));
+        if !p.exists() {
+            return p;
+        }
+    }
+    dir.join(filename)
 }
 
 /// Read a previously-fetched body blob from disk. A stale
@@ -1245,5 +1422,65 @@ mod tests {
             folder("Trash", Some(FolderRole::Trash)),
         ];
         assert_eq!(resolve_archive_target(&folders), None);
+    }
+
+    #[test]
+    fn sanitize_attachment_filename_strips_path_separators() {
+        // Path traversal hardening: `/` → `_`, leading dots trimmed.
+        // `../../etc/passwd` becomes `.._.._etc_passwd` after `/` →
+        // `_`, then leading dot/whitespace trim drops the leading
+        // double-dot for `_.._etc_passwd`.
+        assert_eq!(
+            sanitize_attachment_filename("../../etc/passwd"),
+            "_.._etc_passwd"
+        );
+    }
+
+    #[test]
+    fn sanitize_attachment_filename_strips_backslash_and_colon() {
+        assert_eq!(
+            sanitize_attachment_filename(r"C:\Windows\evil.exe"),
+            "C__Windows_evil.exe"
+        );
+    }
+
+    #[test]
+    fn sanitize_attachment_filename_strips_control_chars() {
+        assert_eq!(sanitize_attachment_filename("foo\nbar\tbaz"), "foo_bar_baz");
+    }
+
+    #[test]
+    fn sanitize_attachment_filename_falls_back_when_empty() {
+        assert_eq!(sanitize_attachment_filename(""), "attachment.bin");
+        assert_eq!(sanitize_attachment_filename("   .  "), "attachment.bin");
+    }
+
+    #[test]
+    fn unique_path_returns_input_when_absent() {
+        let dir = std::env::temp_dir().join(format!("qsl-uniq-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = unique_path(&dir, "fresh.bin");
+        assert_eq!(p, dir.join("fresh.bin"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unique_path_appends_counter_on_collision() {
+        let dir = std::env::temp_dir().join(format!("qsl-uniq-coll-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("doc.pdf"), b"x").unwrap();
+        let p = unique_path(&dir, "doc.pdf");
+        assert_eq!(p, dir.join("doc (1).pdf"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unique_path_handles_no_extension() {
+        let dir = std::env::temp_dir().join(format!("qsl-uniq-noext-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("README"), b"x").unwrap();
+        let p = unique_path(&dir, "README");
+        assert_eq!(p, dir.join("README (1)"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
