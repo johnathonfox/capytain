@@ -156,6 +156,89 @@ impl ImapBackend {
         Ok(guard)
     }
 
+    /// Shared FETCH path for `fetch_older_headers` and
+    /// `pull_history_chunk`. Same UID-range query, same response
+    /// translation; the only knob is `with_thread_headers`.
+    ///
+    /// `with_thread_headers = true` keeps `BODY.PEEK[HEADER]` in the
+    /// FETCH so `In-Reply-To` and `References` round-trip — needed by
+    /// any caller that will run threading on the result. The "load
+    /// older" pager wants this. `with_thread_headers = false` drops
+    /// it: the server stops streaming the raw header block (~1-4 KB
+    /// per message on Gmail), which is the dominant wire cost on a
+    /// 500-message chunk against a deep folder. The history-pull
+    /// driver passes `false` because `qsl-sync::history` deliberately
+    /// skips per-message threading (`history.rs::persist_chunk` doc).
+    /// Threading rebuilds out-of-band when the user hits a chunk
+    /// during normal browsing.
+    async fn fetch_uid_range_headers(
+        &self,
+        folder: &FolderId,
+        before_anchor: u64,
+        limit: u32,
+        with_thread_headers: bool,
+    ) -> Result<Vec<MessageHeaders>, MailError> {
+        if before_anchor <= 1 || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let before = u32::try_from(before_anchor).map_err(|_| {
+            MailError::Protocol(format!(
+                "before_anchor {before_anchor} exceeds IMAP UID range"
+            ))
+        })?;
+
+        let mut session = self.lock_session_alive().await?;
+
+        let mbox = session
+            .select(&folder.0)
+            .await
+            .map_err(|e| MailError::Protocol(format!("SELECT {}: {e}", folder.0)))?;
+        let uidvalidity = mbox
+            .uid_validity
+            .ok_or_else(|| MailError::Protocol("SELECT missing UIDVALIDITY".into()))?;
+
+        let high = before.saturating_sub(1);
+        let low = before.saturating_sub(limit).max(1);
+        // IMAP UID FETCH accepts inverted ranges; the server returns
+        // whatever exists in the range (deleted UIDs are absent from
+        // the response).
+        let uid_set = format!("{low}:{high}");
+        let query = match (with_thread_headers, self.gmail_ext) {
+            (true, true) => {
+                "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE BODY.PEEK[HEADER] X-GM-LABELS)"
+            }
+            (true, false) => "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE BODY.PEEK[HEADER])",
+            (false, true) => "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE X-GM-LABELS)",
+            (false, false) => "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE)",
+        };
+        let mut fetches = session
+            .uid_fetch(&uid_set, query)
+            .await
+            .map_err(|e| MailError::Protocol(format!("UID FETCH {uid_set} {query}: {e}")))?;
+
+        let mut messages = Vec::new();
+        while let Some(item) = fetches.next().await {
+            let fetch = item.map_err(|e| MailError::Protocol(format!("FETCH entry: {e}")))?;
+            match fetch_to_headers(&fetch, folder, uidvalidity, &self.account) {
+                Ok(Some(h)) => messages.push(h),
+                Ok(None) => {
+                    debug!(message = ?fetch.message, "older FETCH missing UID — skipping");
+                }
+                Err(e) => {
+                    warn!(error = %e, message = ?fetch.message, "older FETCH translate failed");
+                }
+            }
+        }
+        debug!(
+            folder = %folder.0,
+            range = %uid_set,
+            count = messages.len(),
+            with_thread_headers,
+            "IMAP fetch_uid_range_headers"
+        );
+        Ok(messages)
+    }
+
     /// Connect to `host:port` over TLS, authenticate via SASL XOAUTH2
     /// with the supplied `access_token`, verify required capabilities,
     /// and return a ready-to-use backend.
@@ -491,61 +574,13 @@ impl MailBackend for ImapBackend {
         before_anchor: u64,
         limit: u32,
     ) -> Result<Vec<MessageHeaders>, MailError> {
-        if before_anchor <= 1 || limit == 0 {
-            return Ok(Vec::new());
-        }
-        let before = u32::try_from(before_anchor).map_err(|_| {
-            MailError::Protocol(format!(
-                "before_anchor {before_anchor} exceeds IMAP UID range"
-            ))
-        })?;
-
-        let mut session = self.lock_session_alive().await?;
-
-        let mbox = session
-            .select(&folder.0)
+        // "Load older" feeds straight into the visible message list,
+        // which threads on `In-Reply-To` / `References`. Keep
+        // BODY.PEEK[HEADER] in the query so threading attachment can
+        // run inline. The history-pull path (`pull_history_chunk`)
+        // takes the lighter route — see `fetch_uid_range_headers`.
+        self.fetch_uid_range_headers(folder, before_anchor, limit, true)
             .await
-            .map_err(|e| MailError::Protocol(format!("SELECT {}: {e}", folder.0)))?;
-        let uidvalidity = mbox
-            .uid_validity
-            .ok_or_else(|| MailError::Protocol("SELECT missing UIDVALIDITY".into()))?;
-
-        let high = before.saturating_sub(1);
-        let low = before.saturating_sub(limit).max(1);
-        // IMAP UID FETCH accepts inverted ranges; the server
-        // returns whatever exists in the range (deleted UIDs are
-        // simply absent from the response).
-        let uid_set = format!("{low}:{high}");
-        let query = if self.gmail_ext {
-            "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE BODY.PEEK[HEADER] X-GM-LABELS)"
-        } else {
-            "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE BODY.PEEK[HEADER])"
-        };
-        let mut fetches = session
-            .uid_fetch(&uid_set, query)
-            .await
-            .map_err(|e| MailError::Protocol(format!("UID FETCH {uid_set} {query}: {e}")))?;
-
-        let mut messages = Vec::new();
-        while let Some(item) = fetches.next().await {
-            let fetch = item.map_err(|e| MailError::Protocol(format!("FETCH entry: {e}")))?;
-            match fetch_to_headers(&fetch, folder, uidvalidity, &self.account) {
-                Ok(Some(h)) => messages.push(h),
-                Ok(None) => {
-                    debug!(message = ?fetch.message, "older FETCH missing UID — skipping");
-                }
-                Err(e) => {
-                    warn!(error = %e, message = ?fetch.message, "older FETCH translate failed");
-                }
-            }
-        }
-        debug!(
-            folder = %folder.0,
-            range = %uid_set,
-            count = messages.len(),
-            "IMAP fetch_older_headers"
-        );
-        Ok(messages)
     }
 
     async fn pull_history_chunk(
@@ -560,8 +595,15 @@ impl MailBackend for ImapBackend {
                 next_anchor: 0,
             });
         }
+        // History-pull drops `BODY.PEEK[HEADER]` from the FETCH —
+        // see `fetch_uid_range_headers`. Big wire-cost saving on
+        // Gmail (each header block is ~1-4 KB and X-GM-LABELS
+        // already covers what we surface). The history persist path
+        // (`qsl-sync::history::persist_chunk`) skips threading
+        // anyway, so In-Reply-To / References would have been
+        // dropped on the floor.
         let headers = self
-            .fetch_older_headers(folder, before_anchor, limit)
+            .fetch_uid_range_headers(folder, before_anchor, limit, false)
             .await?;
 
         // Advance the anchor. Two cases:
