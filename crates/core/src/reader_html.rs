@@ -200,6 +200,54 @@ mod tests {
         assert!(out.contains("img[data-qsl-blocked]"));
     }
 
+    /// Regression guard: the reader's defence-in-depth CSP must always
+    /// be present and must keep `default-src 'none'`, `base-uri 'none'`,
+    /// `form-action 'none'`. If a future change relaxes any of these,
+    /// the iframe gains an exfil channel that ammonia + adblock alone
+    /// can't close. Locks the directive set against accidental drift.
+    #[test]
+    fn reader_doc_carries_strict_csp_meta() {
+        let out = compose_reader_html(Some("<p>x</p>"), None);
+        assert!(
+            out.contains(r#"<meta http-equiv="Content-Security-Policy""#),
+            "CSP meta tag missing"
+        );
+        for directive in [
+            "default-src 'none'",
+            "base-uri 'none'",
+            "form-action 'none'",
+        ] {
+            assert!(
+                out.contains(directive),
+                "CSP missing required directive `{directive}` — every release must keep it"
+            );
+        }
+    }
+
+    /// `img-src` must NOT cover `http:` — remote-image opt-in routes
+    /// through `https` URLs only after the per-sender allowlist clears.
+    /// Catching this in a unit test means a careless edit to the CSP
+    /// can't silently widen the egress surface.
+    #[test]
+    fn reader_doc_csp_disallows_http_images() {
+        let out = compose_reader_html(Some("<p>x</p>"), None);
+        // The directive should permit `data:` and `https:` but no
+        // bare `http:` scheme. Walk the string for the `img-src`
+        // segment and inspect.
+        let csp_start = out
+            .find("Content-Security-Policy")
+            .expect("CSP meta missing");
+        let csp_chunk = &out[csp_start..csp_start + 600];
+        let img_src_start = csp_chunk.find("img-src ").expect("img-src missing");
+        let img_src_segment = &csp_chunk[img_src_start..];
+        let img_src_end = img_src_segment.find(';').unwrap_or(img_src_segment.len());
+        let img_src = &img_src_segment[..img_src_end];
+        assert!(
+            !img_src.contains("http:") || img_src.contains("https:"),
+            "img-src must not allow plain `http:`: {img_src}"
+        );
+    }
+
     #[test]
     fn minimal_escape_handles_each_unsafe_char() {
         assert_eq!(minimal_escape("&"), "&amp;");
