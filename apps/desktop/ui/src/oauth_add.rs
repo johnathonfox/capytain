@@ -24,7 +24,6 @@
 use dioxus::prelude::*;
 use qsl_ipc::Account;
 use serde::Deserialize;
-use wasm_bindgen::JsCast;
 
 use crate::app::{invoke, web_sys_log, TAILWIND_CSS};
 
@@ -198,17 +197,20 @@ fn ProviderButton(provider: ProviderInfo, mut selected: Signal<Option<ProviderIn
     }
 }
 
-/// Close this Tauri window via the same `core:window:allow-close`
-/// permission the main window already has. We can't import
-/// `tauri::Window` from wasm, so go through the JS bridge with the
-/// plugin command directly.
+/// Ask the host to close this window.
+///
+/// We invoke the Rust-side `oauth_add_close` command rather than
+/// calling JS `window.close()` directly: on webkit2gtk the JS path
+/// often unloads the page (clearing the Dioxus root) without
+/// actually closing the GTK window, leaving the user staring at a
+/// blank shell with the title bar still up. The host command goes
+/// through Tauri's `WebviewWindow::close`, which behaves correctly
+/// on every platform. Best-effort — if the command fails the user
+/// can still hit the OS close button.
 fn close_window() {
-    if let Some(window) = web_sys::window() {
-        if let Some(close_fn) = js_sys::Reflect::get(&window, &"close".into())
-            .ok()
-            .and_then(|v| v.dyn_into::<js_sys::Function>().ok())
-        {
-            let _ = close_fn.call0(&window);
+    spawn(async {
+        if let Err(e) = invoke::<()>("oauth_add_close", serde_json::json!({})).await {
+            web_sys_log(&format!("oauth_add_close: {e}"));
         }
-    }
+    });
 }
