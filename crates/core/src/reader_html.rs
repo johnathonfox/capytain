@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Build the full HTML document the Servo reader pane renders.
+//! Build the full HTML document the reader pane renders.
 //!
-//! Both the in-process Dioxus UI and the desktop popup-window install
-//! path need to compose this same document — the UI side from the
-//! reactive `RenderedMessage` it just fetched, the desktop side at
-//! Servo install time so the renderer can paint into the GTK overlay
-//! before Dioxus mounts and `reader_set_position` arrives. Keeping
-//! the function here means both paths produce byte-identical markup
-//! and share the placeholder / theming rules in one place.
+//! The Dioxus UI hands this document to a sandboxed
+//! `<iframe srcdoc>` inside the host webview. Both the inline
+//! reader and the popup-window reader use this composer so the
+//! placeholder, theming, and link-forwarder rules live in one
+//! place.
 //!
 //! Inputs are primitive borrowed slices rather than the
 //! `RenderedMessage` struct so this crate doesn't have to depend on
@@ -27,15 +25,31 @@ pub fn compose_reader_html(body_html: Option<&str>, body_text: Option<&str>) -> 
     let body_section = render_body_section(body_html, body_text);
 
     // Headers (subject / from / date / recipients) are rendered by
-    // the Dioxus side as a styled card; Servo's pane is body-only,
-    // so the user sees each piece of info exactly once whether
-    // Servo is reparented next to the webview (Linux) or running
-    // in a separate auxiliary window (macOS / Windows).
+    // the Dioxus side as a styled card; the iframe contains body
+    // markup only so the user sees each piece of info exactly once.
+    // CSP applied inside the iframe srcdoc as a defence-in-depth layer
+    // behind the ammonia allowlist + adblock filter. `default-src 'none'`
+    // blocks every fetch except what we explicitly permit:
+    //   - `img-src data: https:` so per-sender opt-in remote images and
+    //     inline data URIs render; `http:` and other schemes are blocked.
+    //   - `style-src 'unsafe-inline'` because the wrapper's <style>
+    //     block is inline and email content keeps its `style="..."`
+    //     attributes.
+    //   - `script-src 'unsafe-inline'` for the click forwarder below;
+    //     the iframe sandbox is `allow-scripts` already, so this only
+    //     scopes which scripts can run, not whether scripts run at all.
+    //   - `base-uri 'none'` and `form-action 'none'` shut off two
+    //     classic exfil channels (rewriting the document base, posting
+    //     a smuggled form to an attacker URL).
+    // If the sanitizer ever lets a tag through that fetches against
+    // `connect-src`, `frame-src`, `font-src`, etc., the CSP shuts it
+    // off rather than relying solely on ammonia's allowlist.
     format!(
         r#"<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: https:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
   <style>
     body {{
       font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -79,22 +93,21 @@ pub fn compose_reader_html(body_html: Option<&str>, body_text: Option<&str>) -> 
 <body>
   <div class="qsl-body">{body_section}</div>
   <script>
-    // Click forwarder. Servo's `request_navigation` fires on every
-    // navigation Servo initiates, but plain anchor clicks inside a
-    // `data:` URL document don't always make it through Servo's
-    // input pipeline (GTK DrawingArea doesn't auto-forward mouse
-    // events to Servo's input system on Linux). Catching the click
-    // in JS and explicitly setting `window.location.href` triggers
-    // a navigation request that the renderer delegate intercepts
-    // and routes to `webbrowser::open`. The delegate denies the
-    // navigation in-page, so the email content stays put.
+    // Click forwarder. The wrapper loads into a sandboxed
+    // `<iframe>` inside the host webkit2gtk webview. Top-level
+    // navigation is blocked by the sandbox (no `allow-top-navigation`),
+    // so we postMessage the URL up to the parent frame; the Dioxus
+    // shell forwards it to the host's `open_external_url` Tauri
+    // command which validates the scheme and shells out to the OS
+    // default browser.
     document.addEventListener('click', function(e) {{
       var node = e.target;
       while (node && node.nodeName !== 'A') node = node.parentNode;
-      if (node && node.href) {{
-        e.preventDefault();
-        try {{ window.location.href = node.href; }} catch (err) {{}}
-      }}
+      if (!node || !node.href) return;
+      e.preventDefault();
+      try {{
+        window.parent.postMessage({{ type: 'qsl-link-click', url: node.href }}, '*');
+      }} catch (err) {{}}
     }}, true);
   </script>
 </body>

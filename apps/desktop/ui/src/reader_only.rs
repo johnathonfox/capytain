@@ -8,21 +8,20 @@
 //! reads that global at boot (`reader_window_message_id`) and mounts
 //! [`ReaderOnlyApp`] when it's set.
 //!
-//! `ReaderOnlyApp` reuses the same `compose_reader_html` plus
-//! `reader_render` plus `start_reader_body_tracker` plumbing the
-//! inline reader uses, so a popup paints with the same Servo overlay
-//! path. The popup's window-scoped `reader_render` IPC call
-//! lazy-installs a fresh Servo instance for this window's label on
-//! first invocation — see the reader-command module on the desktop
-//! side for details.
+//! `ReaderOnlyApp` mirrors the inline reader's body-rendering path:
+//! `compose_reader_html` produces the wrapper HTML; we hand it to a
+//! sandboxed `<iframe srcdoc>` and webkit2gtk paints it directly.
+//! The link-click forwarder inside the wrapper postMessages anchor
+//! URLs back to this window, where `installReaderLinkListener`
+//! routes them to `open_external_url`.
 
 use dioxus::prelude::*;
 use qsl_ipc::{MessageId, RenderedMessage};
 use serde::Serialize;
 
 use crate::app::{
-    compose_reader_html, invoke, push_reader_body_rect, reader_window_preload,
-    start_reader_body_tracker, web_sys_log, TAILWIND_CSS,
+    compose_reader_html, install_reader_link_listener, invoke, reader_window_preload, web_sys_log,
+    TAILWIND_CSS,
 };
 
 #[derive(Serialize)]
@@ -78,10 +77,10 @@ pub fn ReaderOnlyApp(message_id: MessageId) -> Element {
         }
     });
 
-    // Same body tracker the inline reader uses — watches the
-    // `.reader-body-fill` element below and pushes its bounding rect
-    // to the Rust side over `reader_set_position`.
-    use_hook(start_reader_body_tracker);
+    // The popup window has its own JS context (separate webview) so
+    // the link forwarder needs its own listener install. Once per
+    // popup mount.
+    use_hook(install_reader_link_listener);
 
     rsx! {
         document::Stylesheet { href: TAILWIND_CSS }
@@ -116,26 +115,7 @@ pub fn ReaderOnlyApp(message_id: MessageId) -> Element {
                     } else {
                         msg.headers.subject.clone()
                     };
-                    let body_doc = compose_reader_html(msg);
-
-                    // Push the body to the Servo overlay surface.
-                    // First call for this window's label triggers a
-                    // lazy Servo install on the Rust side.
-                    let render_payload = body_doc.clone();
-                    use_effect(move || {
-                        let payload = render_payload.clone();
-                        wasm_bindgen_futures::spawn_local(async move {
-                            if let Err(e) = invoke::<()>(
-                                "reader_render",
-                                serde_json::json!({ "input": { "html": payload } }),
-                            )
-                            .await
-                            {
-                                web_sys_log(&format!("reader_render (popup): {e}"));
-                            }
-                        });
-                        push_reader_body_rect();
-                    });
+                    let body_html = compose_reader_html(msg);
 
                     rsx! {
                         div {
@@ -154,9 +134,11 @@ pub fn ReaderOnlyApp(message_id: MessageId) -> Element {
                                 span { style: "margin-left: auto;", title: "{date_full}", "{date}" }
                             }
                         }
-                        div {
-                            class: "reader-body-fill",
-                            style: "min-height: 0; position: relative;",
+                        iframe {
+                            class: "reader-body-iframe",
+                            "sandbox": "allow-scripts",
+                            srcdoc: "{body_html}",
+                            style: "width: 100%; height: 100%; border: 0; background: white; min-height: 0;",
                         }
                     }
                 }

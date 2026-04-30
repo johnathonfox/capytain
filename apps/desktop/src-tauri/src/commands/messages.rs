@@ -2,20 +2,22 @@
 
 //! `messages_*` Tauri commands.
 //!
-//! Implements the Phase 0 Week 5 read-path surface of
-//! `COMMANDS.md §Messages`: `messages_list` and `messages_get`. The
-//! write-path commands (`messages_mark_read`, `messages_flag`,
-//! `messages_move`, `messages_archive`, `messages_delete`,
-//! `messages_download_attachment`) land in Phase 1 alongside the
-//! outbox / optimistic-mutation engine.
+//! Implements the read-path surface of `COMMANDS.md §Messages`:
+//! `messages_list`, `messages_list_unified`, `messages_search`,
+//! `messages_get`, plus the write-path / mutation commands
+//! (`messages_mark_read`, `messages_flag`, `messages_move`,
+//! `messages_archive`, `messages_delete`, `messages_send`) and the
+//! `messages_open_attachment` extractor that pulls attachment bytes
+//! out of cached message blobs and hands them to the OS default
+//! application via the user's Downloads directory.
 
 use base64::engine::general_purpose::STANDARD as base64_engine;
 use base64::Engine as _;
 use qsl_core::{EmailAddress, FolderRole, MessageFlags, MessageHeaders};
 use qsl_ipc::{DraftId, FolderId, IpcResult, MessageId, MessagePage, RenderedMessage, SortOrder};
 use qsl_mime::{
-    compose::build_rfc5322, parse_rfc822, sanitize_email_html, sanitize_email_html_trusted,
-    MessageIdentity,
+    compose::build_rfc5322, extract_attachment_bytes, parse_rfc822, sanitize_email_html,
+    sanitize_email_html_trusted, MessageIdentity,
 };
 use qsl_storage::{
     repos::accounts as accounts_repo, repos::drafts as drafts_repo, repos::folders as folders_repo,
@@ -339,6 +341,181 @@ pub async fn messages_trust_sender(
     drop(db);
     tracing::info!(account = %account_id.0, %email_address, "messages_trust_sender: added opt-in");
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MessagesOpenAttachmentInput {
+    pub message_id: MessageId,
+    /// `AttachmentRef` from `messages_get`'s `RenderedMessage.attachments`.
+    /// Currently encoded as `"part/{i}"`; this command parses the suffix
+    /// and looks up the part by index.
+    pub attachment_id: qsl_core::AttachmentRef,
+}
+
+/// `messages_open_attachment` — extract one attachment's bytes, write
+/// them to the user's Downloads folder under the suggested filename
+/// (suffixed `(1)`, `(2)`, … on collision), and open the resulting
+/// file with the system default application.
+///
+/// Reuses the same `load_cached_body` + `lazy_fetch_body` path as
+/// [`messages_get`] so we never re-fetch when the body blob is
+/// already on disk. The MIME walk is delegated to
+/// `qsl_mime::extract_attachment_bytes`, which uses the same part-index
+/// numbering [`parse_rfc822`] burns into each `AttachmentRef`.
+///
+/// On any failure (no body bytes, malformed MIME, index out of range,
+/// I/O error, missing Downloads dir) returns an `IpcError` with a
+/// short message — the UI surfaces that as a toast.
+#[tauri::command]
+pub async fn messages_open_attachment(
+    state: State<'_, AppState>,
+    input: MessagesOpenAttachmentInput,
+) -> IpcResult<String> {
+    use qsl_ipc::{IpcError, IpcErrorKind};
+
+    let MessagesOpenAttachmentInput {
+        message_id,
+        attachment_id,
+    } = input;
+    tracing::debug!(id = %message_id.0, attachment = %attachment_id.0, "messages_open_attachment");
+
+    // Resolve the part index baked into the attachment id by
+    // `qsl_mime::body_from`. The format is `"part/{i}"`; anything
+    // else is an unsupported (or stale) shape.
+    let part_index: usize = attachment_id
+        .0
+        .strip_prefix("part/")
+        .and_then(|s| s.parse::<usize>().ok())
+        .ok_or_else(|| {
+            IpcError::new(
+                IpcErrorKind::Internal,
+                format!(
+                    "messages_open_attachment: unrecognized attachment id `{}`",
+                    attachment_id.0
+                ),
+            )
+        })?;
+
+    // Pull headers + cached body path. Same shape as `messages_get`.
+    let db = state.db.lock().await;
+    let headers = messages_repo::get(&*db, &message_id).await?;
+    let body_path = messages_repo::body_path(&*db, &message_id).await?;
+    drop(db);
+
+    let blobs = BlobStore::new(state.data_dir.join("blobs"));
+    let bytes = if body_path.is_some() {
+        load_cached_body(&blobs, &headers).await
+    } else {
+        lazy_fetch_body(&state, &blobs, &headers).await
+    };
+    let bytes = bytes.ok_or_else(|| {
+        IpcError::new(
+            IpcErrorKind::NotFound,
+            format!(
+                "messages_open_attachment: could not load body for {}",
+                message_id.0
+            ),
+        )
+    })?;
+
+    let (filename, payload) = extract_attachment_bytes(&bytes, part_index).ok_or_else(|| {
+        IpcError::new(
+            IpcErrorKind::NotFound,
+            format!("messages_open_attachment: no binary part at index {part_index}"),
+        )
+    })?;
+
+    // Resolve Downloads dir. UserDirs::download_dir() returns Some on
+    // platforms that publish `XDG_DOWNLOAD_DIR` / Known Folder /
+    // similar; fall back to data_dir for headless setups so the
+    // command still produces *something* useful.
+    let download_dir = directories::UserDirs::new()
+        .and_then(|d| d.download_dir().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| state.data_dir.join("downloads"));
+    if let Err(e) = std::fs::create_dir_all(&download_dir) {
+        return Err(IpcError::new(
+            IpcErrorKind::Storage,
+            format!(
+                "messages_open_attachment: create {}: {e}",
+                download_dir.display()
+            ),
+        ));
+    }
+
+    let safe_name = sanitize_attachment_filename(&filename);
+    let target_path = unique_path(&download_dir, &safe_name);
+    let bytes_written = payload.len();
+    if let Err(e) = std::fs::write(&target_path, payload) {
+        return Err(IpcError::new(
+            IpcErrorKind::Storage,
+            format!(
+                "messages_open_attachment: write {}: {e}",
+                target_path.display()
+            ),
+        ));
+    }
+
+    let target_str = target_path.to_string_lossy().into_owned();
+    if let Err(e) = webbrowser::open(&target_str) {
+        // The file is written even if open failed — caller can still
+        // navigate to Downloads manually. Log and surface a soft
+        // error so the UI shows "saved but couldn't open".
+        tracing::warn!(path = %target_str, "open attachment via webbrowser::open failed: {e}");
+        return Err(IpcError::new(
+            IpcErrorKind::Internal,
+            format!("saved to {target_str} but failed to open: {e}"),
+        ));
+    }
+
+    tracing::info!(path = %target_str, size = bytes_written, "attachment opened");
+    Ok(target_str)
+}
+
+/// Strip path separators and other shell-hostile characters so a
+/// suggested filename from a remote sender can't escape the Downloads
+/// directory or get interpreted by the shell. Replaces `/` `\` `:` and
+/// any control character with `_`. Empty result falls back to
+/// `attachment.bin`.
+fn sanitize_attachment_filename(raw: &str) -> String {
+    let mut out: String = raw
+        .chars()
+        .map(|c| {
+            if c == '/' || c == '\\' || c == ':' || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    out = out
+        .trim_matches(|c: char| c == '.' || c.is_whitespace())
+        .to_string();
+    if out.is_empty() {
+        "attachment.bin".to_string()
+    } else {
+        out
+    }
+}
+
+/// Find a non-existing path inside `dir` for `filename`. If the file
+/// exists, append ` (1)`, ` (2)`, … before the extension. Caps at 999
+/// before falling back to the bare name (callers will then overwrite).
+fn unique_path(dir: &std::path::Path, filename: &str) -> std::path::PathBuf {
+    let candidate = dir.join(filename);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let (stem, ext) = match filename.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (filename.to_string(), String::new()),
+    };
+    for n in 1..1000 {
+        let p = dir.join(format!("{stem} ({n}){ext}"));
+        if !p.exists() {
+            return p;
+        }
+    }
+    dir.join(filename)
 }
 
 /// Read a previously-fetched body blob from disk. A stale
@@ -1046,12 +1223,10 @@ pub struct MessagesOpenInWindowInput {
 /// Dioxus root component reads that global at boot and mounts the
 /// `ReaderOnlyApp` instead of the three-pane shell.
 ///
-/// `reader_render` for the popup's label lazy-installs a fresh
-/// Servo instance on first call (see `commands::reader::reader_render`).
-/// `WindowEvent::CloseRequested` drops the renderer entry and the
-/// `linux_gtk` parent registry entry; the underlying GTK widgets
-/// stay leaked (a few KB each) by design — see
-/// `docs/superpowers/plans/2026-04-27-reader-popup-window.md`.
+/// We pre-fetch the rendered message and inline its JSON as
+/// `window.__QSL_READER_PRELOAD__` so the popup's reader-only
+/// component can mount instantly without a follow-up `messages_get`
+/// round-trip.
 ///
 /// Calling this for an already-open popup focuses the existing
 /// window instead of spawning a duplicate.
@@ -1099,10 +1274,6 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
     // logged but doesn't abort the open: the popup falls back to
     // calling `messages_get` itself when `__QSL_READER_PRELOAD__`
     // is `null`.
-    // We need to reach into `state.servo_renderers` after install to
-    // dispatch the early body render (backlog #12), so re-acquire the
-    // `AppState` from the AppHandle rather than moving the borrowed
-    // `state: State<'_, AppState>` argument into `messages_get`.
     let state_for_render: tauri::State<AppState> = app.state();
     let t_preload_start = std::time::Instant::now();
     // Backlog #11 — peek the single-entry render cache. If the user
@@ -1168,7 +1339,7 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
 
     let title = format!("QSL — {}", input.id.0);
     let t_window_start = std::time::Instant::now();
-    let window =
+    let _window =
         tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("index.html".into()))
             .title(title)
             .inner_size(720.0, 800.0)
@@ -1190,104 +1361,6 @@ pub async fn messages_open_in_window<R: tauri::Runtime>(
         ms = t_window_start.elapsed().as_millis() as u64,
         "messages_open_in_window: WebviewWindow built"
     );
-
-    {
-        let app_for_close = app.clone();
-        let label_for_close = label.clone();
-        window.on_window_event(move |event| {
-            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
-                let app = app_for_close.clone();
-                let label = label_for_close.clone();
-                tauri::async_runtime::spawn(async move {
-                    let state: tauri::State<AppState> = app.state();
-                    state.servo_renderers.lock().await.remove(&label);
-                    state.last_reader_size.lock().await.remove(&label);
-                    #[cfg(target_os = "linux")]
-                    crate::linux_gtk::remove_parent(&label);
-                    tracing::info!(window = %label, "popup reader window closed; renderer dropped");
-                });
-            }
-        });
-    }
-
-    // Servo install must happen on the GTK main thread —
-    // `gtk::Overlay::new()` panics with "GTK may only be used from
-    // the main thread" anywhere else. We're currently on a tokio
-    // worker (every `#[tauri::command] async fn` is), so dispatch
-    // the install via `run_on_main_thread` and await the result so
-    // the renderer is in the per-window registry before this
-    // command returns. The popup's first `reader_render` then
-    // succeeds without racing the install.
-    #[cfg(feature = "servo")]
-    {
-        let t_install_start = std::time::Instant::now();
-        let install_app = app.clone();
-        let install_label = label.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
-        app.run_on_main_thread(move || {
-            let result = (|| -> Result<(), String> {
-                let webview = install_app
-                    .get_webview_window(&install_label)
-                    .ok_or_else(|| "popup window vanished before install".to_string())?;
-                crate::renderer_bridge::install_servo_renderer_for_window(&install_app, &webview)
-                    .map_err(|e| e.to_string())
-            })();
-            let _ = tx.send(result);
-        })
-        .map_err(|e| {
-            qsl_ipc::IpcError::new(
-                qsl_ipc::IpcErrorKind::Internal,
-                format!("dispatch popup Servo install: {e}"),
-            )
-        })?;
-        match rx.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                tracing::warn!(window = %label, error = %e, "messages_open_in_window: Servo install failed");
-            }
-            Err(e) => {
-                tracing::warn!(window = %label, error = %e, "messages_open_in_window: install reply lost");
-            }
-        }
-        tracing::info!(
-            ms = t_install_start.elapsed().as_millis() as u64,
-            "messages_open_in_window: Servo install completed"
-        );
-
-        // Backlog #12 — render the body into the freshly-installed
-        // Servo overlay immediately, while it's still painting into
-        // its install-time off-screen rect. The popup's wasm bundle
-        // hasn't booted yet, so without this step Servo idles for
-        // ~250 ms until Dioxus mounts and the JS-side ResizeObserver
-        // pushes a real position via `reader_set_position`. Painting
-        // the body into the off-screen rect now means that when the
-        // overlay later moves into the visible reader area, the
-        // first frame that becomes visible already has body content.
-        // We need a `RenderedMessage` to compose from — if the
-        // pre-fetch above failed (and `rendered_opt` is `None`),
-        // skip the early render: the popup's Dioxus side will fall
-        // back to its own `messages_get` round-trip and trigger
-        // `reader_render` itself, matching the pre-#12 behavior.
-        if let Some(rendered) = rendered_opt.as_ref() {
-            let html = qsl_core::compose_reader_html(
-                rendered.sanitized_html.as_deref(),
-                rendered.body_text.as_deref(),
-            );
-            let mut guard = state_for_render.servo_renderers.lock().await;
-            if let Some(renderer) = guard.get_mut(&label) {
-                let _handle = renderer.render(&html, qsl_core::RenderPolicy::strict());
-                tracing::info!(
-                    ms = t_install_start.elapsed().as_millis() as u64,
-                    "messages_open_in_window: pre-Dioxus body render dispatched"
-                );
-            } else {
-                tracing::warn!(
-                    window = %label,
-                    "messages_open_in_window: renderer slot empty after install"
-                );
-            }
-        }
-    }
 
     tracing::info!(
         window = %label,
@@ -1349,5 +1422,65 @@ mod tests {
             folder("Trash", Some(FolderRole::Trash)),
         ];
         assert_eq!(resolve_archive_target(&folders), None);
+    }
+
+    #[test]
+    fn sanitize_attachment_filename_strips_path_separators() {
+        // Path traversal hardening: `/` → `_`, leading dots trimmed.
+        // `../../etc/passwd` becomes `.._.._etc_passwd` after `/` →
+        // `_`, then leading dot/whitespace trim drops the leading
+        // double-dot for `_.._etc_passwd`.
+        assert_eq!(
+            sanitize_attachment_filename("../../etc/passwd"),
+            "_.._etc_passwd"
+        );
+    }
+
+    #[test]
+    fn sanitize_attachment_filename_strips_backslash_and_colon() {
+        assert_eq!(
+            sanitize_attachment_filename(r"C:\Windows\evil.exe"),
+            "C__Windows_evil.exe"
+        );
+    }
+
+    #[test]
+    fn sanitize_attachment_filename_strips_control_chars() {
+        assert_eq!(sanitize_attachment_filename("foo\nbar\tbaz"), "foo_bar_baz");
+    }
+
+    #[test]
+    fn sanitize_attachment_filename_falls_back_when_empty() {
+        assert_eq!(sanitize_attachment_filename(""), "attachment.bin");
+        assert_eq!(sanitize_attachment_filename("   .  "), "attachment.bin");
+    }
+
+    #[test]
+    fn unique_path_returns_input_when_absent() {
+        let dir = std::env::temp_dir().join(format!("qsl-uniq-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = unique_path(&dir, "fresh.bin");
+        assert_eq!(p, dir.join("fresh.bin"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unique_path_appends_counter_on_collision() {
+        let dir = std::env::temp_dir().join(format!("qsl-uniq-coll-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("doc.pdf"), b"x").unwrap();
+        let p = unique_path(&dir, "doc.pdf");
+        assert_eq!(p, dir.join("doc (1).pdf"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unique_path_handles_no_extension() {
+        let dir = std::env::temp_dir().join(format!("qsl-uniq-noext-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("README"), b"x").unwrap();
+        let p = unique_path(&dir, "README");
+        assert_eq!(p, dir.join("README (1)"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

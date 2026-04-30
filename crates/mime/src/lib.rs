@@ -25,6 +25,35 @@ use qsl_core::{
     MessageHeaders, MessageId, ThreadId,
 };
 
+/// Extract one attachment's `(filename, bytes)` from a raw RFC 822
+/// blob, looked up by part index.
+///
+/// `part_index` corresponds to the `i` baked into
+/// `Attachment::id = AttachmentRef("part/{i}")` by [`parse_rfc822`]'s
+/// part walk — same numbering, same iteration order. The desktop
+/// app's `messages_open_attachment` command parses the prefix off the
+/// `AttachmentRef` it received from the UI and hands the bare index
+/// in here.
+///
+/// Returns `None` when:
+/// - the RFC 822 blob fails to parse,
+/// - `part_index` is past the end of the part list, or
+/// - the indexed part isn't a `Binary` / `InlineBinary` part (i.e. the
+///   index points at a text/html alternative or similar).
+pub fn extract_attachment_bytes(raw: &[u8], part_index: usize) -> Option<(String, Vec<u8>)> {
+    let parsed = MessageParser::default().parse(raw)?;
+    let part = parsed.parts.get(part_index)?;
+    let bytes: Vec<u8> = match &part.body {
+        PartType::Binary(b) | PartType::InlineBinary(b) => b.to_vec(),
+        _ => return None,
+    };
+    let filename = part
+        .attachment_name()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("attachment-{part_index}"));
+    Some((filename, bytes))
+}
+
 /// Parse a raw RFC 822 blob into a QSL [`MessageBody`].
 ///
 /// Identity fields the adapter supplies (its own opaque IDs, the account
@@ -1151,5 +1180,62 @@ body";
         let s = snippet_from(&parsed);
         assert_eq!(s, "short body with naïve emoji 🦀");
         assert!(!s.ends_with('\u{2026}'));
+    }
+
+    const MULTIPART_WITH_ATTACHMENT: &[u8] = b"From: Jane <jane@example.com>\r\n\
+To: me@example.com\r\n\
+Subject: With attachment\r\n\
+Date: Fri, 18 Apr 2026 10:00:00 +0000\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=BOUND\r\n\
+\r\n\
+--BOUND\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+See attached.\r\n\
+--BOUND\r\n\
+Content-Type: application/pdf; name=\"report.pdf\"\r\n\
+Content-Disposition: attachment; filename=\"report.pdf\"\r\n\
+Content-Transfer-Encoding: base64\r\n\
+\r\n\
+SGVsbG8sIFdvcmxkIQ==\r\n\
+--BOUND--\r\n";
+
+    #[test]
+    fn extract_attachment_bytes_returns_decoded_payload() {
+        // mail-parser walks parts in reverse order on multipart/mixed,
+        // so the attachment lands at index 0 and the body at index 1
+        // — the right approach is to scan, not assume.
+        let parsed = MessageParser::default()
+            .parse(MULTIPART_WITH_ATTACHMENT)
+            .expect("multipart parses");
+        let attach_index = parsed
+            .parts
+            .iter()
+            .position(|p| matches!(p.body, PartType::Binary(_) | PartType::InlineBinary(_)))
+            .expect("attachment part present");
+
+        let (filename, bytes) =
+            extract_attachment_bytes(MULTIPART_WITH_ATTACHMENT, attach_index).expect("found");
+        assert_eq!(filename, "report.pdf");
+        assert_eq!(bytes, b"Hello, World!");
+    }
+
+    #[test]
+    fn extract_attachment_bytes_none_for_text_part() {
+        let parsed = MessageParser::default()
+            .parse(MULTIPART_WITH_ATTACHMENT)
+            .unwrap();
+        let text_index = parsed
+            .parts
+            .iter()
+            .position(|p| matches!(p.body, PartType::Text(_)))
+            .unwrap();
+        assert!(extract_attachment_bytes(MULTIPART_WITH_ATTACHMENT, text_index).is_none());
+    }
+
+    #[test]
+    fn extract_attachment_bytes_none_for_out_of_range() {
+        assert!(extract_attachment_bytes(MULTIPART_WITH_ATTACHMENT, 999).is_none());
     }
 }

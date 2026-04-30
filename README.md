@@ -8,7 +8,7 @@
 
 ## What this is
 
-QSL is a cross-platform desktop email client for macOS, Windows, and Linux, written end-to-end in Rust. It connects directly to your mail provider — no intermediary servers, no telemetry, no ad networks — and is built on a deliberately experimental pure-Rust stack: [Tauri](https://tauri.app/) + [Dioxus](https://dioxuslabs.com/) for the app, [Servo](https://servo.org/) for rendering HTML email, [Turso](https://turso.tech/) for storage, [adblock-rust](https://github.com/brave/adblock-rust) for tracker blocking.
+QSL is a cross-platform desktop email client for macOS, Windows, and Linux, written end-to-end in Rust. It connects directly to your mail provider — no intermediary servers, no telemetry, no ad networks — and is built on a deliberately experimental pure-Rust stack: [Tauri](https://tauri.app/) + [Dioxus](https://dioxuslabs.com/) for the app, [ammonia](https://github.com/rust-ammonia/ammonia) sanitization plus a sandboxed WebKit `<iframe srcdoc>` for rendering HTML email, [Turso](https://turso.tech/) for storage, [adblock-rust](https://github.com/brave/adblock-rust) for tracker blocking.
 
 The goal is a mail client that respects the user by default and demonstrates that a fully Rust-native desktop stack is viable for a real-world, consumer-facing application.
 
@@ -21,7 +21,7 @@ Every modern desktop client makes at least one of the following compromises:
 - Uses the system webview uniformly, causing emails to render differently across platforms.
 - Depends on C/C++ libraries for the most security-sensitive parts of the pipeline (HTML parsing, image decoding).
 
-QSL makes the opposite bet on each: pure-Rust end to end, no intermediary servers, consistent rendering via Servo, memory-safe by default.
+QSL makes the opposite bet on each: pure-Rust end to end, no intermediary servers, the platform's own WebKit-derived webview as the rendering surface (so the binary stays small and predictable), and memory-safe by default.
 
 ## Design principles
 
@@ -47,7 +47,7 @@ QSL makes the opposite bet on each: pure-Rust end to end, no intermediary server
 
 - **macOS** 12 Monterey or newer (x86_64 or Apple Silicon)
 - **Windows** 10 22H2 or newer (x86_64)
-- **Linux** with a modern Wayland or X11 session (x86_64); GTK 3.24+ for the webview. Wayland sessions run the reader pane under XWayland + llvmpipe software GL by default — see [Linux environment overrides](#linux-environment-overrides) below for the whys.
+- **Linux** with a modern Wayland or X11 session (x86_64); GTK 3.24+ for the webview. On NVIDIA-equipped boxes the desktop app force-disables webkit2gtk's DMA-BUF renderer because libgbm fails to allocate framebuffers on the proprietary driver; see [Linux environment overrides](#linux-environment-overrides) below.
 
 ## Getting started (for developers)
 
@@ -65,22 +65,11 @@ QSL makes the opposite bet on each: pure-Rust end to end, no intermediary server
 
 ### Linux environment overrides
 
-`qsl-desktop` sets four environment variables at startup (only if they are not already set) before any GL or GTK code touches the display. Each one addresses a separate Linux-specific issue on the current `gtk-rs 0.18` / `surfman 0.11` / GTK 3 Wayland stack:
+On systems with the NVIDIA proprietary driver in the GBM stack — common on hybrid laptops and any desktop where libgbm lands on the NVIDIA side — webkit2gtk's DMA-BUF renderer fails to allocate framebuffers (`Failed to create GBM buffer of size WxH: Invalid argument`) and the webview paints nothing. To stay rendered out of the box, `qsl-desktop` exports `WEBKIT_DISABLE_DMABUF_RENDERER=1` at startup on Linux (only if it is not already set), which rolls webkit back to its SHM rendering path. The performance hit is negligible for an email client.
 
-```
-MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
-LIBGL_ALWAYS_SOFTWARE=1
-__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
-GDK_BACKEND=x11
-```
+If you want the DMA-BUF path back — e.g. on a pure Mesa box where it works — export `WEBKIT_DISABLE_DMABUF_RENDERER=0` (or any value) before launching and the binary will leave your choice alone.
 
-**Why the first three (Mesa llvmpipe software EGL):** on NVIDIA proprietary driver + a Wayland compositor that advertises the `wp_linux_drm_syncobj_surface_v1` explicit-sync protocol (KWin, and likely others), the first surfman commit tears the Wayland connection with a protocol error — NVIDIA's closed-source EGL-Wayland layer auto-joins the protocol but doesn't supply an acquire timeline point. Tracked upstream as [servo/surfman#354](https://github.com/servo/surfman/issues/354); full investigation in [`docs/upstream/surfman-explicit-sync.md`](./docs/upstream/surfman-explicit-sync.md). Forcing Mesa's llvmpipe software EGL bypasses the NVIDIA EGL-Wayland path entirely. The reader pane then renders on CPU rather than GPU — fine for 720×560 email HTML; the reader is not a GPU-bound workload.
-
-**Why `GDK_BACKEND=x11` (XWayland routing):** GTK 3's Wayland backend doesn't support `wl_subsurface` for arbitrary child widgets — `gdk_window_ensure_native()` on a `GtkDrawingArea` creates a new `xdg_toplevel` rather than a `wl_subsurface` of the main window, so Servo's `WindowRenderingContext` ends up drawing into what the compositor shows as a separate window. X11 has real child-window support; routing everything through XWayland gives the Servo pane a proper X11 child window inside the Tauri frame. The proper fix is Tauri migrating its Linux backend to GTK 4 (GDK 4 has per-widget subsurface support); until then, the XWayland translation overhead is negligible for software-rendered email.
-
-**Opting out:** each variable is only set if currently unset. Export any of them to a different value — e.g. `GDK_BACKEND=wayland` to reproduce the separate-window bug, or `LIBGL_ALWAYS_SOFTWARE=0` to re-enable the native-NVIDIA path — before launching, and the code leaves your choice alone.
-
-Non-Linux platforms are unaffected; the whole block is a no-op on macOS and Windows.
+Non-Linux platforms are unaffected.
 
 ### Building from source
 
@@ -156,7 +145,6 @@ QSL is not a registered trademark and the project asserts no trademark rights. I
 
 This project stands on the work of many:
 
-- [Servo](https://servo.org/) — pure-Rust browser engine
 - [Tauri](https://tauri.app/) — cross-platform Rust app framework
 - [Dioxus](https://dioxuslabs.com/) — React-like UI in Rust
 - [Turso](https://turso.tech/) — pure-Rust SQLite-compatible database

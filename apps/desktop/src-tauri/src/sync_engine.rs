@@ -557,6 +557,28 @@ pub(crate) async fn sync_one_account(app: &AppHandle, blobs: &BlobStore, account
     }
 }
 
+/// True if the folder is the account's canonical Inbox. Used by the
+/// notification path to suppress duplicates on Gmail (every message
+/// lands in both INBOX and All Mail) and to keep Sent / Drafts / etc.
+/// from popping desktop notifications. Falls back to `false` on
+/// lookup error so we err on the side of "no notification" rather
+/// than spamming the user.
+async fn folder_is_inbox(app: &AppHandle, folder_id: &FolderId) -> bool {
+    let state: tauri::State<'_, AppState> = app.state();
+    let db = state.sync_db.lock().await;
+    match qsl_storage::repos::folders::find(&*db, folder_id).await {
+        Ok(Some(f)) => matches!(f.role, Some(FolderRole::Inbox)),
+        Ok(None) => false,
+        Err(e) => {
+            warn!(
+                folder = %folder_id.0,
+                "folder_is_inbox lookup failed: {e}"
+            );
+            false
+        }
+    }
+}
+
 /// Emit a `SyncEvent` for one folder's outcome, looking up the
 /// post-sync `unread_count` and (if `live`) firing a desktop
 /// notification when new messages arrived. Both bootstrap and
@@ -578,21 +600,41 @@ async fn emit_folder_outcome(
                     .await
                     .unwrap_or(0)
             };
-            if live && report.added > 0 {
-                // For single-message bursts (the common IDLE case),
-                // fetch the most-recent header so the notification
-                // body can render `"{from} — {subject}"` instead of
-                // the older `"{account} · {folder}"` placeholder.
-                // For multi-message bursts a single-message preview
-                // would be misleading, so we keep the count-only
-                // fallback and skip the lookup entirely.
+            if live && report.added > 0 && folder_is_inbox(app, folder).await {
+                // Notifications fire only for the canonical Inbox-role
+                // folder. Three reasons:
+                //   1. Gmail delivers each new message to BOTH `INBOX`
+                //      and `[Gmail]/All Mail` (Gmail uses labels, not
+                //      folders). With IDLE watchers on both — both
+                //      sit at the top of `prioritize_imap_folders` —
+                //      that produced two notifications per incoming
+                //      message before this gate.
+                //   2. Sent / Drafts / Trash / Archive / Spam picking
+                //      up `report.added > 0` (e.g. an APPEND to Sent
+                //      after compose, a server-side filter dropping a
+                //      message into Spam) shouldn't pop a desktop
+                //      notification anyway.
+                //   3. `Important` (Gmail's priority Inbox) overlaps
+                //      Inbox content — same dupe risk if we widened
+                //      the gate.
+                // For single-message bursts fetch the most-recent
+                // header so the body can render `"{from} — {subject}"`
+                // instead of the older `"{account} · {folder}"`
+                // placeholder.
                 let preview = if report.added == 1 {
                     let state: tauri::State<'_, AppState> = app.state();
                     let db = state.sync_db.lock().await;
-                    qsl_storage::repos::messages::list_by_folder(&*db, folder, 1, 0)
-                        .await
-                        .ok()
-                        .and_then(|mut v| v.pop())
+                    match qsl_storage::repos::messages::list_by_folder(&*db, folder, 1, 0).await {
+                        Ok(mut v) => v.pop(),
+                        Err(e) => {
+                            warn!(
+                                account = %account.0,
+                                folder = %folder.0,
+                                "preview lookup failed: {e}; firing notification without sender/subject"
+                            );
+                            None
+                        }
+                    }
                 } else {
                     None
                 };

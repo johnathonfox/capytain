@@ -1441,13 +1441,21 @@ ul {
   font-size: var(--fs-11);
 }
 
-/* Body fills the remaining space. Servo paints over this slot. */
-.reader-body-fill {
+/* The reader body is a sandboxed iframe that webkit2gtk renders
+ * in-place. Sized to fill the remaining flex space with no
+ * border/scrollbar chrome of its own — the iframe content's own
+ * scrollbar is what the user interacts with. `background: white`
+ * matches `compose_reader_html`'s body background; otherwise the iframe
+ * shows through to the dark Dioxus chrome behind it during the brief
+ * srcdoc parse. */
+.reader-body-iframe {
   flex: 1 1 auto;
   min-height: 0;
+  width: 100%;
   margin: 0;
   padding: 0;
-  background: transparent;
+  border: 0;
+  background: white;
 }
 
 .reader-subject {
@@ -1599,6 +1607,16 @@ ul {
   border-radius: var(--radius-input);
   font-size: var(--fs-11);
   color: var(--text-secondary);
+  cursor: pointer;
+  font-family: inherit;
+}
+.reader-attachment:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+.reader-attachment:focus-visible {
+  outline: 1px solid var(--accent-blue);
+  outline-offset: 1px;
 }
 
 .reader-remote-banner {

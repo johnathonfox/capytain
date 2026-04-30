@@ -50,9 +50,8 @@ Items that need you (the maintainer) at the keyboard or the GitHub UI — things
   - Compose draft auto-save (5 s debounce) or a settings resource refresh stuck in a loop.
   - Profiling path: open devtools (`Ctrl+Shift+I`) → Performance tab → record 5 s at idle → flame chart will show the hot stack.
 
-- [ ] **Reader rendering blank on AMD laptop (2026-04-28).** New issue surfaced during release-build smoke on a hybrid AMD+NVIDIA laptop running off the AMD GPU. Symptoms: message-view headers render correctly but body area is blank, with an "unstyled rectangle" visible in the lower-right (likely the offscreen `gtk::DrawingArea` shifted into view but Servo paint is not visible). Diagnostic plan documented in chat: re-run with `RUST_LOG=qsl_desktop=debug,qsl_renderer=debug` and check whether the popup-window reader paints (cuts the search space in half), and whether `LIBGL_ALWAYS_SOFTWARE=0 MESA_LOADER_DRIVER_OVERRIDE=` (bypassing the NVIDIA-tuned workaround) restores rendering on AMD.
+- [x] **Reader rendering blank on AMD laptop (2026-04-28).** Resolved by removal — the Servo-backed reader was swapped for a sandboxed webkit2gtk `<iframe srcdoc>` and the Servo code path was removed entirely (see `docs/servo-tombstone.md`).
 
 ## Deferred (not blocking)
 
-- [ ] **Ubuntu CI corpus `take_screenshot` hang.** Needs upstream Servo patch (see `KNOWN_ISSUES.md`). No tractable in-tree fix.
-- [ ] **Reader-pane resize flicker (residual).** Even after the 80 ms debounce. Structural — Servo's offscreen surface size lags its viewport handle. Real fix needs Servo `pause_paint` or a snapshot shim.
+(no current Servo-blocked items — all of them resolved by the 2026-04-28 removal.)

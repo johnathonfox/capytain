@@ -14,18 +14,17 @@
 //! - [`message`] — `EmailAddress`, `MessageFlags`, `MessageHeaders`,
 //!   `MessageBody`, `Attachment`.
 //! - [`sync_state`] — [`SyncState`] (opaque per-folder sync cursor).
-//! - [`renderer`] — [`EmailRenderer`] trait and [`NullRenderer`] test double.
-//!   The Servo-backed implementation lives in `qsl-renderer`.
+//! - [`link_cleaner`] — outbound URL tracker stripping & redirect unwrap.
 
 pub mod account;
 pub mod draft;
 pub mod error;
 pub mod folder;
 pub mod ids;
+pub mod link_cleaner;
 pub mod mail_backend;
 pub mod message;
 pub mod reader_html;
-pub mod renderer;
 pub mod sync_state;
 
 pub use account::{Account, BackendKind};
@@ -33,8 +32,8 @@ pub use draft::{Draft, DraftAttachment, DraftBodyKind};
 pub use error::{MailError, StorageError};
 pub use folder::{Folder, FolderRole};
 pub use ids::{AccountId, AttachmentRef, DraftId, FolderId, MessageId, ThreadId};
+pub use link_cleaner::clean_outbound_url;
 pub use mail_backend::{BackendEvent, MailBackend, MessageList};
 pub use message::{Attachment, EmailAddress, MessageBody, MessageFlags, MessageHeaders};
 pub use reader_html::compose_reader_html;
-pub use renderer::{ColorScheme, EmailRenderer, NullRenderer, RenderHandle, RenderPolicy};
 pub use sync_state::SyncState;
