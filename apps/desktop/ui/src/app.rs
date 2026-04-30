@@ -289,7 +289,6 @@ pub struct MessageContextMenu {
 
 // ---------- Root ----------
 
-#[component]
 /// Apply the persisted `appearance.theme` + `appearance.density`
 /// settings to `<html>` at boot and re-apply on every
 /// `app_settings_changed` event. Every Dioxus root (the main shell,
@@ -1218,6 +1217,29 @@ fn CommandPalette(
     let mut query = use_signal(String::new);
     let mut active_idx = use_signal(|| 0usize);
 
+    // Live full-text-search hits for the current query. Re-fires on
+    // every keystroke; the SQL FTS path is fast enough that we don't
+    // bother debouncing. Skipped for queries < 2 chars to avoid the
+    // unhelpful "match every message starting with t" results that a
+    // single character produces.
+    let q_for_search = query.read().clone();
+    let search_hits = use_resource(use_reactive!(|q_for_search| async move {
+        if q_for_search.trim().len() < 2 {
+            return Ok::<MessagePage, String>(MessagePage {
+                messages: Vec::new(),
+                total_count: 0,
+                unread_count: 0,
+            });
+        }
+        invoke::<MessagePage>(
+            "messages_search",
+            serde_json::json!({
+                "input": { "query": q_for_search, "limit": 6, "offset": 0 },
+            }),
+        )
+        .await
+    }));
+
     // Pull every account + its folders. Refetched on each open since
     // the palette only mounts when `visible` is true; closed-then-
     // reopened picks up brand-new accounts/folders without staleness.
@@ -1238,7 +1260,8 @@ fn CommandPalette(
 
     // Build the entry list. Filter happens against the lowercase
     // search-text of each entry; substring is good enough for v0.1.
-    let q = query.read().to_lowercase();
+    let raw_query = query.read().clone();
+    let q = raw_query.to_lowercase();
     // Static commands always appear so users can discover them.
     let mut entries: Vec<PaletteEntry> = vec![
         PaletteEntry::Command(PaletteCommand::Compose),
@@ -1265,7 +1288,10 @@ fn CommandPalette(
         entries.push(PaletteEntry::RecentSearch(s.clone()));
     }
 
-    let filtered: Vec<PaletteEntry> = if q.is_empty() {
+    // Substring-filter the standard entries against the typed query.
+    // Search-typed entries (RunSearch / SearchHit) are added below
+    // and bypass this filter — they're computed from the query.
+    let mut filtered: Vec<PaletteEntry> = if q.is_empty() {
         entries
     } else {
         entries
@@ -1273,6 +1299,38 @@ fn CommandPalette(
             .filter(|e| e.search_text().to_lowercase().contains(&q))
             .collect()
     };
+
+    // Prepend search entries when the user has typed at least two
+    // chars: the explicit "Search mail for: q" entry first (so Enter
+    // on a fresh query opens the search results pane), then live
+    // hits. The hits are limited to 6 to keep the palette terse.
+    let trimmed_query = raw_query.trim();
+    if trimmed_query.len() >= 2 {
+        let mut search_entries: Vec<PaletteEntry> =
+            vec![PaletteEntry::RunSearch(trimmed_query.to_string())];
+        if let Some(Ok(MessagePage { messages, .. })) = search_hits.read_unchecked().as_ref() {
+            for m in messages.iter() {
+                let sender = m
+                    .from
+                    .first()
+                    .map(|a| {
+                        a.display_name
+                            .clone()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| a.address.clone())
+                    })
+                    .unwrap_or_default();
+                search_entries.push(PaletteEntry::SearchHit {
+                    message_id: m.id.clone(),
+                    subject: m.subject.clone(),
+                    sender,
+                    query: trimmed_query.to_string(),
+                });
+            }
+        }
+        search_entries.extend(filtered.into_iter());
+        filtered = search_entries;
+    }
 
     // Clamp the active index inside the filtered range. Re-evaluating
     // on each render means a query that filters the list shorter
@@ -1325,6 +1383,21 @@ fn CommandPalette(
             PaletteEntry::RecentSearch(s) => {
                 search_query.set(s);
             }
+            PaletteEntry::RunSearch(s) => {
+                search_query.set(s);
+            }
+            PaletteEntry::SearchHit {
+                message_id, query, ..
+            } => {
+                // Pin the search-results pane to the originating
+                // query so the message lands inside its own context
+                // (with surrounding hits visible to scroll through).
+                // Setting the message id alone wouldn't be enough
+                // when the user is currently looking at a folder
+                // that doesn't contain the picked message.
+                search_query.set(query);
+                selection.with_mut(|s| s.message = Some(message_id));
+            }
         }
         let _ = sync_tick;
         visible.set(false);
@@ -1343,7 +1416,7 @@ fn CommandPalette(
                     r#type: "text",
                     autocomplete: "off",
                     spellcheck: "false",
-                    placeholder: "Jump to mailbox · run command · recent search",
+                    placeholder: "Search mail · jump to mailbox · run command",
                     value: "{query}",
                     oninput: move |evt: Event<FormData>| {
                         query.set(evt.value());
@@ -1437,6 +1510,19 @@ enum PaletteEntry {
     },
     Command(PaletteCommand),
     RecentSearch(String),
+    /// "Search mail for: <query>" — opens the SearchResults pane with
+    /// the query, same as typing into the `/` bar.
+    RunSearch(String),
+    /// A live full-text-search match, surfaced inline in the palette.
+    /// Picking it opens the message in the reader and pins the
+    /// SearchResults pane to the originating query so the surrounding
+    /// hits are still visible.
+    SearchHit {
+        message_id: MessageId,
+        subject: String,
+        sender: String,
+        query: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1454,6 +1540,8 @@ impl PaletteEntry {
             PaletteEntry::Folder { .. } => "jump",
             PaletteEntry::Command(_) => "cmd",
             PaletteEntry::RecentSearch(_) => "recent",
+            PaletteEntry::RunSearch(_) => "search",
+            PaletteEntry::SearchHit { .. } => "hit",
         }
     }
 
@@ -1462,6 +1550,14 @@ impl PaletteEntry {
             PaletteEntry::Folder { folder_label, .. } => folder_label.clone(),
             PaletteEntry::Command(cmd) => cmd.label().to_string(),
             PaletteEntry::RecentSearch(q) => q.clone(),
+            PaletteEntry::RunSearch(q) => format!("Search mail for: {q}"),
+            PaletteEntry::SearchHit { subject, .. } => {
+                if subject.is_empty() {
+                    "(no subject)".to_string()
+                } else {
+                    subject.clone()
+                }
+            }
         }
     }
 
@@ -1470,12 +1566,16 @@ impl PaletteEntry {
             PaletteEntry::Folder { account_label, .. } => Some(account_label.clone()),
             PaletteEntry::Command(_) => None,
             PaletteEntry::RecentSearch(_) => None,
+            PaletteEntry::RunSearch(_) => None,
+            PaletteEntry::SearchHit { sender, .. } => Some(sender.clone()),
         }
     }
 
     /// Text the filter substring-matches against. Includes both the
     /// primary label and the secondary so typing the account name
-    /// surfaces every folder under it.
+    /// surfaces every folder under it. RunSearch / SearchHit bypass
+    /// the substring gate (they're computed from the query) and
+    /// return the empty string to opt out of post-filtering.
     fn search_text(&self) -> String {
         match self {
             PaletteEntry::Folder {
@@ -1485,6 +1585,7 @@ impl PaletteEntry {
             } => format!("{folder_label} {account_label}"),
             PaletteEntry::Command(cmd) => cmd.label().to_string(),
             PaletteEntry::RecentSearch(q) => q.clone(),
+            PaletteEntry::RunSearch(_) | PaletteEntry::SearchHit { .. } => String::new(),
         }
     }
 }
