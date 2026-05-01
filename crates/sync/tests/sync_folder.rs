@@ -1037,3 +1037,206 @@ fn sync_folder_skips_reconcile_when_live_set_is_empty() {
         assert!(messages_repo::find(&conn, &h1.id).await.unwrap().is_some());
     });
 }
+
+// ---------- UIDVALIDITY recovery ----------
+
+/// Specialised stub for the recovery test: scripted-error on the
+/// first `list_messages` call, scripted-success on the second.
+/// Captures each call's `since` arg so the test can assert the
+/// recovery call was issued with `None` (the fresh-sync path).
+struct RecoveringStub {
+    folders: Vec<Folder>,
+    calls: Mutex<u32>,
+    /// Taken on the first `list_messages` call. `None` after the take
+    /// so the second call falls through to `on_recovery`.
+    recovery_error: Mutex<Option<MailError>>,
+    on_recovery: Mutex<Option<MessageList>>,
+    /// Returned by `list_known_ids` — the live UID set under the
+    /// post-recovery uidvalidity. Anything in local storage with a
+    /// different id should be pruned by reconciliation.
+    live_ids: Vec<MessageId>,
+    /// `Some(_)` for every call where `since` was `Some`; `None`
+    /// otherwise. Asserted by the test to verify the cursor was
+    /// cleared between calls.
+    since_seen: Mutex<Vec<bool>>,
+}
+
+#[async_trait]
+impl MailBackend for RecoveringStub {
+    async fn list_folders(&self) -> Result<Vec<Folder>, MailError> {
+        Ok(self.folders.clone())
+    }
+
+    async fn list_messages(
+        &self,
+        _folder: &FolderId,
+        since: Option<&SyncState>,
+        _limit: Option<u32>,
+    ) -> Result<MessageList, MailError> {
+        self.since_seen.lock().unwrap().push(since.is_some());
+        *self.calls.lock().unwrap() += 1;
+        if let Some(err) = self.recovery_error.lock().unwrap().take() {
+            return Err(err);
+        }
+        self.on_recovery
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| MailError::Other("RecoveringStub: no recovery response left".into()))
+    }
+
+    async fn list_known_ids(&self, _folder: &FolderId) -> Result<Vec<MessageId>, MailError> {
+        Ok(self.live_ids.clone())
+    }
+
+    async fn fetch_message(&self, _id: &MessageId) -> Result<MessageBody, MailError> {
+        unimplemented!()
+    }
+    async fn fetch_raw_message(&self, _id: &MessageId) -> Result<Vec<u8>, MailError> {
+        unimplemented!()
+    }
+    async fn fetch_attachment(
+        &self,
+        _message: &MessageId,
+        _attachment: &AttachmentRef,
+    ) -> Result<Vec<u8>, MailError> {
+        unimplemented!()
+    }
+    async fn update_flags(
+        &self,
+        _messages: &[MessageId],
+        _add: MessageFlags,
+        _remove: MessageFlags,
+    ) -> Result<(), MailError> {
+        unimplemented!()
+    }
+    async fn move_messages(
+        &self,
+        _messages: &[MessageId],
+        _target: &FolderId,
+    ) -> Result<(), MailError> {
+        unimplemented!()
+    }
+    async fn delete_messages(&self, _messages: &[MessageId]) -> Result<(), MailError> {
+        unimplemented!()
+    }
+    async fn save_draft(
+        &self,
+        _raw_rfc822: &[u8],
+        _replace: Option<&MessageId>,
+    ) -> Result<MessageId, MailError> {
+        unimplemented!()
+    }
+    async fn submit_message(&self, _raw_rfc822: &[u8]) -> Result<Option<MessageId>, MailError> {
+        unimplemented!()
+    }
+}
+
+/// When `list_messages` returns `MailError::UidValidityChanged`,
+/// `sync_folder` must:
+///   1. Clear the cached sync cursor.
+///   2. Re-call `list_messages` with `since = None` (the fresh-sync
+///      path).
+///   3. Continue normally — the reconciliation pass under the post-
+///      recovery state prunes the stale-uidvalidity rows that are
+///      still in the local cache.
+///
+/// Without recovery, the cached cursor stays poisoned and every
+/// subsequent sync cycle re-errors on the same mismatch.
+#[test]
+fn sync_folder_recovers_when_backend_reports_uidvalidity_change() {
+    rt().block_on(async {
+        let conn = TursoConn::in_memory().await.unwrap();
+        run_migrations(&conn).await.unwrap();
+        let (acct_id, folder) = seed_account(&conn).await;
+
+        // Pre-seed a stale sync cursor: what the cache would hold
+        // from the prior UIDVALIDITY's last successful sync.
+        sync_states_repo::put(
+            &conn,
+            &SyncState {
+                folder_id: folder.id.clone(),
+                backend_state: "{\"uidvalidity\":1,\"highestmodseq\":99,\"uidnext\":42}".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Pre-seed a message under the OLD uidvalidity so the
+        // reconciliation pass has something to prune in the same
+        // recovery cycle.
+        let old_id = MessageId("imap|1|10|INBOX".into());
+        let stale = header(&old_id.0, &acct_id, &folder.id, "stale");
+        messages_repo::insert(&conn, &stale, None).await.unwrap();
+
+        // Fresh response under the post-recovery uidvalidity.
+        let new_id = MessageId("imap|2|1|INBOX".into());
+        let fresh = header(&new_id.0, &acct_id, &folder.id, "fresh");
+        let backend = RecoveringStub {
+            folders: vec![folder.clone()],
+            calls: Mutex::new(0),
+            recovery_error: Mutex::new(Some(MailError::UidValidityChanged {
+                folder: folder.id.0.clone(),
+                cached: 1,
+                observed: 2,
+            })),
+            on_recovery: Mutex::new(Some(MessageList {
+                messages: vec![fresh.clone()],
+                flag_updates: vec![],
+                new_state: SyncState {
+                    folder_id: folder.id.clone(),
+                    backend_state: "{\"uidvalidity\":2,\"highestmodseq\":0,\"uidnext\":2}".into(),
+                },
+                removed: vec![],
+            })),
+            live_ids: vec![new_id.clone()],
+            since_seen: Mutex::new(Vec::new()),
+        };
+
+        let report = sync_folder(&conn, &backend, None, &folder, None)
+            .await
+            .expect("recovery succeeds");
+
+        // The recovery refetched as a fresh sync (one new insert).
+        assert_eq!(report.added, 1, "expected exactly one new header inserted");
+        // Reconciliation under the post-recovery state prunes the
+        // stale-uidvalidity row.
+        assert!(
+            report.removed >= 1,
+            "expected stale-uidvalidity row pruned; report = {report:?}"
+        );
+
+        let stale_row = messages_repo::find(&conn, &old_id).await.unwrap();
+        assert!(
+            stale_row.is_none(),
+            "stale-UIDVALIDITY row should be pruned"
+        );
+        let fresh_row = messages_repo::find(&conn, &new_id).await.unwrap();
+        assert!(
+            fresh_row.is_some(),
+            "fresh row under new UIDVALIDITY should be persisted"
+        );
+
+        // Verify the cursor was cleared between calls: first call
+        // saw the stale cursor, second call saw `None`.
+        let calls = *backend.calls.lock().unwrap();
+        assert_eq!(calls, 2, "expected exactly 2 list_messages calls");
+        let since_seen = backend.since_seen.lock().unwrap().clone();
+        assert_eq!(
+            since_seen,
+            vec![true, false],
+            "first call should pass the stale cursor; recovery call should pass None"
+        );
+
+        // The new state from the recovery call must have been
+        // persisted; otherwise the next cycle would refire the
+        // recovery path forever.
+        let after = sync_states_repo::get(&conn, &folder.id).await.unwrap();
+        let after_state = after.expect("post-recovery cursor must be set");
+        assert!(
+            after_state.backend_state.contains("\"uidvalidity\":2"),
+            "post-recovery cursor should reflect the new uidvalidity, got {:?}",
+            after_state.backend_state
+        );
+    });
+}

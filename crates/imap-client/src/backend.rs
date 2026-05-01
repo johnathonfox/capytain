@@ -442,10 +442,11 @@ impl MailBackend for ImapBackend {
                         observed = uidvalidity,
                         "UIDVALIDITY changed; caller must refetch from scratch"
                     );
-                    return Err(MailError::Protocol(format!(
-                        "UIDVALIDITY changed for {} ({} → {})",
-                        folder.0, cached.uidvalidity, uidvalidity
-                    )));
+                    return Err(MailError::UidValidityChanged {
+                        folder: folder.0.clone(),
+                        cached: cached.uidvalidity,
+                        observed: uidvalidity,
+                    });
                 }
                 // New messages have UID >= cached.uidnext.
                 format!("{}:*", cached.uidnext)
@@ -699,10 +700,11 @@ impl MailBackend for ImapBackend {
             .uid_validity
             .ok_or_else(|| MailError::Protocol("SELECT missing UIDVALIDITY".into()))?;
         if current_uv != r.uidvalidity {
-            return Err(MailError::Protocol(format!(
-                "UIDVALIDITY changed for {} ({} → {})",
-                r.folder, r.uidvalidity, current_uv
-            )));
+            return Err(MailError::UidValidityChanged {
+                folder: r.folder.clone(),
+                cached: r.uidvalidity,
+                observed: current_uv,
+            });
         }
 
         let query = "(UID RFC822)";
@@ -797,9 +799,11 @@ impl MailBackend for ImapBackend {
                 MailError::Protocol(format!("SELECT {folder}: missing UIDVALIDITY"))
             })?;
             if current_uv != uidvalidity {
-                return Err(MailError::Protocol(format!(
-                    "UIDVALIDITY changed for {folder} ({uidvalidity} → {current_uv}); refetch"
-                )));
+                return Err(MailError::UidValidityChanged {
+                    folder: folder.clone(),
+                    cached: uidvalidity,
+                    observed: current_uv,
+                });
             }
             // Chunk the UID set so a bulk action on thousands of
             // messages doesn't blow IMAP server command-line limits
@@ -867,9 +871,11 @@ impl MailBackend for ImapBackend {
                 MailError::Protocol(format!("SELECT {folder}: missing UIDVALIDITY"))
             })?;
             if current_uv != uidvalidity {
-                return Err(MailError::Protocol(format!(
-                    "UIDVALIDITY changed for {folder} ({uidvalidity} → {current_uv}); refetch"
-                )));
+                return Err(MailError::UidValidityChanged {
+                    folder: folder.clone(),
+                    cached: uidvalidity,
+                    observed: current_uv,
+                });
             }
             // Chunk the UID set so a bulk move on thousands of
             // messages doesn't blow IMAP server command-line limits
@@ -952,9 +958,11 @@ impl MailBackend for ImapBackend {
                 MailError::Protocol(format!("SELECT {folder}: missing UIDVALIDITY"))
             })?;
             if current_uv != uidvalidity {
-                return Err(MailError::Protocol(format!(
-                    "UIDVALIDITY changed for {folder} ({uidvalidity} → {current_uv}); refetch"
-                )));
+                return Err(MailError::UidValidityChanged {
+                    folder: folder.clone(),
+                    cached: uidvalidity,
+                    observed: current_uv,
+                });
             }
             // Chunk the UID set so a bulk delete on thousands of
             // messages doesn't blow IMAP server command-line limits
