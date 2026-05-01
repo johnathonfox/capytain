@@ -3184,16 +3184,22 @@ fn SidebarV2(
         async move { invoke::<Vec<Account>>("accounts_list", ()).await }
     });
 
-    // The sidebar's compose button is gone in the new design — compose
-    // is keyboard-driven via `c` (KeyboardCommand::Compose, dispatched
-    // by `dispatch_keyboard_command`) per `docs/ui-direction.md` § Sidebar.
-    // The `compose` signal is still threaded through for the empty-state
-    // CTA (see SidebarAccountBlock's "Add account" button).
-    let _ = compose;
-
     rsx! {
         aside {
             class: "sidebar",
+            button {
+                class: "sidebar-compose-btn",
+                r#type: "button",
+                title: "Compose (c)",
+                onclick: move |_| {
+                    compose.set(Some(ComposeState {
+                        default_account: None,
+                        draft_id: None,
+                    }));
+                },
+                span { class: "sidebar-compose-plus", "+" }
+                "Compose"
+            }
             div {
                 class: "sidebar-scroll",
                 match &*accounts.read_unchecked() {
