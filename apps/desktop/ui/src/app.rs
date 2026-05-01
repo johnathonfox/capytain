@@ -3332,16 +3332,28 @@ fn SidebarAccountBlock(
     selection: Signal<Selection>,
     sync_tick: SyncTick,
 ) -> Element {
-    let id = account.id.clone();
-    let tick_value = sync_tick();
-    let folders = use_resource(use_reactive!(|id, tick_value| async move {
-        let _ = tick_value;
-        invoke::<Vec<Folder>>(
-            "folders_list",
-            serde_json::json!({ "input": { "account": id } }),
-        )
-        .await
-    }));
+    // Inline-read on `sync_tick` inside the closure (same canonical
+    // Dioxus 0.7 pattern as SidebarV2's accounts fetch). Was on the
+    // `use_reactive!` macro form, which has a documented wrinkle of
+    // missing the first signal change after mount on at least one
+    // component — observed as "added a fresh Gmail account, the
+    // sidebar shows the account header but never populates folders
+    // until I reload the UI." First sync_event from the bootstrap
+    // bumps sync_tick, the inline read picks it up, this resource
+    // refetches and the sidebar fills in.
+    let id_for_fetch = account.id.clone();
+    let mut tick_for_refetch = sync_tick;
+    let folders = use_resource(move || {
+        let id = id_for_fetch.clone();
+        let _ = tick_for_refetch();
+        async move {
+            invoke::<Vec<Folder>>(
+                "folders_list",
+                serde_json::json!({ "input": { "account": id } }),
+            )
+            .await
+        }
+    });
 
     // Auto-select INBOX on first folder-list load, but only if the
     // user hasn't already picked something. Runs once per account
