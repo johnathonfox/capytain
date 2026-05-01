@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 2a142dce97022d08d667f820577c1fbda6649f6a7cff28bc8f4174d4aef48347 # shrinks to account = Account { id: AccountId("a"), kind: ImapSmtp, display_name: "", email_address: "0@0", created_at: 2000-01-01T00:00:00Z }
 cc b93f497f287f4c919576116e8486002ad62382f90895820153f49e8c608abb0a # shrinks to attachment = Attachment { id: AttachmentRef("a"), filename: "", mime_type: "a/a", size: 0, inline: false, content_id: None }
+cc 866d842d803454a7bfdc0ee224b0d57bc84a307f7bc54cea513d167e3215fcda # shrinks to acct = Account { id: AccountId("_+X_f0iy_T+Q4.j"), kind: ImapSmtp, display_name: "vé1c2☃中8r KH☃", email_address: "96d0z-_.bfaa-.v@-", created_at: 2012-08-23T18:51:04Z, signature: None, notify_enabled: false }

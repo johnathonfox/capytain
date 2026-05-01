@@ -57,7 +57,15 @@ impl TursoConn {
             .await
             .map_err(err_db)?;
         let conn = db.connect().map_err(err_db)?;
-        Ok(Self::new(conn))
+        let this = Self::new(conn);
+        // Mirror `open` — keep test fixtures honest about FK
+        // enforcement so cascade-dependent behavior fails in tests if
+        // a future change forgets the pragma. WAL / synchronous /
+        // busy_timeout are no-ops on `:memory:` so they're skipped.
+        let _ = this
+            .query("PRAGMA foreign_keys=ON", crate::conn::Params::empty())
+            .await;
+        Ok(this)
     }
 
     /// Open (or create) a database file at `path`. Enables WAL mode
@@ -109,6 +117,16 @@ impl TursoConn {
             .await;
         let _ = this
             .query("PRAGMA busy_timeout=5000", crate::conn::Params::empty())
+            .await;
+        // Enable FK enforcement so the schema's `ON DELETE CASCADE`
+        // clauses actually fire. SQLite ships with foreign-key
+        // enforcement OFF by default — until this lands, every
+        // `accounts.delete` left orphaned rows in folders / messages /
+        // threads / outbox / contacts / drafts. The pragma is
+        // per-connection, so both `db` and `sync_db` need to go
+        // through `open`.
+        let _ = this
+            .query("PRAGMA foreign_keys=ON", crate::conn::Params::empty())
             .await;
         Ok(this)
     }

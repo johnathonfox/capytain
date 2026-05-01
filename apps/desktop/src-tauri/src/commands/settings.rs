@@ -120,6 +120,18 @@ pub async fn oauth_add_open<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> IpcR
 /// `core:window:allow-close` in `capabilities/default.json` already
 /// covers the equivalent JS path; this command makes the Rust side
 /// the single source of truth.
+///
+/// Also re-emits `accounts_changed` as a defensive second emit. The
+/// authoritative emit happens inside `accounts_add_oauth` right after
+/// the row + token are persisted, but the main window has been seen
+/// to miss it on a fresh-launch path (sidebar stuck on the empty
+/// state until the user manually reloaded). Re-emitting here, after
+/// the OAuth-add window has finished its work and the host is back
+/// in a quiet state, gives the main window a second chance — at
+/// worst the event arrives twice and the sidebar refetches twice,
+/// which is cheap. Cancel paths also hit this emit; there's no
+/// account row change in that case but a redundant refetch is
+/// harmless.
 #[tauri::command]
 pub async fn oauth_add_close<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> IpcResult<()> {
     use tauri::Manager;
@@ -127,6 +139,9 @@ pub async fn oauth_add_close<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Ipc
         if let Err(e) = window.close() {
             tracing::warn!(error = %e, "oauth_add_close: WebviewWindow::close failed");
         }
+    }
+    if let Err(e) = app.emit(crate::commands::accounts::ACCOUNTS_EVENT, ()) {
+        tracing::warn!("oauth_add_close: re-emit accounts_changed failed: {e}");
     }
     Ok(())
 }

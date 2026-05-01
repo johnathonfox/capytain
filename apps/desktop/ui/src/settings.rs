@@ -733,7 +733,11 @@ fn AppearanceTab(tick: SettingsTick) -> Element {
                 setting_key: KEY_DENSITY,
                 label: "Density",
                 default_value: "comfortable",
-                options: vec![("comfortable", "Comfortable"), ("compact", "Compact")],
+                options: vec![
+                    ("compact", "Compact"),
+                    ("comfortable", "Comfortable"),
+                    ("large", "Large"),
+                ],
                 tick,
             }
         }
