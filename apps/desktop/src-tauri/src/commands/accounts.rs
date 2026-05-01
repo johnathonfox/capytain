@@ -206,11 +206,26 @@ pub async fn accounts_add_oauth(
     // the UI's existing listener consumes to bump `sync_tick` and
     // refetch the sidebar's account list. Failure is non-fatal: the
     // account row is already persisted, the user can hit refresh.
+    //
+    // Also re-emits `accounts_changed` once the spawned sync returns
+    // so the UI gets one final "everything is ready" refetch trigger.
+    // Without this, the rapid burst of per-folder `sync_event`s gets
+    // coalesced by Dioxus into a single refetch that occasionally
+    // lands while the last sync_folder is still committing — symptom
+    // is "only some of my folders showed up after add until I
+    // reloaded." The `accounts_changed` arrives strictly AFTER the
+    // full sync_account commit, breaking the race.
     let blobs = BlobStore::new(state.data_dir.join("blobs"));
     let app_for_sync = app.clone();
     let account_id_for_sync = account_id.clone();
     tauri::async_runtime::spawn(async move {
         sync_engine::sync_one_account(&app_for_sync, &blobs, &account_id_for_sync).await;
+        if let Err(e) = app_for_sync.emit(ACCOUNTS_EVENT, ()) {
+            tracing::warn!(
+                account = %account_id_for_sync.0,
+                "post-bootstrap re-emit accounts_changed failed: {e}"
+            );
+        }
     });
 
     if let Err(e) = app.emit(ACCOUNTS_EVENT, ()) {
