@@ -573,9 +573,53 @@ fn full_app_shell() -> Element {
     // sync's first FolderSynced event to arrive — that latency was
     // the gap users were noticing as "I removed the account but
     // it's still in the sidebar."
+    //
+    // After the bump, we also validate global selection state against
+    // the fresh accounts list and clear anything that referenced the
+    // removed account. Without this step, removing the currently-
+    // selected account leaves the message list and reader pane
+    // painting rows from the deleted account until the user
+    // navigates elsewhere or reloads — the storage-side CASCADE
+    // wiped the rows, but the UI's cached `Selection` still pointed
+    // at a now-empty folder. Validates instead of clearing
+    // unconditionally so adding a new account doesn't disrupt the
+    // user's current view of an existing one.
+    let mut selection_for_listener = selection;
+    let mut bulk_for_listener = bulk_selected;
+    let mut visible_for_listener = visible_messages;
+    let mut compose_for_listener = compose;
+    let mut folder_tokens_for_listener = folder_tokens;
     use_hook(move || {
         let cb = Closure::<dyn FnMut(JsValue)>::new(move |_payload: JsValue| {
             sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+            wasm_bindgen_futures::spawn_local(async move {
+                let Ok(accounts) = invoke::<Vec<Account>>("accounts_list", ()).await else {
+                    return;
+                };
+                let alive: HashSet<AccountId> =
+                    accounts.iter().map(|a| a.id.clone()).collect();
+                let selection_stale = selection_for_listener
+                    .peek()
+                    .account
+                    .as_ref()
+                    .map(|a| !alive.contains(a))
+                    .unwrap_or(false);
+                if selection_stale {
+                    selection_for_listener.set(Selection::default());
+                    visible_for_listener.set(Vec::new());
+                    bulk_for_listener.set(HashSet::new());
+                    folder_tokens_for_listener.set(HashMap::new());
+                }
+                let compose_stale = compose_for_listener
+                    .peek()
+                    .as_ref()
+                    .and_then(|c| c.default_account.as_ref())
+                    .map(|a| !alive.contains(a))
+                    .unwrap_or(false);
+                if compose_stale {
+                    compose_for_listener.set(None);
+                }
+            });
         });
         wasm_bindgen_futures::spawn_local(async move {
             let func = cb.as_ref().unchecked_ref::<js_sys::Function>();
@@ -3184,6 +3228,34 @@ fn SidebarV2(
         async move { invoke::<Vec<Account>>("accounts_list", ()).await }
     });
 
+    // First-launch auto-open: if the very first accounts_list result is
+    // empty, jump straight to the add-account window instead of leaving
+    // the user staring at the empty-state blurb. Gated on a one-shot
+    // flag so a mid-session "remove the last account" doesn't re-pop
+    // the window — the empty-state's "Add an account" button covers
+    // that path. The flag is signal-local to this SidebarV2 mount,
+    // which matches the process lifetime, so a fresh app launch
+    // re-enables the auto-open.
+    let mut oauth_auto_opened: Signal<bool> = use_signal(|| false);
+    use_effect(move || {
+        if *oauth_auto_opened.read() {
+            return;
+        }
+        let read = accounts.read_unchecked();
+        let Some(Ok(list)) = read.as_ref() else {
+            return;
+        };
+        if !list.is_empty() {
+            return;
+        }
+        oauth_auto_opened.set(true);
+        spawn(async {
+            if let Err(e) = invoke::<()>("oauth_add_open", serde_json::json!({})).await {
+                web_sys_log(&format!("oauth_add_open (auto): {e}"));
+            }
+        });
+    });
+
     rsx! {
         aside {
             class: "sidebar",
@@ -3299,11 +3371,21 @@ fn SidebarAccountBlock(
         });
     }
 
+    // Hide the email line when the display name is just the same email
+    // (the default for a fresh OAuth add) or empty — otherwise the
+    // header paints the address twice. A user-customised display name
+    // ("Work", "Personal", ...) keeps both lines so the email stays
+    // visible somewhere in the sidebar.
+    let show_email_line = !account.display_name.is_empty()
+        && account.display_name.trim() != account.email_address.trim();
+
     rsx! {
         div {
             class: "sidebar-account-header",
             span { class: "sidebar-account-label", "{account.display_name}" }
-            span { class: "sidebar-account-email", "{account.email_address}" }
+            if show_email_line {
+                span { class: "sidebar-account-email", "{account.email_address}" }
+            }
         }
         match &*folders.read_unchecked() {
             None => rsx! {},
