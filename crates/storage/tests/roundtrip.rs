@@ -143,9 +143,17 @@ fn headers_strategy(
     // Proptest's Strategy impl for tuples tops out well below the
     // 17-field shape of MessageHeaders, so we shard into three 5-ish-tuples
     // and recombine.
+    //
+    // `thread_id` is always `None` here. With FK enforcement on it
+    // would otherwise fail `messages.thread_id REFERENCES threads(id)`
+    // unless we also generated + inserted the parent thread, which is
+    // more machinery than this header-roundtrip test is meant to
+    // exercise. Thread linking is covered by
+    // `update_preserves_thread_id_against_wire_none` (which inserts
+    // the thread row explicitly).
     let ids = (
         id_string(),
-        prop::option::of(id_string().prop_map(ThreadId)),
+        Just(None::<ThreadId>),
         prop::option::of(small_text()),
         small_text(),
     );
@@ -703,6 +711,19 @@ fn update_preserves_thread_id_against_wire_none() {
         // the live path does after `attach_to_thread` runs in-line
         // post-insert via the threads_repo helper).
         let assigned = ThreadId("t-deadbeef".into());
+        repos::threads::insert(
+            &conn,
+            &repos::threads::Thread {
+                id: assigned.clone(),
+                account_id: acct.id.clone(),
+                root_message_id: None,
+                subject_normalized: "subj".into(),
+                last_date: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+                message_count: 0,
+            },
+        )
+        .await
+        .expect("thread");
         let mut headers = MessageHeaders {
             id: MessageId("m-1".into()),
             account_id: acct.id.clone(),
@@ -1095,6 +1116,79 @@ fn contacts_upsert_and_query_prefix() {
         // Unknown prefix returns empty.
         let hits = contacts::query_prefix(&conn, "zzz", 10).await.expect("zzz");
         assert!(hits.is_empty());
+    });
+}
+
+/// `accounts::delete` cascades through every child table. SQLite ships
+/// with `PRAGMA foreign_keys=OFF` by default, so until `TursoConn::open`
+/// flipped it on every `ON DELETE CASCADE` clause was a no-op and
+/// removed accounts left orphaned folders / messages / threads /
+/// outbox / contacts / drafts / history_sync_state behind. This test
+/// stands guard against a regression of that bug.
+#[test]
+fn account_delete_cascades_to_children() {
+    use qsl_storage::repos::history_sync::{self, HistorySyncStatus};
+    let rt = rt();
+    rt.block_on(async move {
+        let conn = fresh_conn().await;
+        let acct = Account {
+            id: AccountId("gmail:cascade@example.com".into()),
+            kind: BackendKind::ImapSmtp,
+            display_name: "Cascade Test".into(),
+            email_address: "cascade@example.com".into(),
+            created_at: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+            signature: None,
+            notify_enabled: true,
+        };
+        repos::accounts::insert(&conn, &acct).await.expect("acct");
+        let folder = Folder {
+            id: FolderId("INBOX-cascade".into()),
+            account_id: acct.id.clone(),
+            name: "Inbox".into(),
+            path: "INBOX".into(),
+            role: Some(FolderRole::Inbox),
+            unread_count: 0,
+            total_count: 0,
+            parent: None,
+        };
+        repos::folders::insert(&conn, &folder)
+            .await
+            .expect("folder");
+        history_sync::start(&conn, &acct.id, &folder.id, 1234, Some(2000))
+            .await
+            .expect("history start");
+
+        // Sanity-check the rows landed before we delete.
+        assert!(repos::folders::get(&conn, &folder.id).await.ok().is_some());
+        assert!(history_sync::get(&conn, &acct.id, &folder.id)
+            .await
+            .expect("history get")
+            .is_some());
+
+        repos::accounts::delete(&conn, &acct.id)
+            .await
+            .expect("delete acct");
+
+        // The cascade fires only when foreign_keys=ON (set in
+        // TursoConn::open). Before that flip these assertions failed.
+        assert!(
+            repos::folders::find(&conn, &folder.id)
+                .await
+                .expect("folder find")
+                .is_none(),
+            "folder row should have cascaded with the account",
+        );
+        assert!(
+            history_sync::get(&conn, &acct.id, &folder.id)
+                .await
+                .expect("history get post-delete")
+                .is_none(),
+            "history_sync_state row should have cascaded with the account",
+        );
+
+        // Status the cascade left in HistorySyncStatus reachable only
+        // via the parse helper — referencing it keeps the import live.
+        let _ = HistorySyncStatus::parse("running");
     });
 }
 

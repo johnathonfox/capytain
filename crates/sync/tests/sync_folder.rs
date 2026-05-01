@@ -186,6 +186,14 @@ async fn seed_account(conn: &TursoConn) -> (AccountId, Folder) {
         total_count: 0,
         parent: None,
     };
+    // Insert the folder up-front so tests that seed messages directly
+    // (bypassing `sync_folder`'s own folder upsert) don't trip the
+    // `messages.folder_id REFERENCES folders(id)` constraint now that
+    // FK enforcement is on. `sync_folder` itself will upsert the same
+    // row, which is a safe no-op.
+    qsl_storage::repos::folders::insert(conn, &folder)
+        .await
+        .unwrap();
     (acct.id, folder)
 }
 

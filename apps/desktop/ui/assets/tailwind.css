@@ -148,6 +148,27 @@
   --row-topbar:     26px;
 }
 
+/* ---------- Large density ---------- */
+/*
+ * Toggled via `data-density="large"` on the root. Mirror of compact
+ * in the opposite direction: relaxes row heights AND bumps the type
+ * scale by ~2 px so users on hi-DPI panels (or anyone who wants
+ * bigger reading surface area) get a real difference, not just a
+ * couple of pixels of vertical padding. Numbers tested against the
+ * three-pane shell at 1080p — the message-list rows still hit ~25
+ * visible per pane.
+ */
+:root[data-density="large"] {
+  --fs-13:          15px;
+  --fs-12:          14px;
+  --fs-11:          13px;
+  --fs-10:          12px;
+  --row-msg:        32px;
+  --row-sidebar:    30px;
+  --row-status:     26px;
+  --row-topbar:     36px;
+}
+
 /* ---------- Reset ---------- */
 
 *,

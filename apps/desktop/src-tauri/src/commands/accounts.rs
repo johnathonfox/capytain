@@ -9,6 +9,8 @@
 //! Settings → Accounts tab. `accounts_add_oauth` is still stubbed
 //! pending the first-run OAuth flow (PR-O1).
 
+use std::sync::atomic::Ordering;
+
 use chrono::Utc;
 use qsl_auth::{run_loopback_flow, AuthError, ProviderKind, TokenVault};
 use qsl_core::{AccountId, BackendKind};
@@ -239,22 +241,72 @@ pub struct AccountsRemoveInput {
     pub id: AccountId,
 }
 
-/// `accounts_remove` — delete an account row. Schema-level cascades
-/// take care of folders / messages / threads / outbox / contacts;
-/// the in-memory `state.backends` cache is also purged so a
-/// re-added-immediately account doesn't hit the stale handle. Fires
-/// `ACCOUNTS_EVENT` so the main window's sidebar + topbar refetch
-/// immediately rather than waiting for the user to manually refresh.
+/// `accounts_remove` — delete an account row.
+///
+/// Order matters here. Three classes of state hang off an account:
+///
+///   1. **In-flight history-sync drivers.** Their cancel flags live in
+///      `state.history_cancellers`; the driver task notices the flip
+///      between chunks and bails. We trip every flag for this
+///      account *before* touching the database so that any chunk in
+///      flight when the FK CASCADE drops the messages doesn't waste
+///      an extra round-trip.
+///   2. **Per-(account, folder) and per-account in-memory maps.**
+///      `history_cancellers` and `history_account_locks` are keyed by
+///      `AccountId`; we drain them so a re-add of the same email
+///      doesn't inherit a stale token.
+///   3. **Cached `MailBackend` handle.** Cleared so a re-add doesn't
+///      hit the stale handle still pointing at the removed account's
+///      access token.
+///
+/// Then the database row goes. With `PRAGMA foreign_keys=ON` (set in
+/// `TursoConn::open`) the schema's `ON DELETE CASCADE` clauses fire,
+/// dropping every folder / thread / message / attachment / outbox /
+/// contact / draft / remote_content_opt_in / history_sync_state row
+/// belonging to this account. Before the pragma flip those clauses
+/// were dead code; migration 0011 cleans up any pre-existing orphans
+/// from that era so a re-add doesn't collide on UNIQUE indexes
+/// (`folders_account_path`, `contacts_account_address`).
+///
+/// Fires `ACCOUNTS_EVENT` so the main window's sidebar + topbar
+/// refetch immediately rather than waiting for the user to manually
+/// refresh.
 #[tauri::command]
 pub async fn accounts_remove(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     input: AccountsRemoveInput,
 ) -> IpcResult<()> {
+    {
+        let mut cancellers = state.history_cancellers.lock().await;
+        let to_drop: Vec<_> = cancellers
+            .keys()
+            .filter(|(account, _)| account == &input.id)
+            .cloned()
+            .collect();
+        for key in &to_drop {
+            if let Some(flag) = cancellers.get(key) {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
+        for key in &to_drop {
+            cancellers.remove(key);
+        }
+        if !to_drop.is_empty() {
+            tracing::info!(
+                account = %input.id.0,
+                cancelled = to_drop.len(),
+                "accounts_remove: signalled history-sync drivers to bail"
+            );
+        }
+    }
+    state.history_account_locks.lock().await.remove(&input.id);
+    state.backends.lock().await.remove(&input.id);
+
     let db = state.db.lock().await;
     accounts_repo::delete(&*db, &input.id).await?;
     drop(db);
-    state.backends.lock().await.remove(&input.id);
+
     if let Err(e) = app.emit(ACCOUNTS_EVENT, ()) {
         tracing::warn!("accounts_remove: emit accounts_changed failed: {e}");
     }

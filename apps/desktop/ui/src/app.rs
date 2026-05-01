@@ -105,12 +105,17 @@ pub(crate) const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
     }
 
     // Set the `data-density` attribute on `<html>` so the
-    // `:root[data-density="compact"]` block in tailwind.css tightens
-    // the row tokens. Default is "comfortable".
+    // `:root[data-density="..."]` blocks in tailwind.css apply.
+    // "compact" tightens row tokens; "large" relaxes them and bumps
+    // type sizes; anything else falls back to the unset default
+    // ("comfortable") so a corrupt setting doesn't lock the user
+    // into one extreme.
     export function setRootDensity(density) {
         const root = document.documentElement;
         if (!root) return;
-        const d = density === "compact" ? "compact" : "comfortable";
+        const d = (density === "compact" || density === "large")
+            ? density
+            : "comfortable";
         root.setAttribute("data-density", d);
     }
 
@@ -3159,16 +3164,25 @@ fn SidebarV2(
     sync_tick: SyncTick,
     compose: Signal<Option<ComposeState>>,
 ) -> Element {
-    // Refetch on every sync_event tick so a brand-new account from
-    // `accounts_add_oauth` appears in the sidebar without requiring
-    // the user to restart. The bootstrap-sync started inside
-    // `accounts_add_oauth` emits per-folder sync_events; the first
-    // bumps `sync_tick` here.
-    let tick_value = sync_tick();
-    let accounts = use_resource(use_reactive!(|tick_value| async move {
-        let _ = tick_value;
-        invoke::<Vec<Account>>("accounts_list", ()).await
-    }));
+    // Refetch on every sync_event / accounts_changed tick so a
+    // brand-new account from `accounts_add_oauth` appears in the
+    // sidebar without requiring the user to restart. Two trigger
+    // paths feed `sync_tick`: `accounts_changed` (host emits once
+    // immediately, plus a defensive second emit from
+    // `oauth_add_close`) and per-folder `sync_event` once bootstrap
+    // sync gets going.
+    //
+    // Reading the signal *inside* the closure passed to
+    // `use_resource` is the canonical Dioxus 0.7 way to register a
+    // dependency — `use_reactive!` was doing this in spirit but had
+    // a known wrinkle where the dep wasn't always picked up on the
+    // first signal change after mount. Using the inline read keeps
+    // the reactivity wiring as obvious as possible.
+    let mut sync_tick_for_refetch = sync_tick;
+    let accounts = use_resource(move || {
+        let _ = sync_tick_for_refetch();
+        async move { invoke::<Vec<Account>>("accounts_list", ()).await }
+    });
 
     // The sidebar's compose button is gone in the new design — compose
     // is keyboard-driven via `c` (KeyboardCommand::Compose, dispatched

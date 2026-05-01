@@ -42,7 +42,7 @@ use qsl_core::{
 };
 use qsl_imap_client::ImapBackend;
 use qsl_jmap_client::JmapBackend;
-use qsl_storage::{repos, run_migrations, TursoConn};
+use qsl_storage::{repos, run_migrations, DbConn, Params, TursoConn, Value};
 
 /// QSL headless protocol CLI.
 #[derive(Debug, Parser)]
@@ -91,6 +91,73 @@ enum Command {
 
     /// Sync an account. Phase 0 stub.
     Sync { email: String },
+
+    /// Wipe local state. Removes the Turso database file
+    /// (`qsl.db`, `-wal`, `-shm`), the cached message-body blob
+    /// store, and every keychain refresh-token for accounts known
+    /// to the database. Useful when a schema migration wedges, when
+    /// a stale orphaned-row state needs clearing, or to hand off the
+    /// box without leaking local mail.
+    ///
+    /// Requires `--yes` to proceed without an interactive prompt.
+    Reset {
+        /// Skip the interactive confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Inspect local-state integrity and (optionally) repair it.
+    ///
+    /// Audits the database for orphaned rows, stuck history-sync
+    /// jobs, dead-lettered outbox entries, empty thread shells, and
+    /// SQLite engine-level corruption. Read-only by default; pass
+    /// `--fix` to apply the documented repair for each finding.
+    ///
+    /// Run with the desktop app closed — repairs that touch
+    /// history-sync state assume no driver is currently holding the
+    /// row.
+    Doctor {
+        /// Apply repairs (delete FK-orphan rows, reset stuck/errored
+        /// history-sync rows to `pending`, drop empty thread shells,
+        /// prune accounts whose keychain entry is gone). Without this
+        /// flag the command is read-only.
+        #[arg(long)]
+        fix: bool,
+
+        /// Wipe the entire history-sync state table — every "Pull
+        /// full mail history" job, regardless of status, is dropped.
+        /// Use after a Turso schema wedge or to start the
+        /// per-folder backfill from scratch. Independent of `--fix`.
+        /// Confirmation prompt unless `--yes`.
+        #[arg(long)]
+        reset_history_sync: bool,
+
+        /// Drop and recreate the Tantivy-backed FTS index on
+        /// `messages`. Fixes "wrong # of entries in index
+        /// __turso_internal_fts_dir_messages_fts_idx_key" reports
+        /// from the schema-integrity check, which slow per-message
+        /// inserts to a crawl during history sync. The index is
+        /// rebuilt from existing message rows in one bulk operation —
+        /// no message data is touched. Independent of `--fix`.
+        #[arg(long)]
+        rebuild_fts: bool,
+
+        /// `VACUUM` the database — rebuild the file to reclaim
+        /// leaked / never-used pages reported by the schema-integrity
+        /// check ("Page N: never used"). No data loss; just compacts
+        /// the file. Slow on a populated DB. Run AFTER
+        /// `--rebuild-fts` if both are needed: rebuilding the FTS
+        /// index drops pages that VACUUM then reclaims. Independent
+        /// of `--fix`.
+        #[arg(long)]
+        vacuum: bool,
+
+        /// Skip interactive confirmation for destructive repair
+        /// steps (account pruning, history-sync wipe, FTS rebuild,
+        /// vacuum).
+        #[arg(long)]
+        yes: bool,
+    },
 
     /// Build an RFC 5322 message and submit it via the account's send
     /// path (Gmail SMTP+XOAUTH2 for IMAP accounts, JMAP
@@ -193,6 +260,14 @@ async fn run(cli: Cli) -> Result<(), MailcliError> {
         } => list_messages(&email, &folder, limit, &paths).await,
         Command::ShowMessage { id } => show_message(&id, &paths).await,
         Command::Sync { email } => sync_account(&email, &paths).await,
+        Command::Reset { yes } => reset_local_state(yes, &paths).await,
+        Command::Doctor {
+            fix,
+            reset_history_sync,
+            rebuild_fts,
+            vacuum,
+            yes,
+        } => doctor(fix, reset_history_sync, rebuild_fts, vacuum, yes, &paths).await,
         Command::Send {
             from,
             to,
@@ -316,6 +391,599 @@ async fn auth_remove(email: &str, paths: &DataPaths) -> Result<(), MailcliError>
         vault.delete(&a.id).await?;
         repos::accounts::delete(&conn, &a.id).await?;
         println!("removed {}", a.id.0);
+    }
+    Ok(())
+}
+
+// ---------- reset ----------
+
+/// Wipe local state. Best-effort: each step logs and continues if the
+/// next is still possible, so a partial environment (no DB yet, no
+/// keychain entries, missing blobs dir) doesn't error out the whole
+/// command. Order matters — we list accounts and clear keychain
+/// entries *before* deleting the database so we don't lose the
+/// account-id list we need to drive `vault.delete`.
+async fn reset_local_state(yes: bool, paths: &DataPaths) -> Result<(), MailcliError> {
+    let db_path = paths.db_path();
+    let blobs_path = paths.data_dir.join("blobs");
+
+    // Enumerate keychain entries from the DB before we delete it. If
+    // the DB doesn't exist or fails to open, just skip — the user is
+    // wiping anyway.
+    let account_ids: Vec<AccountId> = match TursoConn::open(&db_path).await {
+        Ok(conn) => {
+            // Migrations needed before the accounts table is queryable
+            // on a fresh-but-half-baked file. Failure here is
+            // non-fatal: we'll just skip keychain cleanup.
+            if let Err(e) = run_migrations(&conn).await {
+                eprintln!("mailcli reset: skipping keychain cleanup, migrations failed: {e}");
+                Vec::new()
+            } else {
+                match repos::accounts::list(&conn).await {
+                    Ok(accounts) => accounts.into_iter().map(|a| a.id).collect(),
+                    Err(e) => {
+                        eprintln!("mailcli reset: skipping keychain cleanup, list failed: {e}");
+                        Vec::new()
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("mailcli reset: skipping keychain cleanup, db open failed: {e}");
+            Vec::new()
+        }
+    };
+
+    println!("Will delete:");
+    println!("  database:      {}", db_path.display());
+    println!("  blob store:    {}", blobs_path.display());
+    if account_ids.is_empty() {
+        println!("  keychain:      (no accounts found)");
+    } else {
+        println!(
+            "  keychain:      {} refresh-token entr{}",
+            account_ids.len(),
+            if account_ids.len() == 1 { "y" } else { "ies" }
+        );
+    }
+    println!();
+
+    if !yes {
+        eprint!("Continue? [y/N] ");
+        use std::io::Write;
+        std::io::stderr().flush().ok();
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| MailcliError::Usage(format!("read confirmation: {e}")))?;
+        let trimmed = input.trim().to_lowercase();
+        if trimmed != "y" && trimmed != "yes" {
+            println!("aborted.");
+            return Ok(());
+        }
+    }
+
+    let vault = TokenVault::new();
+    let mut keychain_removed = 0usize;
+    for id in &account_ids {
+        match vault.delete(id).await {
+            Ok(()) => keychain_removed += 1,
+            Err(e) => eprintln!("  keychain delete {} failed (non-fatal): {e}", id.0),
+        }
+    }
+
+    // Remove the SQLite triplet — `qsl.db` plus the WAL sidecars that
+    // Turso may have created. Each is independently optional; missing
+    // is fine.
+    let mut files_removed = 0usize;
+    for suffix in ["", "-wal", "-shm"] {
+        let p = db_path.with_extension(format!("db{suffix}"));
+        if p.exists() {
+            match std::fs::remove_file(&p) {
+                Ok(()) => files_removed += 1,
+                Err(e) => eprintln!("  remove {} failed: {e}", p.display()),
+            }
+        }
+    }
+
+    let mut blobs_removed = false;
+    if blobs_path.exists() {
+        match std::fs::remove_dir_all(&blobs_path) {
+            Ok(()) => blobs_removed = true,
+            Err(e) => eprintln!("  remove {} failed: {e}", blobs_path.display()),
+        }
+    }
+
+    println!(
+        "reset complete: {keychain_removed} keychain entr{}, {files_removed} db file{}, blobs {}",
+        if keychain_removed == 1 { "y" } else { "ies" },
+        if files_removed == 1 { "" } else { "s" },
+        if blobs_removed { "removed" } else { "absent" },
+    );
+    Ok(())
+}
+
+// ---------- doctor ----------
+
+/// Section header in `doctor` output. Kept consistent so a future
+/// `--json` flag can swap the formatter without rewriting each check.
+fn print_section(title: &str) {
+    println!();
+    println!("== {title} ==");
+}
+
+/// Interactive y/N prompt used by destructive doctor repairs.
+/// Returns `Ok(true)` when the user confirms, `Ok(false)` otherwise.
+/// `yes=true` short-circuits to `true` without reading stdin so
+/// scripted invocations don't hang.
+fn confirm(prompt: &str, yes: bool) -> Result<bool, MailcliError> {
+    if yes {
+        return Ok(true);
+    }
+    use std::io::Write;
+    eprint!("{prompt} [y/N] ");
+    std::io::stderr().flush().ok();
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| MailcliError::Usage(format!("read confirmation: {e}")))?;
+    let trimmed = input.trim().to_lowercase();
+    Ok(trimmed == "y" || trimmed == "yes")
+}
+
+/// Audit + (optionally) repair the local DB. Designed for the
+/// "everything got weird, what's actually wrong" use case after a
+/// crash or upgrade — runs every cheap consistency check we know
+/// about and either reports findings (`--fix=false`) or applies the
+/// documented repair (`--fix=true`).
+///
+/// Each check is independent and best-effort: a failure in one
+/// section logs and continues so the others still run. Exit code
+/// stays 0 unless we hit an unrecoverable error opening the DB —
+/// the output is the report, not the exit status.
+async fn doctor(
+    fix: bool,
+    reset_history_sync: bool,
+    rebuild_fts: bool,
+    vacuum: bool,
+    yes: bool,
+    paths: &DataPaths,
+) -> Result<(), MailcliError> {
+    let conn = paths.open_db().await?;
+    let any_repair = fix || reset_history_sync || rebuild_fts || vacuum;
+    let mode = if any_repair { "REPAIR" } else { "READ-ONLY" };
+    println!("qsl doctor — {mode}");
+    println!("database: {}", paths.db_path().display());
+
+    // 1. SQLite engine-level integrity. Detects torn pages, bad
+    //    indexes, broken WAL frames. There is no automatic repair —
+    //    if this fails, the user's recourse is `mailcli reset` and
+    //    re-sync from the server.
+    print_section("schema integrity");
+    match conn.query("PRAGMA integrity_check", Params::empty()).await {
+        Ok(rows) => {
+            let mut all_ok = true;
+            for row in &rows {
+                let msg = row.get_str("integrity_check").unwrap_or("?");
+                if msg == "ok" {
+                    println!("  ok");
+                } else {
+                    all_ok = false;
+                    println!("  ! {msg}");
+                }
+            }
+            if !all_ok {
+                println!("  (engine-level corruption — repair via `mailcli reset`)");
+            }
+        }
+        Err(e) => println!("  ! integrity_check failed: {e}"),
+    }
+
+    // 2. Foreign-key violations. With `PRAGMA foreign_keys=ON` set
+    //    on every connection (since `TursoConn::open`) plus migration
+    //    0011's one-time orphan sweep, the schema's FK declarations
+    //    enforce themselves at write time and there should be no
+    //    surviving violations. We sample each account-scoped table
+    //    explicitly because Turso 0.5.3 doesn't recognize
+    //    `PRAGMA foreign_key_check` (returns "Not a valid pragma
+    //    name") — re-implementing the check ourselves keeps the
+    //    coverage and avoids depending on Turso shipping the pragma.
+    print_section("foreign-key violations");
+    let fk_orphan_checks: &[(&str, &str)] = &[
+        ("folders", "account_id"),
+        ("threads", "account_id"),
+        ("messages", "account_id"),
+        ("outbox", "account_id"),
+        ("contacts", "account_id"),
+        ("remote_content_opt_ins", "account_id"),
+        ("drafts", "account_id"),
+        ("history_sync_state", "account_id"),
+    ];
+    let mut total_orphans = 0u64;
+    for (table, col) in fk_orphan_checks {
+        let sql = format!(
+            "SELECT COUNT(*) AS n FROM {table} \
+             WHERE {col} NOT IN (SELECT id FROM accounts)"
+        );
+        match conn.query_one(&sql, Params::empty()).await {
+            Ok(row) => {
+                let n = row.get_i64("n").unwrap_or(0).max(0) as u64;
+                if n > 0 {
+                    total_orphans += n;
+                    println!("  ! {table}: {n} row(s) with no matching accounts.id");
+                }
+            }
+            Err(e) => println!("  ! {table}: query failed: {e}"),
+        }
+    }
+    if total_orphans == 0 {
+        println!("  none");
+    } else if fix {
+        // FK enforcement should make new orphans impossible, but a DB
+        // migrated up from the FK-OFF era may still carry rows from
+        // accounts that were removed before migration 0011's sweep
+        // ran. `--fix` deletes them — the same DELETE that 0011 used,
+        // run again at the user's request.
+        let mut total_repaired = 0u64;
+        for (table, col) in fk_orphan_checks {
+            let sql = format!(
+                "DELETE FROM {table} \
+                 WHERE {col} NOT IN (SELECT id FROM accounts)"
+            );
+            match conn.execute(&sql, Params::empty()).await {
+                Ok(n) => {
+                    if n > 0 {
+                        total_repaired += n;
+                        println!("  repaired: {table} — deleted {n} orphan row(s)");
+                    }
+                }
+                Err(e) => println!("  ! delete on {table} failed: {e}"),
+            }
+        }
+        println!("  (total deleted: {total_repaired})");
+    } else {
+        println!("  ({total_orphans} orphan(s) total; `--fix` deletes them)");
+    }
+
+    // 3. History-sync rows in `running` from a prior crash. By
+    //    construction we are running offline, so any `running` row
+    //    is stale. Repair: flip back to `pending` so the desktop
+    //    app's resume path picks it up cleanly on next launch.
+    print_section("history-sync stuck `running` rows");
+    let stuck = conn
+        .query(
+            "SELECT account_id, folder_id FROM history_sync_state WHERE status = ?1",
+            Params(vec![Value::Text("running")]),
+        )
+        .await
+        .unwrap_or_default();
+    if stuck.is_empty() {
+        println!("  none");
+    } else {
+        for row in &stuck {
+            let acct = row.get_str("account_id").unwrap_or("?");
+            let folder = row.get_str("folder_id").unwrap_or("?");
+            println!("  - {acct} / {folder}");
+        }
+        if fix {
+            let now = Utc::now().timestamp();
+            match conn
+                .execute(
+                    "UPDATE history_sync_state SET status = 'pending', updated_at = ?1 \
+                     WHERE status = 'running'",
+                    Params(vec![Value::Integer(now)]),
+                )
+                .await
+            {
+                Ok(n) => println!("  repaired: {n} row(s) flipped to `pending`"),
+                Err(e) => println!("  ! repair failed: {e}"),
+            }
+        } else {
+            println!("  ({} row(s); `--fix` flips to pending)", stuck.len());
+        }
+    }
+
+    // 4. History-sync rows in `error`. The driver bumps to this
+    //    state on a fatal pull failure and `last_error` carries the
+    //    message. On `--fix` we flip them back to `pending` so the
+    //    desktop's resume path retries on next launch — most errors
+    //    are transient (network blip mid-pull, server-side
+    //    rate-limit, expired token), and forcing the user to click
+    //    "Restart" in Settings for each one isn't useful.
+    print_section("history-sync `error` rows");
+    let errs = conn
+        .query(
+            "SELECT account_id, folder_id, last_error \
+             FROM history_sync_state WHERE status = ?1",
+            Params(vec![Value::Text("error")]),
+        )
+        .await
+        .unwrap_or_default();
+    if errs.is_empty() {
+        println!("  none");
+    } else {
+        for row in &errs {
+            let acct = row.get_str("account_id").unwrap_or("?");
+            let folder = row.get_str("folder_id").unwrap_or("?");
+            let last = row
+                .get_optional_str("last_error")
+                .unwrap_or(None)
+                .unwrap_or("(no message)");
+            println!("  ! {acct} / {folder}: {last}");
+        }
+        if fix {
+            let now = Utc::now().timestamp();
+            match conn
+                .execute(
+                    "UPDATE history_sync_state \
+                     SET status = 'pending', last_error = NULL, updated_at = ?1 \
+                     WHERE status = 'error'",
+                    Params(vec![Value::Integer(now)]),
+                )
+                .await
+            {
+                Ok(n) => println!("  repaired: {n} row(s) flipped to `pending` for retry"),
+                Err(e) => println!("  ! repair failed: {e}"),
+            }
+        } else {
+            println!(
+                "  ({} row(s); `--fix` flips to pending so they retry)",
+                errs.len()
+            );
+        }
+    }
+
+    // 5. Outbox dead-lettered rows (`next_attempt_at IS NULL`).
+    //    Drain worker stops retrying past `MAX_ATTEMPTS = 5`. No
+    //    auto-repair — the user may want to inspect `last_error`
+    //    and decide whether to re-enqueue or drop.
+    print_section("outbox dead-letter");
+    let dlq = conn
+        .query(
+            "SELECT id, account_id, op_kind, attempts, last_error \
+             FROM outbox WHERE next_attempt_at IS NULL",
+            Params::empty(),
+        )
+        .await
+        .unwrap_or_default();
+    if dlq.is_empty() {
+        println!("  none");
+    } else {
+        for row in &dlq {
+            let id = row.get_str("id").unwrap_or("?");
+            let acct = row.get_str("account_id").unwrap_or("?");
+            let kind = row.get_str("op_kind").unwrap_or("?");
+            let attempts = row.get_i64("attempts").unwrap_or(0);
+            let last = row
+                .get_optional_str("last_error")
+                .unwrap_or(None)
+                .unwrap_or("");
+            println!("  ! {id} ({acct} / {kind}, {attempts} attempts) {last}");
+        }
+        println!(
+            "  ({} row(s); inspect manually with `sqlite3 {}`)",
+            dlq.len(),
+            paths.db_path().display()
+        );
+    }
+
+    // 6. Empty thread shells. Threads with no surviving messages
+    //    are leftovers from a delete that didn't (or couldn't, pre
+    //    FK-ON) cascade. Safe to drop — no user data lives in the
+    //    thread row itself.
+    print_section("empty thread shells");
+    let empty_threads = conn
+        .query(
+            "SELECT t.id FROM threads t \
+             LEFT JOIN messages m ON m.thread_id = t.id \
+             WHERE m.id IS NULL",
+            Params::empty(),
+        )
+        .await
+        .unwrap_or_default();
+    if empty_threads.is_empty() {
+        println!("  none");
+    } else {
+        for row in empty_threads.iter().take(10) {
+            println!("  - {}", row.get_str("id").unwrap_or("?"));
+        }
+        if empty_threads.len() > 10 {
+            println!("  ... and {} more", empty_threads.len() - 10);
+        }
+        if fix {
+            match conn
+                .execute(
+                    "DELETE FROM threads WHERE id NOT IN (SELECT DISTINCT thread_id FROM messages WHERE thread_id IS NOT NULL)",
+                    Params::empty(),
+                )
+                .await
+            {
+                Ok(n) => println!("  repaired: {n} empty thread(s) deleted"),
+                Err(e) => println!("  ! repair failed: {e}"),
+            }
+        } else {
+            println!("  ({} row(s); `--fix` deletes them)", empty_threads.len());
+        }
+    }
+
+    // 7. Orphaned accounts: rows in `accounts` whose refresh-token
+    //    entry is gone from the OS keychain. The next refresh attempt
+    //    would 401 forever — the account is effectively dead. On
+    //    `--fix` we delete the row, which (with FK enforcement on)
+    //    cascades to every folder / message / thread / outbox / etc.
+    //    belonging to that account. Confirmation prompt before each
+    //    deletion unless `--yes` is passed; the user might just want
+    //    to re-run `mailcli auth add` instead.
+    print_section("orphaned accounts (no keychain entry)");
+    match repos::accounts::list(&conn).await {
+        Ok(accounts) if accounts.is_empty() => println!("  no accounts configured"),
+        Ok(accounts) => {
+            let vault = TokenVault::new();
+            let mut orphans: Vec<AccountId> = Vec::new();
+            for a in &accounts {
+                let present = vault.contains(&a.id).await.unwrap_or(false);
+                if !present {
+                    orphans.push(a.id.clone());
+                    println!("  ! {} — missing keychain entry", a.id.0);
+                }
+            }
+            if orphans.is_empty() {
+                println!("  all {} account(s) have keychain entries", accounts.len());
+            } else if fix {
+                let mut pruned = 0usize;
+                for id in &orphans {
+                    let prompt = format!("  delete account {} and all its local data?", id.0);
+                    match confirm(&prompt, yes) {
+                        Ok(true) => match repos::accounts::delete(&conn, id).await {
+                            Ok(()) => {
+                                pruned += 1;
+                                println!("    deleted {} (cascade dropped local data)", id.0);
+                            }
+                            Err(e) => println!("    ! delete {} failed: {e}", id.0),
+                        },
+                        Ok(false) => println!("    skipped {}", id.0),
+                        Err(e) => {
+                            println!("    ! prompt failed: {e}");
+                            break;
+                        }
+                    }
+                }
+                println!("  ({pruned} account(s) pruned; rerun `mailcli auth add` to re-attach)");
+            } else {
+                println!(
+                    "  ({} account(s); `--fix` prunes them — local data cascades. \
+                     Or `mailcli auth add <provider> <email>` to re-attach.)",
+                    orphans.len()
+                );
+            }
+        }
+        Err(e) => println!("  ! list accounts failed: {e}"),
+    }
+
+    // 8. Optional full wipe of history-sync state. Independent of
+    //    `--fix` because the intent is different ("start over",
+    //    not "repair errors"). Drops every row regardless of
+    //    status — completed pulls included — so the user gets a
+    //    fresh slate next time they kick off a "Pull full mail
+    //    history" from Settings.
+    if reset_history_sync {
+        print_section("history-sync table — full reset");
+        let count = match conn
+            .query_one(
+                "SELECT COUNT(*) AS n FROM history_sync_state",
+                Params::empty(),
+            )
+            .await
+        {
+            Ok(row) => row.get_i64("n").unwrap_or(0).max(0) as u64,
+            Err(_) => 0,
+        };
+        if count == 0 {
+            println!("  history_sync_state already empty — nothing to do");
+        } else {
+            println!("  will drop {count} row(s) from history_sync_state");
+            if confirm("  proceed?", yes)? {
+                match conn
+                    .execute("DELETE FROM history_sync_state", Params::empty())
+                    .await
+                {
+                    Ok(n) => println!("  reset: {n} row(s) deleted"),
+                    Err(e) => println!("  ! reset failed: {e}"),
+                }
+            } else {
+                println!("  skipped.");
+            }
+        }
+    }
+
+    // 9. Optional FTS rebuild. Tantivy-backed FTS index drift
+    //    surfaces in the schema-integrity check as "wrong # of
+    //    entries in index __turso_internal_fts_dir_…". When that
+    //    drift is present, every `messages::insert` pays a
+    //    reconciliation tax — observed as ~1s/insert during a
+    //    history-sync pull, vs. sub-millisecond on a healthy index.
+    //    Drop + CREATE INDEX rebuilds from existing rows in one bulk
+    //    pass; data in `messages` is untouched. Slow on a populated
+    //    DB (Turso re-tokenizes every row) but a one-shot fix.
+    if rebuild_fts {
+        print_section("FTS index rebuild");
+        let count = match conn
+            .query_one("SELECT COUNT(*) AS n FROM messages", Params::empty())
+            .await
+        {
+            Ok(row) => row.get_i64("n").unwrap_or(0).max(0) as u64,
+            Err(_) => 0,
+        };
+        println!("  will reindex {count} message row(s)");
+        if confirm("  proceed?", yes)? {
+            // DROP first, then CREATE — `IF EXISTS` / `IF NOT EXISTS`
+            // keep both halves idempotent so a partial run can be
+            // re-attempted.
+            match conn
+                .execute("DROP INDEX IF EXISTS messages_fts_idx", Params::empty())
+                .await
+            {
+                Ok(_) => println!("  dropped old index"),
+                Err(e) => println!("  ! drop failed: {e}"),
+            }
+            match conn
+                .execute(
+                    "CREATE INDEX IF NOT EXISTS messages_fts_idx ON messages \
+                     USING fts (subject, from_json, to_json, snippet)",
+                    Params::empty(),
+                )
+                .await
+            {
+                Ok(_) => println!("  rebuilt index — re-run `mailcli doctor` to confirm clean"),
+                Err(e) => println!("  ! rebuild failed: {e}"),
+            }
+        } else {
+            println!("  skipped.");
+        }
+    }
+
+    // 10. Optional VACUUM. Goal: reclaim pages flagged "Page N:
+    //     never used" by the schema-integrity check (allocated but
+    //     unreferenced — leaked space, not data corruption).
+    //
+    //     We can't actually do this on Turso 0.5.3:
+    //       - Plain `VACUUM` returns "not supported yet, use VACUUM
+    //         INTO 'filename' to create a compacted copy"
+    //       - `VACUUM INTO 'path'` panics inside the engine
+    //         (turso_core::vdbe::execute → "StepResult::IO returned
+    //         but no completions available"), tearing down the whole
+    //         process. We can't catch that from the conn.execute
+    //         match arm — Rust panics in foreign code don't return
+    //         as Err.
+    //
+    //     Until Turso ships a working VACUUM, the only way to
+    //     reclaim leaked pages is `mailcli reset --yes` followed by a
+    //     re-add (the messages get re-pulled from the server, the
+    //     leaked pages are gone with the old file). The leaked pages
+    //     themselves are cosmetic — they don't hurt query speed; the
+    //     FTS index drift was the perf bottleneck and `--rebuild-fts`
+    //     handles that one. Leaving the flag wired so the help text
+    //     stays discoverable, but emitting a clear bail message
+    //     rather than crashing.
+    if vacuum {
+        print_section("VACUUM");
+        println!("  skipped — Turso 0.5.3 has no working VACUUM:");
+        println!("    plain VACUUM is unimplemented");
+        println!("    VACUUM INTO panics in turso_core::vdbe::execute");
+        println!();
+        println!("  the leaked-pages report from the schema-integrity");
+        println!("  check is cosmetic — it doesn't slow queries. Run");
+        println!("  `mailcli reset --yes` and re-add your account if you");
+        println!("  want a physically-compact file. (Track upstream for");
+        println!("  the fix — once Turso ships a working VACUUM, switch");
+        println!("  this section to the working call.)");
+    }
+
+    println!();
+    if any_repair {
+        println!("doctor: repair pass complete.");
+    } else {
+        println!("doctor: read-only pass complete. Re-run with `--fix` to apply repairs.");
     }
     Ok(())
 }
