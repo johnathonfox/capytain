@@ -22,7 +22,7 @@
 
 use std::time::Duration;
 
-use qsl_core::{AccountId, BackendEvent, FolderId};
+use qsl_core::{AccountId, BackendEvent, FolderId, MailError, StorageError};
 use qsl_imap_client::{dial_session, watch_folder};
 use tauri::{AppHandle, Manager};
 use tokio::sync::mpsc;
@@ -62,6 +62,23 @@ pub fn spawn_watcher(
                     return;
                 }
                 Err(e) => {
+                    // Account-removed self-cancel: when accounts_remove
+                    // drops the row, fresh_imap_params returns
+                    // MailError::Storage(StorageError::NotFound) on the
+                    // next reconnect attempt. There's nothing left to
+                    // watch, and looping forever buries the log in
+                    // "row not found" warnings — exit cleanly so the
+                    // task drops, the forwarder's tx clone goes with
+                    // it, and the sync engine's main loop reaps the
+                    // empty receiver naturally.
+                    if matches!(e, MailError::Storage(StorageError::NotFound)) {
+                        info!(
+                            account = %account_id.0,
+                            folder = %folder.0,
+                            "IMAP IDLE watcher exiting: account removed"
+                        );
+                        return;
+                    }
                     warn!(
                         account = %account_id.0,
                         folder = %folder.0,
