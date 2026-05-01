@@ -507,9 +507,25 @@ async fn reset_local_state(yes: bool, paths: &DataPaths) -> Result<(), MailcliEr
 
 /// Section header in `doctor` output. Kept consistent so a future
 /// `--json` flag can swap the formatter without rewriting each check.
+/// Flushes stdout so the header lands before the (potentially slow)
+/// query that follows — line buffering would otherwise hold the
+/// header until the next `println!` and the user couldn't tell which
+/// step the doctor is stuck on.
 fn print_section(title: &str) {
+    use std::io::Write;
     println!();
     println!("== {title} ==");
+    let _ = std::io::stdout().flush();
+}
+
+/// Progress breadcrumb for individual queries inside a section.
+/// Same flush rationale as `print_section` — the integrity check and
+/// FK-orphan COUNTs can each take tens of seconds on a large DB and
+/// without a flushed marker the run looks frozen.
+fn step(msg: &str) {
+    use std::io::Write;
+    println!("  · {msg}");
+    let _ = std::io::stdout().flush();
 }
 
 /// Interactive y/N prompt used by destructive doctor repairs.
@@ -559,7 +575,8 @@ async fn doctor(
     //    indexes, broken WAL frames. There is no automatic repair —
     //    if this fails, the user's recourse is `mailcli reset` and
     //    re-sync from the server.
-    print_section("schema integrity");
+    print_section("[1/7] schema integrity");
+    step("running PRAGMA integrity_check (slow on large DBs — minutes is normal)");
     match conn.query("PRAGMA integrity_check", Params::empty()).await {
         Ok(rows) => {
             let mut all_ok = true;
@@ -588,7 +605,7 @@ async fn doctor(
     //    `PRAGMA foreign_key_check` (returns "Not a valid pragma
     //    name") — re-implementing the check ourselves keeps the
     //    coverage and avoids depending on Turso shipping the pragma.
-    print_section("foreign-key violations");
+    print_section("[2/7] foreign-key violations");
     let fk_orphan_checks: &[(&str, &str)] = &[
         ("folders", "account_id"),
         ("threads", "account_id"),
@@ -601,6 +618,7 @@ async fn doctor(
     ];
     let mut total_orphans = 0u64;
     for (table, col) in fk_orphan_checks {
+        step(&format!("scanning {table}"));
         let sql = format!(
             "SELECT COUNT(*) AS n FROM {table} \
              WHERE {col} NOT IN (SELECT id FROM accounts)"
@@ -649,7 +667,8 @@ async fn doctor(
     //    construction we are running offline, so any `running` row
     //    is stale. Repair: flip back to `pending` so the desktop
     //    app's resume path picks it up cleanly on next launch.
-    print_section("history-sync stuck `running` rows");
+    print_section("[3/7] history-sync stuck `running` rows");
+    step("querying history_sync_state");
     let stuck = conn
         .query(
             "SELECT account_id, folder_id FROM history_sync_state WHERE status = ?1",
@@ -690,7 +709,8 @@ async fn doctor(
     //    are transient (network blip mid-pull, server-side
     //    rate-limit, expired token), and forcing the user to click
     //    "Restart" in Settings for each one isn't useful.
-    print_section("history-sync `error` rows");
+    print_section("[4/7] history-sync `error` rows");
+    step("querying history_sync_state");
     let errs = conn
         .query(
             "SELECT account_id, folder_id, last_error \
@@ -737,7 +757,8 @@ async fn doctor(
     //    Drain worker stops retrying past `MAX_ATTEMPTS = 5`. No
     //    auto-repair — the user may want to inspect `last_error`
     //    and decide whether to re-enqueue or drop.
-    print_section("outbox dead-letter");
+    print_section("[5/7] outbox dead-letter");
+    step("querying outbox");
     let dlq = conn
         .query(
             "SELECT id, account_id, op_kind, attempts, last_error \
@@ -771,7 +792,8 @@ async fn doctor(
     //    are leftovers from a delete that didn't (or couldn't, pre
     //    FK-ON) cascade. Safe to drop — no user data lives in the
     //    thread row itself.
-    print_section("empty thread shells");
+    print_section("[6/7] empty thread shells");
+    step("scanning threads ⨯ messages (slow on large mailboxes)");
     let empty_threads = conn
         .query(
             "SELECT t.id FROM threads t \
@@ -814,13 +836,15 @@ async fn doctor(
     //    belonging to that account. Confirmation prompt before each
     //    deletion unless `--yes` is passed; the user might just want
     //    to re-run `mailcli auth add` instead.
-    print_section("orphaned accounts (no keychain entry)");
+    print_section("[7/7] orphaned accounts (no keychain entry)");
+    step("listing accounts");
     match repos::accounts::list(&conn).await {
         Ok(accounts) if accounts.is_empty() => println!("  no accounts configured"),
         Ok(accounts) => {
             let vault = TokenVault::new();
             let mut orphans: Vec<AccountId> = Vec::new();
             for a in &accounts {
+                step(&format!("checking keychain for {}", a.id.0));
                 let present = vault.contains(&a.id).await.unwrap_or(false);
                 if !present {
                     orphans.push(a.id.clone());
