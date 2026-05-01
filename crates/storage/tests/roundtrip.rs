@@ -768,6 +768,97 @@ fn update_preserves_thread_id_against_wire_none() {
     });
 }
 
+/// Companion to `update_preserves_thread_id_against_wire_none`.
+/// `body_path` has the same shape as `thread_id` — locally-assigned
+/// after the initial insert (by `messages::set_body_path` once the
+/// body-fetch pipeline lands the blob) and never present on the wire
+/// the IMAP / JMAP backend hands `update`. Including it in the
+/// UPDATE SET would silently NULL the column on every re-sync,
+/// forcing every reader-pane open to re-download from the server.
+#[test]
+fn update_preserves_body_path_against_wire_none() {
+    let rt = rt();
+    rt.block_on(async move {
+        let conn = fresh_conn().await;
+        let acct = Account {
+            id: AccountId("acct-body".into()),
+            kind: BackendKind::ImapSmtp,
+            display_name: "Work".into(),
+            email_address: "me-body@example.com".into(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            signature: None,
+            notify_enabled: true,
+        };
+        repos::accounts::insert(&conn, &acct).await.expect("acct");
+        let folder = Folder {
+            id: FolderId("INBOX-body".into()),
+            account_id: acct.id.clone(),
+            name: "Inbox".into(),
+            path: "INBOX".into(),
+            role: Some(FolderRole::Inbox),
+            unread_count: 0,
+            total_count: 0,
+            parent: None,
+        };
+        repos::folders::insert(&conn, &folder)
+            .await
+            .expect("folder");
+
+        let headers = MessageHeaders {
+            id: MessageId("m-body-1".into()),
+            account_id: acct.id.clone(),
+            folder_id: folder.id.clone(),
+            thread_id: None,
+            rfc822_message_id: Some("<body@b>".into()),
+            subject: "subj".into(),
+            from: vec![],
+            reply_to: vec![],
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            date: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            flags: MessageFlags::default(),
+            labels: vec![],
+            snippet: "".into(),
+            size: 0,
+            has_attachments: false,
+            in_reply_to: None,
+            references: vec![],
+        };
+        // Initial insert with no body yet.
+        repos::messages::insert(&conn, &headers, None)
+            .await
+            .expect("insert");
+
+        // Simulate the body-fetch pipeline landing the blob and
+        // recording its on-disk path.
+        let blob_path = "/tmp/qsl-test-blob/m-body-1";
+        repos::messages::set_body_path(&conn, &headers.id, Some(blob_path))
+            .await
+            .expect("set_body_path");
+
+        // Re-sync: the wire copy of the headers carries no body_path
+        // (the IMAP / JMAP backend never sets it). This is the call
+        // shape that historically wiped the column.
+        repos::messages::update(&conn, &headers, None)
+            .await
+            .expect("update");
+
+        let back = repos::messages::get(&conn, &headers.id).await.expect("get");
+        let stored = repos::messages::body_path(&conn, &headers.id)
+            .await
+            .expect("body_path");
+        assert_eq!(
+            stored,
+            Some(blob_path.to_string()),
+            "messages::update must not clobber a previously-assigned body_path with the \
+             incoming-wire `None`"
+        );
+        // Sanity: the rest of the row still looks correct.
+        assert_eq!(back.id, headers.id);
+    });
+}
+
 /// PR-S1 smoke. Insert three messages with distinct subjects /
 /// senders, then run a Tantivy FTS query and verify only the
 /// matching id comes back. Locks down two things at once:

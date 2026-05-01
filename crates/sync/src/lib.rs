@@ -108,9 +108,39 @@ pub async fn sync_folder(
 
     let prior = sync_states::get(conn, &folder.id).await?;
 
-    let result = backend
+    // UIDVALIDITY-changed recovery: if the backend reports the cached
+    // cursor's uidvalidity no longer matches what the server SELECT
+    // returned, the cached UIDs are meaningless. Clear the cursor and
+    // re-call list_messages with `prior = None` (the bounded
+    // initial-sync path). The reconciliation pass below still runs
+    // because `prior.is_some()` was true *before* recovery — exactly
+    // what we want, since `list_known_ids` will return UIDs under the
+    // *new* uidvalidity and the diff will prune every stale-UV row
+    // that's still hanging around in the local cache. Without this
+    // recovery the cursor stays poisoned and every subsequent sync
+    // cycle re-errors on the same mismatch, leaving the folder
+    // permanently stuck.
+    let result = match backend
         .list_messages(&folder.id, prior.as_ref(), limit)
-        .await?;
+        .await
+    {
+        Ok(r) => r,
+        Err(MailError::UidValidityChanged {
+            folder: changed_folder,
+            cached,
+            observed,
+        }) => {
+            warn!(
+                folder = %changed_folder,
+                cached_uidvalidity = cached,
+                observed_uidvalidity = observed,
+                "UIDVALIDITY changed; clearing sync cursor and refetching from scratch"
+            );
+            sync_states::clear(conn, &folder.id).await?;
+            backend.list_messages(&folder.id, None, limit).await?
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     let mut report = SyncReport::default();
     let mut new_headers: Vec<MessageHeaders> = Vec::new();

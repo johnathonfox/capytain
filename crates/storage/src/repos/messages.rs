@@ -23,16 +23,20 @@ const INSERT: &str = "
         (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
 ";
 
-// `thread_id` is intentionally NOT in the SET clause: it's locally
-// computed by `qsl_sync::threading::attach_to_thread`, never sourced
-// from the IMAP / JMAP wire. Including it here would make every
-// re-sync overwrite the previously-assigned thread with the
-// incoming-header `None`, leaving the row orphaned from its thread
-// even though `attach_to_thread` had correctly assigned it on
-// initial insert. (Caught against a real Gmail account on
-// 2026-04-27: a reply to a self-sent message kept landing with
-// `thread_id = NULL` despite `threads.message_count` correctly
-// counting it — the touch ran, then the next sync wiped the column.)
+// `thread_id` (?4) and `body_path` (?18) are intentionally NOT in the
+// SET clause: both are locally-computed and never sourced from the
+// IMAP / JMAP wire. Including either would make every re-sync
+// overwrite the previously-assigned value with the incoming-header
+// `None`, leaving the row orphaned from its thread (or its body blob)
+// even though the assignment had been correct on the prior insert.
+// (`thread_id`: caught against a real Gmail account on 2026-04-27 —
+// a reply kept landing with `thread_id = NULL` despite
+// `threads.message_count` correctly counting it. `body_path`: same
+// shape — a body fetched after the initial insert via
+// `set_body_path` would be silently NULLed by the next sync cycle's
+// `update`, forcing every reader-pane open to re-fetch from the
+// server.) Mirrors the dropped slots: `to_params` still binds 20
+// positional values; `?4` and `?18` are simply unreferenced here.
 const UPDATE: &str = "
     UPDATE messages
        SET account_id = ?2,
@@ -50,7 +54,6 @@ const UPDATE: &str = "
            snippet = ?15,
            size = ?16,
            has_attachments = ?17,
-           body_path = ?18,
            in_reply_to = ?19,
            references_json = ?20
      WHERE id = ?1

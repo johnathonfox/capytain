@@ -29,6 +29,22 @@ pub enum MailError {
     #[error("protocol error: {0}")]
     Protocol(String),
 
+    /// The folder's `UIDVALIDITY` value moved between the cached cursor and
+    /// the current SELECT response. RFC 3501 §2.3.1.1 says that's the
+    /// server telling the client every locally-stored UID for this folder
+    /// is now meaningless. Distinct from [`Self::Protocol`] so the sync
+    /// engine can recover automatically (clear cursor, refetch, prune
+    /// stale rows via reconciliation) instead of treating the folder as
+    /// permanently broken; caller-initiated paths (a flag toggle, a move,
+    /// a body fetch) surface it to the UI as a "folder needs refresh"
+    /// signal.
+    #[error("UIDVALIDITY changed for {folder} ({cached} → {observed})")]
+    UidValidityChanged {
+        folder: String,
+        cached: u32,
+        observed: u32,
+    },
+
     /// The requested message or folder does not exist.
     #[error("message or folder not found: {0}")]
     NotFound(String),
