@@ -5464,6 +5464,7 @@ dependencies = [
  "tracing",
  "url",
  "webbrowser",
+ "zeroize",
 ]
 
 [[package]]

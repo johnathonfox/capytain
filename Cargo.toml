@@ -95,6 +95,11 @@ turso_core = { version = "0.5", features = ["fts"] }
 url = { version = "2", features = ["serde"] }
 webbrowser = "1"
 webpki-roots = "1"
+# `zeroize` wipes secret-bearing buffers on drop. Used by the auth
+# crate's `AccessToken` / `RefreshToken` newtypes so token bytes don't
+# linger on the freelist after the value goes out of scope. `String`
+# is supported via the default `alloc` feature.
+zeroize = "1"
 zstd = { version = "0.13", default-features = false }
 
 # Dev-only: property-testing for the storage layer round-trip suite.

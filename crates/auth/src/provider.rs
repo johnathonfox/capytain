@@ -41,6 +41,14 @@ pub struct ProviderProfile {
     pub authorization_url: &'static str,
     /// RFC 6749 token endpoint (used for both code exchange and refresh).
     pub token_url: &'static str,
+    /// RFC 7009 revocation endpoint, or empty if the provider doesn't
+    /// publish one we can call statically. Hit best-effort by
+    /// `accounts_remove` when the user removes an account, so a
+    /// stolen refresh token is invalidated server-side and not just
+    /// dropped from the keychain. Fastmail's revocation endpoint is
+    /// JMAP-session-discoverable rather than static; leaving the
+    /// field empty there falls back to local-only cleanup.
+    pub revocation_url: &'static str,
     /// Scopes to request. Joined with `' '` when building the authorization
     /// URL.
     pub scopes: &'static [&'static str],

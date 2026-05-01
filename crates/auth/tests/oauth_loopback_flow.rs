@@ -44,6 +44,7 @@ fn leak_static_profile(authorize_url: String, token_url: String) -> &'static Pro
         client_secret: "",
         authorization_url: Box::leak(authorize_url.into_boxed_str()),
         token_url: Box::leak(token_url.into_boxed_str()),
+        revocation_url: "",
         scopes: &["scope-a", "scope-b"],
         kind: ProviderKind::ImapSmtp,
     };

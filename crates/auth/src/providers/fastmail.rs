@@ -28,6 +28,14 @@ static PROFILE: ProviderProfile = ProviderProfile {
     client_secret: env!("QSL_FASTMAIL_CLIENT_SECRET"),
     authorization_url: "https://api.fastmail.com/oauth/authorize",
     token_url: "https://api.fastmail.com/oauth/refresh",
+    // Fastmail's revocation endpoint isn't published as a stable static
+    // URL — RFC 7009 says clients should discover it via the OAuth
+    // metadata document, which Fastmail surfaces through the JMAP
+    // session response rather than a `.well-known` doc. Empty here
+    // means `accounts_remove` falls back to local-only cleanup
+    // (keychain delete + DB cascade) for Fastmail accounts. A
+    // follow-up can wire JMAP-session-driven revocation.
+    revocation_url: "",
     scopes: &[
         "https://www.fastmail.com/dev/protocol-imap",
         "https://www.fastmail.com/dev/protocol-smtp",

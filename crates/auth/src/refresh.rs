@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
 use serde::Deserialize;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use qsl_core::AccountId;
 
@@ -19,6 +19,77 @@ use crate::error::AuthError;
 use crate::keyring::TokenVault;
 use crate::provider::OAuthProvider;
 use crate::tokens::{AccessToken, RefreshToken, TokenSet};
+
+/// Best-effort POST to the provider's RFC 7009 revocation endpoint to
+/// invalidate a refresh token server-side. Returns `Ok(false)` if the
+/// provider didn't publish a static revocation URL (Fastmail today —
+/// see the comment on `ProviderProfile::revocation_url`); `Ok(true)`
+/// on a successful revoke; `Err` on transport / 4xx / 5xx.
+///
+/// Callers (`accounts_remove`) treat this as best-effort: a failure
+/// (offline, provider 5xx, expired token) is logged but never blocks
+/// the local keychain + DB cleanup. The token still becomes useless
+/// once the keychain entry is gone — server-side revocation is a
+/// belt-and-braces measure for the case where the token was already
+/// exfiltrated.
+///
+/// 5-second timeout because remove flows shouldn't stall the UI on
+/// a flaky network — `webbrowser::open` and the JMAP/IMAP auth
+/// retries are the realistic latency budget; revoke is a
+/// fire-and-(mostly-)forget extra.
+pub async fn revoke_refresh_token(
+    provider: &dyn OAuthProvider,
+    refresh: &RefreshToken,
+) -> Result<bool, AuthError> {
+    let profile = provider.profile();
+    if profile.revocation_url.is_empty() {
+        debug!(
+            provider = profile.slug,
+            "no revocation_url configured; skipping server-side revoke"
+        );
+        return Ok(false);
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| AuthError::Other(format!("reqwest build: {e}")))?;
+
+    // RFC 7009 §2.1: POST application/x-www-form-urlencoded with
+    // `token=<token>`. `token_type_hint=refresh_token` is optional but
+    // helps providers route to the right revocation path. Google
+    // accepts both `token=` and a query-string variant; the body
+    // form is the standards-compliant shape.
+    let resp = client
+        .post(profile.revocation_url)
+        .header("Accept", "application/json")
+        .form(&[
+            ("token", refresh.expose()),
+            ("token_type_hint", "refresh_token"),
+        ])
+        .send()
+        .await
+        .map_err(|e| AuthError::Other(format!("revoke HTTP: {e}")))?;
+
+    let status = resp.status();
+    if status.is_success() {
+        info!(provider = profile.slug, "refresh token revoked at provider");
+        Ok(true)
+    } else {
+        // Read up to ~200 chars of the body so the warn is debuggable
+        // without flooding logs on a long HTML 502.
+        let raw = resp.text().await.unwrap_or_default();
+        let snippet: String = raw.chars().take(200).collect();
+        warn!(
+            provider = profile.slug,
+            %status,
+            "revoke endpoint returned non-success: {snippet:?}"
+        );
+        Err(AuthError::Other(format!(
+            "revoke endpoint returned HTTP {status}"
+        )))
+    }
+}
 
 /// Exchange a stored refresh token for a fresh access token.
 ///
@@ -146,4 +217,38 @@ async fn post_refresh(
         refresh: body.refresh_token.map(RefreshToken),
         expires_at,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{ProviderKind, ProviderProfile};
+
+    /// A provider with `revocation_url: ""` short-circuits without
+    /// touching the network. Locks the contract so a future "make it
+    /// fall through to a default endpoint" change has to consciously
+    /// remove this regression.
+    #[tokio::test]
+    async fn revoke_short_circuits_on_empty_url() {
+        struct NoRevokeProvider;
+        impl OAuthProvider for NoRevokeProvider {
+            fn profile(&self) -> &'static ProviderProfile {
+                static P: ProviderProfile = ProviderProfile {
+                    name: "Test",
+                    slug: "test",
+                    client_id: "x",
+                    client_secret: "",
+                    authorization_url: "https://example.test/auth",
+                    token_url: "https://example.test/token",
+                    revocation_url: "",
+                    scopes: &[],
+                    kind: ProviderKind::ImapSmtp,
+                };
+                &P
+            }
+        }
+
+        let result = revoke_refresh_token(&NoRevokeProvider, &RefreshToken("x".into())).await;
+        assert!(matches!(result, Ok(false)));
+    }
 }

@@ -4,9 +4,24 @@
 //!
 //! [`AccessToken`] and [`RefreshToken`] are opaque secret-bearing strings
 //! that the crate takes care never to `Debug`-print or log at `info` level.
+//! Both impl [`Drop`] via the `zeroize` crate so the inner allocation is
+//! wiped before the `String` is freed — this protects against the secret
+//! bytes lingering on the heap freelist after the value goes out of scope
+//! (which would surface in core dumps or memory snapshots).
+//!
+//! Caveat: `AccessToken` propagates as `Arc<str>` into the IMAP backend
+//! (`crates/imap-client/src/backend.rs::ImapBackend::access_token`) and
+//! is `.clone()`d inside the JMAP client. Each `Arc<str>` keeps its own
+//! allocation that is *not* zeroized on drop. The zeroize impl here
+//! wipes the originally-allocated `String`; the residual `Arc<str>`
+//! copies are out of scope for this layer. Closing that gap would
+//! require migrating the whole token pipeline to `Zeroizing<String>`,
+//! which isn't worth the API churn for the threat model (memory
+//! snapshot, not remote attacker).
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 /// An OAuth2 access token. Short-lived (minutes to an hour); passed to
 /// IMAP/JMAP/SMTP on every request.
@@ -27,6 +42,12 @@ impl std::fmt::Debug for AccessToken {
     }
 }
 
+impl Drop for AccessToken {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 /// An OAuth2 refresh token. Long-lived (weeks to forever); stored in the
 /// OS keychain and rotated whenever the provider issues a new one.
 #[derive(Clone, Serialize, Deserialize)]
@@ -42,6 +63,12 @@ impl RefreshToken {
 impl std::fmt::Debug for RefreshToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("RefreshToken").field(&"<redacted>").finish()
+    }
+}
+
+impl Drop for RefreshToken {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 

@@ -12,7 +12,7 @@
 use std::sync::atomic::Ordering;
 
 use chrono::Utc;
-use qsl_auth::{run_loopback_flow, AuthError, ProviderKind, TokenVault};
+use qsl_auth::{revoke_refresh_token, run_loopback_flow, AuthError, ProviderKind, TokenVault};
 use qsl_core::{AccountId, BackendKind};
 use qsl_ipc::{Account, IpcResult};
 use qsl_storage::repos::accounts as accounts_repo;
@@ -243,7 +243,7 @@ pub struct AccountsRemoveInput {
 
 /// `accounts_remove` — delete an account row.
 ///
-/// Order matters here. Three classes of state hang off an account:
+/// Order matters here. Four classes of state hang off an account:
 ///
 ///   1. **In-flight history-sync drivers.** Their cancel flags live in
 ///      `state.history_cancellers`; the driver task notices the flip
@@ -258,6 +258,14 @@ pub struct AccountsRemoveInput {
 ///   3. **Cached `MailBackend` handle.** Cleared so a re-add doesn't
 ///      hit the stale handle still pointing at the removed account's
 ///      access token.
+///   4. **Refresh token in the OS keychain + at the OAuth provider.**
+///      We POST to the provider's RFC 7009 revocation endpoint
+///      best-effort (5-second timeout, never blocking — see
+///      `qsl_auth::revoke_refresh_token`) so a previously-exfiltrated
+///      token becomes useless server-side, then delete the libsecret
+///      entry under `com.qsl.app/<provider>:<email>`. Without this
+///      step the keychain entry orphaned across removes, leaving
+///      stale credentials around forever.
 ///
 /// Then the database row goes. With `PRAGMA foreign_keys=ON` (set in
 /// `TursoConn::open`) the schema's `ON DELETE CASCADE` clauses fire,
@@ -303,6 +311,8 @@ pub async fn accounts_remove(
     state.history_account_locks.lock().await.remove(&input.id);
     state.backends.lock().await.remove(&input.id);
 
+    revoke_and_delete_keychain(&input.id).await;
+
     let db = state.db.lock().await;
     accounts_repo::delete(&*db, &input.id).await?;
     drop(db);
@@ -312,4 +322,62 @@ pub async fn accounts_remove(
     }
     tracing::info!(account = %input.id.0, "accounts_remove");
     Ok(())
+}
+
+/// Best-effort token revocation + keychain cleanup for `accounts_remove`.
+/// Failures are logged and swallowed — local cleanup must succeed even
+/// if the user is offline or the provider is 5xxing.
+///
+/// AccountId shape is `<provider_slug>:<email>` (set at add time in
+/// `accounts_add_oauth`); we split on the first colon to recover the
+/// slug.
+async fn revoke_and_delete_keychain(account: &AccountId) {
+    let vault = TokenVault::new();
+
+    // Provider lookup is best-effort. An unrecognized slug (e.g. an
+    // account row that predates a provider rename) means we skip the
+    // network revoke but still try the keychain delete below.
+    let provider_slug = account.0.split_once(':').map(|(p, _)| p);
+    let provider = provider_slug.and_then(qsl_auth::lookup);
+
+    if let Some(provider) = provider {
+        match vault.get(account).await {
+            Ok(refresh) => {
+                if let Err(e) = revoke_refresh_token(provider, &refresh).await {
+                    // Non-fatal: token will become unusable as soon as the
+                    // keychain entry is gone (no way to ask for a new
+                    // access token), and the refresh token's natural
+                    // expiry will eventually clean up server-side.
+                    tracing::warn!(
+                        account = %account.0,
+                        "accounts_remove: provider revoke failed (continuing): {e}"
+                    );
+                }
+            }
+            Err(AuthError::Keyring(_)) => {
+                tracing::debug!(
+                    account = %account.0,
+                    "accounts_remove: no keychain entry to revoke"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    account = %account.0,
+                    "accounts_remove: keychain read failed (skipping revoke): {e}"
+                );
+            }
+        }
+    } else {
+        tracing::debug!(
+            account = %account.0,
+            "accounts_remove: unknown provider slug; skipping server-side revoke"
+        );
+    }
+
+    if let Err(e) = vault.delete(account).await {
+        tracing::warn!(
+            account = %account.0,
+            "accounts_remove: keychain delete failed: {e}"
+        );
+    }
 }
