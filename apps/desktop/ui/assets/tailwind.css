@@ -1626,34 +1626,22 @@ ul {
   background: var(--bg-primary);
 }
 
-/* Expanded cards default to a sensible reading height and can be
- * resized individually via the bottom-right grip (`resize:
- * vertical`). `overflow: hidden` is required for the resize handle
- * to activate; the iframe inside still scrolls its own content.
- * `flex: 0 0 auto` keeps the explicit height stable instead of
- * letting flex-grow fight the user's drag. */
+/* Expanded cards stretch to fill any remaining vertical space in
+ * the stack so a single-message thread (or any thread whose only
+ * expanded card sits at the bottom) doesn't leave a blank gap
+ * under the body. Multiple expanded cards share the remaining
+ * space equally; the per-card min-height keeps each one readable
+ * even when several are open. The whole reader pane is still
+ * user-resizable via the column splitter on its left edge. */
 .thread-card.thread-card-expanded {
-  flex: 0 0 auto;
-  height: 420px;
-  min-height: 200px;
-  max-height: 90vh;
-  resize: vertical;
-  overflow: hidden;
+  flex: 1 1 auto;
+  min-height: 280px;
   background: var(--bg-primary);
 }
 
 .thread-card.thread-card-collapsed {
   flex: 0 0 auto;
   background: var(--bg-tertiary);
-}
-
-/* Bottom filler so a thread whose cards don't fill the pane
- * shows the reader-pane background (rather than a hard
- * boundary line) under the stack. */
-.thread-stack::after {
-  content: "";
-  flex: 1 0 auto;
-  min-height: 0;
 }
 
 /* Header strip — clickable. Reset the default <button> chrome since
