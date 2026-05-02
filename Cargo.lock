@@ -4210,7 +4210,7 @@ dependencies = [
 
 [[package]]
 name = "mailcli"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "chrono",
  "clap",
@@ -5521,7 +5521,7 @@ dependencies = [
 
 [[package]]
 name = "qsl-auth"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5545,7 +5545,7 @@ dependencies = [
 
 [[package]]
 name = "qsl-core"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5559,7 +5559,7 @@ dependencies = [
 
 [[package]]
 name = "qsl-desktop"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5597,7 +5597,7 @@ dependencies = [
 
 [[package]]
 name = "qsl-imap-client"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-imap",
  "async-trait",
@@ -5619,7 +5619,7 @@ dependencies = [
 
 [[package]]
 name = "qsl-ipc"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "chrono",
  "qsl-core",
@@ -5630,7 +5630,7 @@ dependencies = [
 
 [[package]]
 name = "qsl-jmap-client"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5646,7 +5646,7 @@ dependencies = [
 
 [[package]]
 name = "qsl-mime"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "adblock",
  "ammonia",
@@ -5661,14 +5661,14 @@ dependencies = [
 
 [[package]]
 name = "qsl-search"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "chrono",
 ]
 
 [[package]]
 name = "qsl-smtp-client"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "lettre",
@@ -5680,7 +5680,7 @@ dependencies = [
 
 [[package]]
 name = "qsl-storage"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5700,7 +5700,7 @@ dependencies = [
 
 [[package]]
 name = "qsl-sync"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -5716,7 +5716,7 @@ dependencies = [
 
 [[package]]
 name = "qsl-telemetry"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -5724,7 +5724,7 @@ dependencies = [
 
 [[package]]
 name = "qsl-ui"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "chrono",
  "dioxus",
@@ -9840,7 +9840,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "xxhash-rust"
