@@ -993,7 +993,8 @@ caf"
         // CDN image is dropped until the user opts in via "Always
         // load from this sender" (which routes through
         // `sanitize_email_html_trusted`).
-        let probe = r#"<img src="https://example.com/logo.png" alt="logo" width="100" height="40">"#;
+        let probe =
+            r#"<img src="https://example.com/logo.png" alt="logo" width="100" height="40">"#;
         let out = sanitize_email_html(probe);
         assert!(
             !out.contains("https://example.com/logo.png"),
@@ -1014,7 +1015,10 @@ caf"
         // `data:` URIs are local, no network — pass through.
         let probe = r#"<img src="data:image/png;base64,iVBORw0KGgo=" alt="logo">"#;
         let out = sanitize_email_html(probe);
-        assert!(out.contains("data:image/png;base64"), "data URI lost: {out}");
+        assert!(
+            out.contains("data:image/png;base64"),
+            "data URI lost: {out}"
+        );
         assert!(
             !out.contains("data-qsl-blocked"),
             "inline data img picked up a blocked marker: {out}"
@@ -1209,8 +1213,7 @@ caf"
         // Default policy is block-all-remote — non-tracker CDN bg
         // image is dropped. The trusted-sender variant
         // (sanitize_email_html_trusted) is the user's opt-in path.
-        let probe =
-            r#"<div style="background-image: url(https://example.com/hero.png); color: #222;">hero</div>"#;
+        let probe = r#"<div style="background-image: url(https://example.com/hero.png); color: #222;">hero</div>"#;
         let out = sanitize_email_html(probe);
         assert!(
             !out.contains("hero.png"),
@@ -1299,7 +1302,8 @@ iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAA
     #[test]
     fn sanitize_keeps_inline_data_background_image_url() {
         // `data:` URIs in CSS url() pass through — local bytes only.
-        let probe = r#"<div style="background-image: url(data:image/png;base64,iVBORw0KGgo=);">hi</div>"#;
+        let probe =
+            r#"<div style="background-image: url(data:image/png;base64,iVBORw0KGgo=);">hi</div>"#;
         let out = sanitize_email_html(probe);
         assert!(out.contains("data:image/png"), "data URL stripped: {out}");
     }

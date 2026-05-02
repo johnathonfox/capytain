@@ -569,14 +569,7 @@ pub(crate) async fn sync_one_account(app: &AppHandle, blobs: &BlobStore, account
         if let Err(e) = &result {
             warn!(folder = %folder.id.0, "live sync_folder: {e}");
         }
-        emit_folder_outcome(
-            app,
-            account_id,
-            &folder.id,
-            &result,
-            /* live = */ true,
-        )
-        .await;
+        emit_folder_outcome(app, account_id, &folder.id, &result, /* live = */ true).await;
     }
 }
 

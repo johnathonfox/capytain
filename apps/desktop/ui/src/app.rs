@@ -596,8 +596,7 @@ fn full_app_shell() -> Element {
                 let Ok(accounts) = invoke::<Vec<Account>>("accounts_list", ()).await else {
                     return;
                 };
-                let alive: HashSet<AccountId> =
-                    accounts.iter().map(|a| a.id.clone()).collect();
+                let alive: HashSet<AccountId> = accounts.iter().map(|a| a.id.clone()).collect();
                 let selection_stale = selection_for_listener
                     .peek()
                     .account

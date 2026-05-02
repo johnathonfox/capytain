@@ -344,9 +344,7 @@ pub async fn accounts_remove(
     let remaining = accounts_repo::list(&*db).await?.len();
     if remaining == 0 {
         if let Err(e) = qsl_storage::repos::contacts::clear_all(&*db).await {
-            tracing::warn!(
-                "accounts_remove: contacts_v1 truncate failed (continuing): {e}"
-            );
+            tracing::warn!("accounts_remove: contacts_v1 truncate failed (continuing): {e}");
         }
     }
     drop(db);

@@ -21,9 +21,8 @@ use qsl_mime::{
 };
 use qsl_storage::{
     repos::accounts as accounts_repo, repos::app_settings as app_settings_repo,
-    repos::drafts as drafts_repo, repos::folders as folders_repo,
-    repos::messages as messages_repo, repos::outbox as outbox_repo, repos::remote_content_opt_ins,
-    BlobStore,
+    repos::drafts as drafts_repo, repos::folders as folders_repo, repos::messages as messages_repo,
+    repos::outbox as outbox_repo, repos::remote_content_opt_ins, BlobStore,
 };
 use serde::Deserialize;
 use tauri::State;
