@@ -95,6 +95,54 @@ pub fn display_name_for_folder_with_role<'a>(
     Cow::Borrowed(display_name_for_folder(name))
 }
 
+/// Pick the next reader-pane selection after `moved` messages leave
+/// the current view. Mirrors Gmail / Apple Mail behaviour: prefer the
+/// message *after* the now-departed selection in the visible list,
+/// fall back to the one *before* if we're at the end, otherwise clear
+/// (the entire list emptied or the selection wasn't there to begin
+/// with). Skips any moved ids while walking — a multi-row drop
+/// shouldn't land on another id that's also disappearing.
+///
+/// Pure: takes the visible list snapshot from *before* the move, the
+/// current selection, and the ids being moved out. Returns the id to
+/// select afterwards (or `None` to clear).
+pub fn next_selection_after_move(
+    visible: &[qsl_ipc::MessageId],
+    current: Option<&qsl_ipc::MessageId>,
+    moved: &[qsl_ipc::MessageId],
+) -> Option<qsl_ipc::MessageId> {
+    let cur = current?;
+    let pos = visible.iter().position(|id| id.0 == cur.0)?;
+    // Walk forward past the moved cohort.
+    if let Some(id) = visible
+        .iter()
+        .skip(pos + 1)
+        .find(|id| !moved.iter().any(|m| m.0 == id.0))
+    {
+        return Some(id.clone());
+    }
+    // Nothing forward; walk back.
+    visible[..pos]
+        .iter()
+        .rev()
+        .find(|id| !moved.iter().any(|m| m.0 == id.0))
+        .cloned()
+}
+
+/// Drop-target eligibility for a folder by role. Drag-and-drop into
+/// `Important`, `Flagged`, or `All` would either be meaningless (`All
+/// Mail` already contains everything) or surprising (Gmail's
+/// `Important` and `Starred` are *labels*, not real folders, so a
+/// `messages_move` into them would relocate the message rather than
+/// just flag it). Block at the UI layer for v1; revisit when label-add
+/// semantics ship — see backlog item #14 in `docs/QSL_BACKLOG_FIXES.md`.
+pub fn is_drop_blocked(role: Option<&FolderRole>) -> bool {
+    matches!(
+        role,
+        Some(FolderRole::Important) | Some(FolderRole::Flagged) | Some(FolderRole::All)
+    )
+}
+
 /// Format a [`DateTime<Utc>`] for the message-list date column.
 /// Follows `docs/ui-direction.md` § Message list § Timestamp:
 ///
@@ -320,6 +368,89 @@ mod tests {
             display_name_for_folder_with_role("Receipts/2026", None),
             "Receipts/2026"
         );
+    }
+
+    fn mid(s: &str) -> qsl_ipc::MessageId {
+        qsl_ipc::MessageId(s.to_string())
+    }
+
+    #[test]
+    fn next_after_move_picks_next_visible() {
+        let visible = vec![mid("a"), mid("b"), mid("c"), mid("d")];
+        let cur = mid("b");
+        let moved = vec![mid("b")];
+        assert_eq!(
+            next_selection_after_move(&visible, Some(&cur), &moved),
+            Some(mid("c"))
+        );
+    }
+
+    #[test]
+    fn next_after_move_skips_other_moved() {
+        let visible = vec![mid("a"), mid("b"), mid("c"), mid("d")];
+        let cur = mid("b");
+        let moved = vec![mid("b"), mid("c")];
+        assert_eq!(
+            next_selection_after_move(&visible, Some(&cur), &moved),
+            Some(mid("d"))
+        );
+    }
+
+    #[test]
+    fn next_after_move_falls_back_to_previous_at_end() {
+        let visible = vec![mid("a"), mid("b"), mid("c")];
+        let cur = mid("c");
+        let moved = vec![mid("c")];
+        assert_eq!(
+            next_selection_after_move(&visible, Some(&cur), &moved),
+            Some(mid("b"))
+        );
+    }
+
+    #[test]
+    fn next_after_move_returns_none_when_list_empties() {
+        let visible = vec![mid("a"), mid("b")];
+        let cur = mid("a");
+        let moved = vec![mid("a"), mid("b")];
+        assert_eq!(
+            next_selection_after_move(&visible, Some(&cur), &moved),
+            None
+        );
+    }
+
+    #[test]
+    fn next_after_move_handles_missing_current() {
+        let visible = vec![mid("a"), mid("b")];
+        assert_eq!(next_selection_after_move(&visible, None, &[]), None);
+        // Selection points at something not in the list (race) → None.
+        let stranger = mid("z");
+        let moved = vec![mid("z")];
+        assert_eq!(
+            next_selection_after_move(&visible, Some(&stranger), &moved),
+            None
+        );
+    }
+
+    #[test]
+    fn drop_blocked_for_label_view_roles() {
+        // Gmail label-views: Important / Flagged / All are read-only
+        // from a "move into me" perspective.
+        assert!(is_drop_blocked(Some(&FolderRole::Important)));
+        assert!(is_drop_blocked(Some(&FolderRole::Flagged)));
+        assert!(is_drop_blocked(Some(&FolderRole::All)));
+    }
+
+    #[test]
+    fn drop_allowed_for_real_folders() {
+        // Real mailbox folders: drops should land normally.
+        assert!(!is_drop_blocked(Some(&FolderRole::Inbox)));
+        assert!(!is_drop_blocked(Some(&FolderRole::Sent)));
+        assert!(!is_drop_blocked(Some(&FolderRole::Drafts)));
+        assert!(!is_drop_blocked(Some(&FolderRole::Trash)));
+        assert!(!is_drop_blocked(Some(&FolderRole::Spam)));
+        assert!(!is_drop_blocked(Some(&FolderRole::Archive)));
+        // User-defined folders (no role) are always allowed too.
+        assert!(!is_drop_blocked(None));
     }
 
     #[test]

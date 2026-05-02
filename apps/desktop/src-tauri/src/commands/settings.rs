@@ -27,7 +27,7 @@ use crate::state::AppState;
 /// value. Payload is `AppSettingsChangedPayload`. The main-window UI
 /// subscribes so theme / density / privacy radio flips in the
 /// Settings window apply live without a restart.
-const APP_SETTINGS_CHANGED_EVENT: &str = "app_settings_changed";
+pub const APP_SETTINGS_CHANGED: &str = "app_settings_changed";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AppSettingsChangedPayload {
@@ -77,7 +77,7 @@ pub async fn app_settings_set<R: tauri::Runtime>(
         key: input.key,
         value: input.value,
     };
-    if let Err(e) = app.emit(APP_SETTINGS_CHANGED_EVENT, payload) {
+    if let Err(e) = app.emit(APP_SETTINGS_CHANGED, payload) {
         // Emit failure shouldn't block the write — we already
         // persisted; the next consumer will read on next mount.
         tracing::warn!(error = %e, "app_settings_set: emit failed");

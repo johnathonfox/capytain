@@ -906,6 +906,26 @@ ul {
   color: var(--text-primary);
 }
 
+/* Drag-and-drop decorations. `.sidebar-row-drop-target` lights up the
+   row currently under the cursor during a valid drag; the inset amber
+   outline reads as "yes, drop here" without crowding the 124px sidebar
+   width. `.sidebar-row-drop-blocked` paints a no-drop cursor on Gmail
+   label-views (Important / Flagged / All Mail) so the user sees they
+   can't aim there before they release. The block class is applied for
+   the *entire* drag, not just on hover, because the cue needs to be
+   visible the moment the user starts dragging — not after they've
+   already aimed at the wrong row. */
+.sidebar-row.sidebar-row-drop-target {
+  background: var(--bg-secondary);
+  outline: 2px solid var(--accent-amber);
+  outline-offset: -2px;
+}
+
+.sidebar-row.sidebar-row-drop-blocked {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .sidebar-row-left {
   display: flex;
   align-items: center;
@@ -1158,6 +1178,11 @@ ul {
   border-bottom: 0;
   cursor: pointer;
   user-select: none;
+  /* webkit's drag init reads `-webkit-user-drag` to decide whether
+     a `draggable="true"` element can actually start a drag. With
+     `user-select: none` set above, webkit2gtk needs the explicit
+     `element` value or the drag never fires. */
+  -webkit-user-drag: element;
   border-left: 2px solid transparent;
   font-size: var(--fs-12);
 }
@@ -1926,6 +1951,12 @@ ul {
   padding: 12px 0;
   font-size: var(--fs-11);
   color: var(--text-tertiary);
+}
+
+.settings-hint {
+  font-size: var(--fs-11);
+  color: var(--text-tertiary);
+  margin: 2px 0 6px 0;
 }
 
 .settings-error {

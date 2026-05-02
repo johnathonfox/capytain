@@ -36,6 +36,30 @@ serde_json = { workspace = true }
 # any extra capability tokens — the plugin's default permission set
 # includes `notification:default` which `core:default` re-exports.
 tauri-plugin-notification = "2"
+# OS-native "launch on login" via the user's standard autostart
+# mechanism (libuv-style XDG `~/.config/autostart/qsl.desktop` on Linux,
+# Launch Agent on macOS, registry Run key on Windows). The plugin
+# writes / removes the autostart entry; we don't need to touch the
+# platform plumbing ourselves.
+tauri-plugin-autostart = "2"
+# Persist window position / size / maximized state between launches.
+# Saved per-window-label under the app's data dir; restored at window
+# creation. Filtered to the main + settings windows only — reader
+# popups have unique labels and the saved state would just bloat the
+# config file with one entry per message ever opened.
+tauri-plugin-window-state = "2"
+# Enforce a single running QSL instance per user. A second launch
+# (re-clicking the desktop entry, double-launching from the autostart
+# helper, etc.) sends its argv to the existing process and exits;
+# the running instance focuses its main window. Avoids two processes
+# fighting over the same SQLite WAL and the same IMAP IDLE slots.
+tauri-plugin-single-instance = "2"
+# Receive `mailto:` URLs from the OS so QSL can act as the default
+# email client. Plugin registers the scheme handler in the bundled
+# .desktop file / Info.plist / Windows registry, and surfaces both
+# cold-start (argv) and runtime (already-running) URL deliveries
+# through the same `on_open_url` callback.
+tauri-plugin-deep-link = "2"
 async-trait = { workspace = true }
 chrono = { workspace = true }
 # rustls is reached via tokio-rustls / hyper-rustls / lettre.

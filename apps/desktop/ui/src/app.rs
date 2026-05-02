@@ -266,6 +266,24 @@ pub struct ComposeState {
     /// Draft to rehydrate. `None` opens a fresh compose; `Some`
     /// pulls fields via `drafts_load` on mount.
     pub draft_id: Option<DraftId>,
+    /// Optional one-shot prefill (used by `mailto:` deep links). When
+    /// `draft_id` is `None` and `prefill` is `Some`, the compose
+    /// pane seeds its fields from this struct on first mount and
+    /// then forgets it — subsequent edits + autosaves treat the
+    /// pane as a fresh draft.
+    pub prefill: Option<ComposePrefill>,
+}
+
+/// One-shot prefill values for a fresh compose. Mirrors the subset of
+/// RFC 6068 mailto fields the desktop's deep-link handler parses;
+/// adding more fields here is a backward-compatible expansion.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ComposePrefill {
+    pub to: Option<String>,
+    pub cc: Option<String>,
+    pub bcc: Option<String>,
+    pub subject: Option<String>,
+    pub body: Option<String>,
 }
 
 /// Global revision counter, bumped on every `sync_event`. Drives
@@ -446,6 +464,28 @@ fn full_app_shell() -> Element {
     // UnifiedInbox, MessageListV2, ThreadRow). The rows reach for it
     // via `use_context::<Signal<Option<MessageContextMenu>>>()`.
     use_context_provider(|| context_menu);
+
+    // Drag-and-drop state. `Some(ids)` while a message-row drag is in
+    // flight; `None` otherwise. Sidebar rows read this to decide
+    // whether to highlight as a drop target (or paint a no-drop cursor
+    // for blocked roles), and `ondrop` reads the ids out for
+    // `messages_move`. Using a signal here instead of round-tripping
+    // through `dataTransfer` avoids JSON ser/de on every drag and keeps
+    // the drop guard a simple `is_some()` check in `ondragover`.
+    let drag_state: Signal<Option<Vec<MessageId>>> = use_signal(|| None);
+    use_context_provider(|| drag_state);
+    // Expose `bulk_selected` to the sidebar drop handlers so a drop
+    // can clear the multi-select set after a successful move (matches
+    // bulk-action-bar behaviour). Existing prop-threaded callers stay
+    // untouched.
+    use_context_provider(|| bulk_selected);
+    // Same pattern for `visible_messages` + `selection`: action
+    // handlers across the shell (sidebar drops, bulk-action-bar,
+    // context-menu) read these to compute the "next message after
+    // move" landing point so the reader pane doesn't get stranded
+    // showing a ghost copy of a message that's no longer in view.
+    use_context_provider(|| visible_messages);
+    use_context_provider(|| selection);
 
     // Capture cleared search queries into the recent ring buffer.
     // Watching the transition non-empty → empty avoids polluting the
@@ -667,6 +707,70 @@ fn full_app_shell() -> Element {
             let func = cb.as_ref().unchecked_ref::<js_sys::Function>();
             if let Err(e) = tauri_listen("app_settings_changed", func).await {
                 web_sys_log(&format!("app_settings_changed for reader listen: {e:?}"));
+            }
+            Box::leak(Box::new(cb));
+        });
+    });
+
+    // Listen for the system-tray "Compose" menu emitting `tray_compose`.
+    // Dioxus owns compose state via the `compose` signal; on the event
+    // we just open a fresh draft pane. Empty payload — the tray menu
+    // doesn't preselect an account, same as the sidebar Compose button.
+    use_hook(move || {
+        let mut compose_for_tray = compose;
+        let cb = Closure::<dyn FnMut(JsValue)>::new(move |_: JsValue| {
+            compose_for_tray.set(Some(ComposeState {
+                default_account: None,
+                draft_id: None,
+                prefill: None,
+            }));
+        });
+        wasm_bindgen_futures::spawn_local(async move {
+            let func = cb.as_ref().unchecked_ref::<js_sys::Function>();
+            if let Err(e) = tauri_listen("tray_compose", func).await {
+                web_sys_log(&format!("tray_compose listen failed: {e:?}"));
+            }
+            Box::leak(Box::new(cb));
+        });
+    });
+
+    // Listen for `mailto:` deep-link events emitted by the desktop
+    // shell. The Rust side parses the URL into a structured payload;
+    // we open a fresh compose pane with the parsed fields applied as
+    // a one-shot prefill. The compose pane treats these as fresh
+    // user input — autosave will persist them as a normal draft on
+    // first edit.
+    use_hook(move || {
+        let mut compose_for_mailto = compose;
+        let cb = Closure::<dyn FnMut(JsValue)>::new(move |payload: JsValue| {
+            #[derive(serde::Deserialize)]
+            struct Payload {
+                to: Option<String>,
+                cc: Option<String>,
+                bcc: Option<String>,
+                subject: Option<String>,
+                body: Option<String>,
+            }
+            let Ok(p) = serde_wasm_bindgen::from_value::<Payload>(payload) else {
+                web_sys_log("mailto_open: failed to deserialize payload");
+                return;
+            };
+            compose_for_mailto.set(Some(ComposeState {
+                default_account: None,
+                draft_id: None,
+                prefill: Some(ComposePrefill {
+                    to: p.to,
+                    cc: p.cc,
+                    bcc: p.bcc,
+                    subject: p.subject,
+                    body: p.body,
+                }),
+            }));
+        });
+        wasm_bindgen_futures::spawn_local(async move {
+            let func = cb.as_ref().unchecked_ref::<js_sys::Function>();
+            if let Err(e) = tauri_listen("mailto_open", func).await {
+                web_sys_log(&format!("mailto_open listen failed: {e:?}"));
             }
             Box::leak(Box::new(cb));
         });
@@ -935,6 +1039,7 @@ fn dispatch_keyboard_command(
             compose.set(Some(ComposeState {
                 default_account,
                 draft_id: None,
+                prefill: None,
             }));
         }
         KeyboardCommand::Cancel => {
@@ -988,6 +1093,15 @@ fn dispatch_keyboard_command(
             let Some(id) = selection.read().message.clone() else {
                 return;
             };
+            // Pre-compute next-selection target from the visible list
+            // *before* the IPC fires; otherwise the post-move refetch
+            // would race the read-back. Same pattern as the drag-drop
+            // handlers — see `format::next_selection_after_move`.
+            let next_sel = crate::format::next_selection_after_move(
+                &visible_messages.read(),
+                Some(&id),
+                std::slice::from_ref(&id),
+            );
             spawn(async move {
                 let payload = serde_json::json!({
                     "input": { "ids": [id.clone()] }
@@ -996,7 +1110,7 @@ fn dispatch_keyboard_command(
                     web_sys_log(&format!("messages_archive: {e}"));
                     return;
                 }
-                selection.with_mut(|s| s.message = None);
+                selection.with_mut(|s| s.message = next_sel);
                 sync_tick.with_mut(|t| *t = t.wrapping_add(1));
             });
         }
@@ -1004,6 +1118,11 @@ fn dispatch_keyboard_command(
             let Some(id) = selection.read().message.clone() else {
                 return;
             };
+            let next_sel = crate::format::next_selection_after_move(
+                &visible_messages.read(),
+                Some(&id),
+                std::slice::from_ref(&id),
+            );
             spawn(async move {
                 let payload = serde_json::json!({
                     "input": { "ids": [id.clone()] }
@@ -1012,7 +1131,7 @@ fn dispatch_keyboard_command(
                     web_sys_log(&format!("messages_delete: {e}"));
                     return;
                 }
-                selection.with_mut(|s| s.message = None);
+                selection.with_mut(|s| s.message = next_sel);
                 sync_tick.with_mut(|t| *t = t.wrapping_add(1));
             });
         }
@@ -1166,6 +1285,7 @@ fn MessageContextPopover(
         }
     };
 
+    let visible_messages = use_context::<Signal<Vec<MessageId>>>();
     let on_archive = {
         let id = message_id.clone();
         let mut sync_tick = sync_tick;
@@ -1174,17 +1294,33 @@ fn MessageContextPopover(
         move |_| {
             menu.set(None);
             let id = id.clone();
+            // Compute the next-selection target only when the
+            // right-clicked row IS the currently-open one — otherwise
+            // we'd hijack the reader's focus on a context action that
+            // had nothing to do with the open message.
+            let target_open = selection
+                .read()
+                .message
+                .as_ref()
+                .is_some_and(|m| m.0 == id.0);
+            let next_sel = if target_open {
+                crate::format::next_selection_after_move(
+                    &visible_messages.read(),
+                    Some(&id),
+                    std::slice::from_ref(&id),
+                )
+            } else {
+                None
+            };
             wasm_bindgen_futures::spawn_local(async move {
                 let payload = serde_json::json!({ "input": { "ids": [id.clone()] } });
                 if let Err(e) = invoke::<()>("messages_archive", payload).await {
                     web_sys_log(&format!("context archive: {e}"));
                     return;
                 }
-                selection.with_mut(|s| {
-                    if s.message.as_ref().is_some_and(|m| m.0 == id.0) {
-                        s.message = None;
-                    }
-                });
+                if target_open {
+                    selection.with_mut(|s| s.message = next_sel);
+                }
                 sync_tick.with_mut(|t| *t = t.wrapping_add(1));
             });
         }
@@ -1198,17 +1334,29 @@ fn MessageContextPopover(
         move |_| {
             menu.set(None);
             let id = id.clone();
+            let target_open = selection
+                .read()
+                .message
+                .as_ref()
+                .is_some_and(|m| m.0 == id.0);
+            let next_sel = if target_open {
+                crate::format::next_selection_after_move(
+                    &visible_messages.read(),
+                    Some(&id),
+                    std::slice::from_ref(&id),
+                )
+            } else {
+                None
+            };
             wasm_bindgen_futures::spawn_local(async move {
                 let payload = serde_json::json!({ "input": { "ids": [id.clone()] } });
                 if let Err(e) = invoke::<()>("messages_delete", payload).await {
                     web_sys_log(&format!("context delete: {e}"));
                     return;
                 }
-                selection.with_mut(|s| {
-                    if s.message.as_ref().is_some_and(|m| m.0 == id.0) {
-                        s.message = None;
-                    }
-                });
+                if target_open {
+                    selection.with_mut(|s| s.message = next_sel);
+                }
                 sync_tick.with_mut(|t| *t = t.wrapping_add(1));
             });
         }
@@ -1496,6 +1644,7 @@ fn CommandPalette(
                 compose.set(Some(ComposeState {
                     default_account,
                     draft_id: None,
+                    prefill: None,
                 }));
             }
             PaletteEntry::Command(PaletteCommand::OpenSettings) => {
@@ -2170,6 +2319,41 @@ fn ComposePane(
     // sees the correct `In-Reply-To` / `References` in storage.
     let mut in_reply_to = use_signal(|| None::<String>);
     let mut references = use_signal(Vec::<String>::new);
+
+    // One-shot prefill from a `mailto:` deep-link (or any other
+    // ComposeState carrying `prefill`). Only applies when no
+    // draft_id was supplied — drafts override prefills, since the
+    // saved draft is by definition the authoritative copy.
+    use_hook({
+        let prefill = initial.prefill.clone();
+        let has_draft = initial.draft_id.is_some();
+        move || {
+            if has_draft {
+                return;
+            }
+            let Some(p) = prefill else {
+                return;
+            };
+            if let Some(v) = p.to {
+                to_str.set(v);
+            }
+            if let Some(v) = p.cc {
+                cc_str.set(v);
+            }
+            if let Some(v) = p.bcc {
+                if !v.trim().is_empty() {
+                    bcc_revealed.set(true);
+                    bcc_str.set(v);
+                }
+            }
+            if let Some(v) = p.subject {
+                subject.set(v);
+            }
+            if let Some(v) = p.body {
+                body.set(v);
+            }
+        }
+    });
 
     // One-shot draft hydration. `use_hook` runs at mount; the
     // dependency-free `use_future` would refire on every render.
@@ -3294,7 +3478,8 @@ fn SidebarV2(
                     compose.set(Some(ComposeState {
                         default_account: None,
                         draft_id: None,
-                    }));
+                prefill: None,
+            }));
                 },
                 span { class: "sidebar-compose-plus", "+" }
                 "Compose"
@@ -3438,6 +3623,7 @@ fn SidebarAccountBlock(
                             folder: f,
                             account_id: account.id.clone(),
                             selection,
+                            sync_tick,
                         }
                     }
                     if !labels.is_empty() {
@@ -3447,6 +3633,7 @@ fn SidebarAccountBlock(
                                 folder: f,
                                 account_id: account.id.clone(),
                                 selection,
+                                sync_tick,
                             }
                         }
                     }
@@ -3461,6 +3648,7 @@ fn SidebarMailboxRow(
     folder: Folder,
     account_id: AccountId,
     selection: Signal<Selection>,
+    sync_tick: SyncTick,
 ) -> Element {
     let is_selected = selection
         .read()
@@ -3469,9 +3657,100 @@ fn SidebarMailboxRow(
         .is_some_and(|f| f.0 == folder.id.0);
     let unread = folder.unread_count;
     let role = folder.role.clone();
+    let drop_blocked = crate::format::is_drop_blocked(role.as_ref());
+    let drag_state = use_context::<Signal<Option<Vec<MessageId>>>>();
+    let mut drop_hover = use_signal(|| false);
+
+    // Class composition mirrors the existing `selected` rule, plus
+    // drag-time decorations: `drop-target` highlights the row currently
+    // hovered by a valid drag, `drop-blocked` paints a no-drop cursor
+    // on Important / Flagged / All while *any* drag is in flight (so
+    // the user sees they can't aim there before they release).
+    let drag_in_flight = drag_state.read().is_some();
+    let row_class = match (
+        is_selected,
+        drag_in_flight,
+        drop_blocked,
+        *drop_hover.read(),
+    ) {
+        (true, _, _, _) => "sidebar-row selected".to_string(),
+        (false, true, true, _) => "sidebar-row sidebar-row-drop-blocked".to_string(),
+        (false, true, false, true) => "sidebar-row sidebar-row-drop-target".to_string(),
+        _ => "sidebar-row".to_string(),
+    };
+
+    let folder_id_for_drop = folder.id.clone();
     rsx! {
         div {
-            class: if is_selected { "sidebar-row selected" } else { "sidebar-row" },
+            class: "{row_class}",
+            ondragover: move |evt: Event<DragData>| {
+                if drag_in_flight && !drop_blocked {
+                    // `prevent_default` is the HTML5 contract that
+                    // turns `dragover` into a legal drop target. Set
+                    // the hover flag *here* (continuously, while
+                    // the cursor is over the row) rather than only
+                    // on `dragenter`, because HTML5 fires spurious
+                    // `dragleave` events whenever the cursor crosses
+                    // a child element's boundary — leaving the
+                    // highlight to flicker. `peek` first so we don't
+                    // re-render every dragover tick.
+                    evt.prevent_default();
+                    if !*drop_hover.peek() {
+                        web_sys_log("dnd ondragover: hover=true");
+                        drop_hover.set(true);
+                    }
+                }
+            },
+            ondragleave: move |_: Event<DragData>| {
+                drop_hover.set(false);
+            },
+            ondrop: {
+                let target = folder_id_for_drop.clone();
+                let mut drag_state_w = drag_state;
+                let mut bulk_selected = use_context::<Signal<HashSet<MessageId>>>();
+                let visible_messages = use_context::<Signal<Vec<MessageId>>>();
+                let mut sync_tick = sync_tick;
+                let mut selection_w = selection;
+                move |evt: Event<DragData>| {
+                    web_sys_log("dnd ondrop: fired");
+                    drop_hover.set(false);
+                    if drop_blocked {
+                        web_sys_log("dnd ondrop: blocked role, abort");
+                        return;
+                    }
+                    let Some(ids) = drag_state_w.write().take() else {
+                        web_sys_log("dnd ondrop: drag_state empty");
+                        return;
+                    };
+                    if ids.is_empty() {
+                        return;
+                    }
+                    evt.prevent_default();
+                    let target = target.clone();
+                    // Snapshot the next-selection target *now*, before
+                    // the IPC removes the dragged ids from the local
+                    // view. Computed against the visible list as the
+                    // user sees it; the post-move refetch will update
+                    // it and our chosen id will still be in there.
+                    let next_sel = crate::format::next_selection_after_move(
+                        &visible_messages.read(),
+                        selection_w.read().message.as_ref(),
+                        &ids,
+                    );
+                    spawn(async move {
+                        let payload = serde_json::json!({
+                            "input": { "ids": ids, "target": target },
+                        });
+                        if let Err(e) = invoke::<()>("messages_move", payload).await {
+                            web_sys_log(&format!("dnd messages_move: {e}"));
+                            return;
+                        }
+                        bulk_selected.with_mut(|s| s.clear());
+                        selection_w.with_mut(|s| s.message = next_sel);
+                        sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+                    });
+                }
+            },
             onclick: {
                 let folder_id = folder.id.clone();
                 let account_id = account_id.clone();
@@ -3502,7 +3781,12 @@ fn SidebarMailboxRow(
 }
 
 #[component]
-fn SidebarLabelRow(folder: Folder, account_id: AccountId, selection: Signal<Selection>) -> Element {
+fn SidebarLabelRow(
+    folder: Folder,
+    account_id: AccountId,
+    selection: Signal<Selection>,
+    sync_tick: SyncTick,
+) -> Element {
     let is_selected = selection
         .read()
         .folder
@@ -3510,9 +3794,75 @@ fn SidebarLabelRow(folder: Folder, account_id: AccountId, selection: Signal<Sele
         .is_some_and(|f| f.0 == folder.id.0);
     let unread = folder.unread_count;
     let color = label_color(&folder.name);
+    let drop_blocked = crate::format::is_drop_blocked(folder.role.as_ref());
+    let drag_state = use_context::<Signal<Option<Vec<MessageId>>>>();
+    let mut drop_hover = use_signal(|| false);
+    let drag_in_flight = drag_state.read().is_some();
+    let row_class = match (
+        is_selected,
+        drag_in_flight,
+        drop_blocked,
+        *drop_hover.read(),
+    ) {
+        (true, _, _, _) => "sidebar-row selected".to_string(),
+        (false, true, true, _) => "sidebar-row sidebar-row-drop-blocked".to_string(),
+        (false, true, false, true) => "sidebar-row sidebar-row-drop-target".to_string(),
+        _ => "sidebar-row".to_string(),
+    };
+    let folder_id_for_drop = folder.id.clone();
     rsx! {
         div {
-            class: if is_selected { "sidebar-row selected" } else { "sidebar-row" },
+            class: "{row_class}",
+            ondragover: move |evt: Event<DragData>| {
+                if drag_in_flight && !drop_blocked {
+                    evt.prevent_default();
+                    if !*drop_hover.peek() {
+                        drop_hover.set(true);
+                    }
+                }
+            },
+            ondragleave: move |_: Event<DragData>| {
+                drop_hover.set(false);
+            },
+            ondrop: {
+                let target = folder_id_for_drop.clone();
+                let mut drag_state_w = drag_state;
+                let mut bulk_selected = use_context::<Signal<HashSet<MessageId>>>();
+                let visible_messages = use_context::<Signal<Vec<MessageId>>>();
+                let mut sync_tick = sync_tick;
+                let mut selection_w = selection;
+                move |evt: Event<DragData>| {
+                    drop_hover.set(false);
+                    if drop_blocked {
+                        return;
+                    }
+                    let Some(ids) = drag_state_w.write().take() else {
+                        return;
+                    };
+                    if ids.is_empty() {
+                        return;
+                    }
+                    evt.prevent_default();
+                    let target = target.clone();
+                    let next_sel = crate::format::next_selection_after_move(
+                        &visible_messages.read(),
+                        selection_w.read().message.as_ref(),
+                        &ids,
+                    );
+                    spawn(async move {
+                        let payload = serde_json::json!({
+                            "input": { "ids": ids, "target": target },
+                        });
+                        if let Err(e) = invoke::<()>("messages_move", payload).await {
+                            web_sys_log(&format!("dnd messages_move (label): {e}"));
+                            return;
+                        }
+                        bulk_selected.with_mut(|s| s.clear());
+                        selection_w.with_mut(|s| s.message = next_sel);
+                        sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+                    });
+                }
+            },
             onclick: {
                 let folder_id = folder.id.clone();
                 let account_id = account_id.clone();
@@ -3863,6 +4213,12 @@ fn BulkActionBar(bulk_selected: Signal<HashSet<MessageId>>, sync_tick: SyncTick)
         bulk_selected.read().iter().cloned().collect()
     };
 
+    // Reader-pane auto-advance after a bulk archive / delete: same
+    // helper as the keyboard / context-menu / drag-drop paths, just
+    // with a multi-id moved cohort.
+    let visible_messages = use_context::<Signal<Vec<MessageId>>>();
+    let selection_ctx = use_context::<Signal<Selection>>();
+
     rsx! {
         div {
             class: "bulk-action-bar",
@@ -3874,11 +4230,22 @@ fn BulkActionBar(bulk_selected: Signal<HashSet<MessageId>>, sync_tick: SyncTick)
                 onclick: {
                     let mut bulk_selected = bulk_selected;
                     let mut sync_tick = sync_tick;
+                    let mut selection_w = selection_ctx;
                     move |_| {
                         let ids = snapshot_ids(bulk_selected);
                         if ids.is_empty() {
                             return;
                         }
+                        let next_sel = crate::format::next_selection_after_move(
+                            &visible_messages.read(),
+                            selection_w.read().message.as_ref(),
+                            &ids,
+                        );
+                        let selection_changes = selection_w
+                            .read()
+                            .message
+                            .as_ref()
+                            .is_some_and(|m| ids.iter().any(|i| i.0 == m.0));
                         spawn(async move {
                             let payload = serde_json::json!({ "input": { "ids": ids } });
                             if let Err(e) = invoke::<()>("messages_archive", payload).await {
@@ -3886,6 +4253,9 @@ fn BulkActionBar(bulk_selected: Signal<HashSet<MessageId>>, sync_tick: SyncTick)
                                 return;
                             }
                             bulk_selected.with_mut(|s| s.clear());
+                            if selection_changes {
+                                selection_w.with_mut(|s| s.message = next_sel);
+                            }
                             sync_tick.with_mut(|t| *t = t.wrapping_add(1));
                         });
                     }
@@ -3953,11 +4323,22 @@ fn BulkActionBar(bulk_selected: Signal<HashSet<MessageId>>, sync_tick: SyncTick)
                 onclick: {
                     let mut bulk_selected = bulk_selected;
                     let mut sync_tick = sync_tick;
+                    let mut selection_w = selection_ctx;
                     move |_| {
                         let ids = snapshot_ids(bulk_selected);
                         if ids.is_empty() {
                             return;
                         }
+                        let next_sel = crate::format::next_selection_after_move(
+                            &visible_messages.read(),
+                            selection_w.read().message.as_ref(),
+                            &ids,
+                        );
+                        let selection_changes = selection_w
+                            .read()
+                            .message
+                            .as_ref()
+                            .is_some_and(|m| ids.iter().any(|i| i.0 == m.0));
                         spawn(async move {
                             let payload = serde_json::json!({ "input": { "ids": ids } });
                             if let Err(e) = invoke::<()>("messages_delete", payload).await {
@@ -3965,6 +4346,9 @@ fn BulkActionBar(bulk_selected: Signal<HashSet<MessageId>>, sync_tick: SyncTick)
                                 return;
                             }
                             bulk_selected.with_mut(|s| s.clear());
+                            if selection_changes {
+                                selection_w.with_mut(|s| s.message = next_sel);
+                            }
                             sync_tick.with_mut(|t| *t = t.wrapping_add(1));
                         });
                     }
@@ -4375,9 +4759,42 @@ fn MessageRowV2(
         }));
     };
 
+    // Drag source: dragging a row publishes the drag set into the
+    // shared `drag_state` signal so sidebar rows can detect it. If the
+    // dragged row is bulk-checked, drag every checked id (Gmail / Apple
+    // Mail behaviour). Otherwise drag just this one id.
+    let mut drag_state = use_context::<Signal<Option<Vec<MessageId>>>>();
+    let id_for_drag = msg.id.clone();
+    let ondragstart = move |evt: Event<DragData>| {
+        let id = id_for_drag.clone();
+        let ids = {
+            let set = bulk_selected.read();
+            if set.contains(&id) {
+                set.iter().cloned().collect::<Vec<_>>()
+            } else {
+                vec![id]
+            }
+        };
+        // webkit2gtk requires `dataTransfer.setData()` during
+        // dragstart or it cancels the drag silently. The payload
+        // itself is unused — we read ids back from `drag_state`.
+        let _ = evt
+            .data_transfer()
+            .set_data("application/x-qsl-message-ids", &ids.len().to_string());
+        web_sys_log(&format!("dnd ondragstart: {} ids", ids.len()));
+        drag_state.set(Some(ids));
+    };
+    let ondragend = move |_: Event<DragData>| {
+        web_sys_log("dnd ondragend");
+        drag_state.set(None);
+    };
+
     rsx! {
         div {
             class: row_class,
+            draggable: "true",
+            ondragstart: ondragstart,
+            ondragend: ondragend,
             onclick: {
                 let mid = msg.id.clone();
                 move |_| selection.write().message = Some(mid.clone())
@@ -4523,11 +4940,42 @@ fn ThreadRow(
         }));
     };
 
+    // Drag source: dragging the thread row drags every member id
+    // (matches the all-or-nothing checkbox semantic above). If any
+    // member is in `bulk_selected`, drag the whole bulk set instead so
+    // a multi-row drag scoops the thread along with its neighbours.
+    let mut drag_state = use_context::<Signal<Option<Vec<MessageId>>>>();
+    let member_ids_for_drag: Vec<MessageId> = members.iter().map(|m| m.id.clone()).collect();
+    let ondragstart = move |evt: Event<DragData>| {
+        let any_in_bulk = {
+            let set = bulk_selected.read();
+            member_ids_for_drag.iter().any(|id| set.contains(id))
+        };
+        let ids = if any_in_bulk {
+            bulk_selected.read().iter().cloned().collect::<Vec<_>>()
+        } else {
+            member_ids_for_drag.clone()
+        };
+        // webkit2gtk-required setData (see MessageRowV2::ondragstart).
+        let _ = evt
+            .data_transfer()
+            .set_data("application/x-qsl-message-ids", &ids.len().to_string());
+        web_sys_log(&format!("dnd ondragstart (thread): {} ids", ids.len()));
+        drag_state.set(Some(ids));
+    };
+    let ondragend = move |_: Event<DragData>| {
+        web_sys_log("dnd ondragend (thread)");
+        drag_state.set(None);
+    };
+
     rsx! {
         div {
             class: group_class,
             div {
                 class: row_class,
+                draggable: "true",
+                ondragstart: ondragstart,
+                ondragend: ondragend,
                 onclick: {
                     let mid = head.id.clone();
                     let mut selection = selection;
@@ -4725,6 +5173,7 @@ fn open_reply(
                 compose.set(Some(ComposeState {
                     default_account: Some(account_id),
                     draft_id: Some(draft_id),
+                    prefill: None,
                 }));
             }
             Err(e) => {
@@ -4904,8 +5353,14 @@ fn ReaderV2(
                                 let id = rendered.headers.id.clone();
                                 let mut selection = selection;
                                 let mut sync_tick = sync_tick;
+                                let visible_messages = use_context::<Signal<Vec<MessageId>>>();
                                 move |_| {
                                     let id = id.clone();
+                                    let next_sel = crate::format::next_selection_after_move(
+                                        &visible_messages.read(),
+                                        Some(&id),
+                                        std::slice::from_ref(&id),
+                                    );
                                     spawn(async move {
                                         let payload = serde_json::json!({
                                             "input": { "ids": [id.clone()] }
@@ -4916,7 +5371,7 @@ fn ReaderV2(
                                             web_sys_log(&format!("messages_archive: {e}"));
                                             return;
                                         }
-                                        selection.with_mut(|sel| sel.message = None);
+                                        selection.with_mut(|sel| sel.message = next_sel);
                                         sync_tick.with_mut(|t| *t = t.wrapping_add(1));
                                     });
                                 }
@@ -4993,8 +5448,14 @@ fn ReaderV2(
                                 let id = rendered.headers.id.clone();
                                 let mut selection = selection;
                                 let mut sync_tick = sync_tick;
+                                let visible_messages = use_context::<Signal<Vec<MessageId>>>();
                                 move |_| {
                                     let id = id.clone();
+                                    let next_sel = crate::format::next_selection_after_move(
+                                        &visible_messages.read(),
+                                        Some(&id),
+                                        std::slice::from_ref(&id),
+                                    );
                                     spawn(async move {
                                         let payload = serde_json::json!({
                                             "input": { "ids": [id.clone()] }
@@ -5005,7 +5466,7 @@ fn ReaderV2(
                                             web_sys_log(&format!("messages_delete: {e}"));
                                             return;
                                         }
-                                        selection.with_mut(|sel| sel.message = None);
+                                        selection.with_mut(|sel| sel.message = next_sel);
                                         sync_tick.with_mut(|t| *t = t.wrapping_add(1));
                                     });
                                 }
