@@ -3667,7 +3667,7 @@ fn MessageListPaneV2(
                         }
                     },
                     Some(fid) => rsx! {
-                        MessageListV2 { folder: fid, selection, folder_tokens, bulk_selected, visible_messages }
+                        MessageListV2 { folder: fid, selection, sync_tick, folder_tokens, bulk_selected, visible_messages }
                     },
                 }
             }
@@ -4043,26 +4043,46 @@ fn UnifiedMessageListV2(
 fn MessageListV2(
     folder: FolderId,
     selection: Signal<Selection>,
+    sync_tick: SyncTick,
     folder_tokens: FolderTokens,
     bulk_selected: Signal<HashSet<MessageId>>,
     visible_messages: Signal<Vec<MessageId>>,
 ) -> Element {
     let mut visible_limit = use_signal(|| 200u32);
+    // Inline-read pattern (per feedback_dioxus_use_resource_reactive.md):
+    // `use_reactive!` has been observed to miss the first signal change
+    // on at least one component, so read the signals inside the closure
+    // and let Dioxus's hook runtime track the deps directly.
+    //
+    // Three deps:
+    // - `folder_tokens[folder]` — bumped by backend `sync_event` for this
+    //   specific folder; per-folder so an unrelated folder syncing
+    //   doesn't fan out a refetch here.
+    // - `sync_tick` — bumped by client-initiated actions (context menu
+    //   Archive/Delete/Mark-read, bulk bar, keyboard shortcuts). Those
+    //   write straight to the local DB and never round-trip through the
+    //   sync engine, so `folder_tokens` is never bumped for them.
+    // - `visible_limit` — paginated load-older.
     let folder_for_fetch = folder.clone();
-    // Read this folder's per-folder token. Reading the signal here
-    // makes use_reactive! see a u64 dep that only changes when *this*
-    // folder synced — refetches no longer fan out across all open
-    // message lists when an unrelated folder pushes an event.
-    let tick_value = folder_tokens.read().get(&folder).copied().unwrap_or(0u64);
-    let limit_value = visible_limit();
-    let page = use_resource(use_reactive!(
-        |folder_for_fetch, tick_value, limit_value| async move {
-            let _ = tick_value;
+    let folder_for_token_read = folder.clone();
+    let folder_tokens_for_fetch = folder_tokens;
+    let mut sync_tick_for_fetch = sync_tick;
+    let page = use_resource(move || {
+        let folder = folder_for_fetch.clone();
+        let folder_for_token = folder_for_token_read.clone();
+        let _ = folder_tokens_for_fetch
+            .read()
+            .get(&folder_for_token)
+            .copied()
+            .unwrap_or(0u64);
+        let _ = sync_tick_for_fetch();
+        let limit_value = visible_limit();
+        async move {
             invoke::<MessagePage>(
                 "messages_list",
                 serde_json::json!({
                     "input": {
-                        "folder": folder_for_fetch,
+                        "folder": folder,
                         "limit": limit_value,
                         "offset": 0,
                         "sort": SortOrder::DateDesc,
@@ -4071,7 +4091,7 @@ fn MessageListV2(
             )
             .await
         }
-    ));
+    });
 
     // Lazy-fetch new IMAP messages whenever this folder is opened.
     // Fires once per `folder` value change. The Tauri command emits
