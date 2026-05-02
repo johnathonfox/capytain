@@ -30,8 +30,16 @@ pub fn compose_reader_html(body_html: Option<&str>, body_text: Option<&str>) -> 
     // CSP applied inside the iframe srcdoc as a defence-in-depth layer
     // behind the ammonia allowlist + adblock filter. `default-src 'none'`
     // blocks every fetch except what we explicitly permit:
-    //   - `img-src data: https:` so per-sender opt-in remote images and
-    //     inline data URIs render; `http:` and other schemes are blocked.
+    //   - `img-src data: https: http:` covers per-sender / global
+    //     opt-in remote images plus inline data URIs. `http:` is in
+    //     the list because plenty of legitimate marketing email
+    //     (Apple Store survey, older Mailchimp templates) ship
+    //     image URLs over plain HTTP. Once the sanitizer has let a
+    //     URL through (the user opted in per-sender or globally),
+    //     blocking it again at the CSP layer is just user-hostile.
+    //     The sanitizer is the privacy gate; the CSP shuts off
+    //     non-image / non-data egress (script-src, connect-src,
+    //     frame-src, etc.).
     //   - `style-src 'unsafe-inline'` because the wrapper's <style>
     //     block is inline and email content keeps its `style="..."`
     //     attributes.
@@ -49,7 +57,7 @@ pub fn compose_reader_html(body_html: Option<&str>, body_text: Option<&str>) -> 
 <html>
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: https:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: https: http:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
   <style>
     body {{
       font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -224,16 +232,21 @@ mod tests {
         }
     }
 
-    /// `img-src` must NOT cover `http:` — remote-image opt-in routes
-    /// through `https` URLs only after the per-sender allowlist clears.
-    /// Catching this in a unit test means a careless edit to the CSP
-    /// can't silently widen the egress surface.
+    /// `img-src` must include `data:`, `https:`, AND `http:` so
+    /// real-world email (lots of marketing / transactional senders
+    /// still ship image URLs over plain HTTP) can render once the
+    /// sanitizer has let the URL through. The sanitizer is the
+    /// remote-content opt-in gate; the CSP's job is to shut off
+    /// non-image egress (script-src, connect-src, etc.), not to
+    /// second-guess image scheme decisions.
+    ///
+    /// Conversely, `default-src 'none'` must remain so the absence
+    /// of any other `*-src` directive blocks every other request
+    /// type — that's what enforces "no script egress, no font egress,
+    /// no fetch, no frame loads, no top-level navigation."
     #[test]
-    fn reader_doc_csp_disallows_http_images() {
+    fn reader_doc_csp_img_src_covers_http_https_data() {
         let out = compose_reader_html(Some("<p>x</p>"), None);
-        // The directive should permit `data:` and `https:` but no
-        // bare `http:` scheme. Walk the string for the `img-src`
-        // segment and inspect.
         let csp_start = out
             .find("Content-Security-Policy")
             .expect("CSP meta missing");
@@ -242,10 +255,13 @@ mod tests {
         let img_src_segment = &csp_chunk[img_src_start..];
         let img_src_end = img_src_segment.find(';').unwrap_or(img_src_segment.len());
         let img_src = &img_src_segment[..img_src_end];
-        assert!(
-            !img_src.contains("http:") || img_src.contains("https:"),
-            "img-src must not allow plain `http:`: {img_src}"
-        );
+        for needed in ["data:", "https:", "http:"] {
+            assert!(
+                img_src.contains(needed),
+                "img-src missing `{needed}`: {img_src}"
+            );
+        }
+        assert!(out.contains("default-src 'none'"));
     }
 
     #[test]
