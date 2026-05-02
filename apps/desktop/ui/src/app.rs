@@ -2320,6 +2320,49 @@ fn ComposePane(
     let mut in_reply_to = use_signal(|| None::<String>);
     let mut references = use_signal(Vec::<String>::new);
 
+    // Inline spell-check toggle (`compose.spellcheck`). Read once at
+    // mount, default-on if unset, then live-updated via the same
+    // `app_settings_changed` event the appearance hooks use — so
+    // toggling the Settings checkbox flips underline rendering on
+    // the open compose pane without re-mounting it.
+    let mut spellcheck_on = use_signal(|| true);
+    use_hook(move || {
+        wasm_bindgen_futures::spawn_local(async move {
+            let v = invoke::<Option<String>>(
+                "app_settings_get",
+                serde_json::json!({ "input": { "key": crate::settings::KEY_SPELLCHECK } }),
+            )
+            .await
+            .ok()
+            .flatten();
+            // Stored as "true"/"false" strings; absent → default on.
+            let on = !matches!(v.as_deref(), Some("false"));
+            spellcheck_on.set(on);
+        });
+    });
+    use_hook(move || {
+        let cb = Closure::<dyn FnMut(JsValue)>::new(move |payload: JsValue| {
+            #[derive(serde::Deserialize)]
+            struct Changed {
+                key: String,
+                value: String,
+            }
+            let Ok(evt) = serde_wasm_bindgen::from_value::<Changed>(payload) else {
+                return;
+            };
+            if evt.key == crate::settings::KEY_SPELLCHECK {
+                spellcheck_on.set(evt.value != "false");
+            }
+        });
+        wasm_bindgen_futures::spawn_local(async move {
+            let func = cb.as_ref().unchecked_ref::<js_sys::Function>();
+            if let Err(e) = tauri_listen("app_settings_changed", func).await {
+                web_sys_log(&format!("compose spellcheck listen failed: {e:?}"));
+            }
+            Box::leak(Box::new(cb));
+        });
+    });
+
     // One-shot prefill from a `mailto:` deep-link (or any other
     // ComposeState carrying `prefill`). Only applies when no
     // draft_id was supplied — drafts override prefills, since the
@@ -2903,6 +2946,7 @@ fn ComposePane(
                             id: "compose-subject",
                             class: "compose-input",
                             r#type: "text",
+                            spellcheck: if *spellcheck_on.read() { "true" } else { "false" },
                             value: "{subject}",
                             oninput: {
                                 let mut bump = bump;
@@ -2925,6 +2969,7 @@ fn ComposePane(
                         class: "compose-body",
                         rows: "20",
                         placeholder: "Write your message…",
+                        spellcheck: if *spellcheck_on.read() { "true" } else { "false" },
                         value: "{body}",
                         oninput: {
                             let mut bump = bump;

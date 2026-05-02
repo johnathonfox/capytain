@@ -980,6 +980,13 @@ pub fn compose_signature_key(account_id: &AccountId) -> String {
 /// `"5"`, `"10"`, `"30"` (seconds).
 pub const KEY_UNDO_SEND: &str = "compose.undo_send";
 
+/// Setting that toggles inline spell-checking on the compose subject
+/// and body fields. webkit2gtk reads the standard `spellcheck="true"`
+/// HTML attribute and uses the system hunspell dictionaries; on macOS
+/// / Windows the platform webview's native spell-checker takes over
+/// the same way. Default: on.
+pub const KEY_SPELLCHECK: &str = "compose.spellcheck";
+
 #[component]
 fn ComposeTab(tick: SettingsTick) -> Element {
     let tick_value = *tick.read();
@@ -1007,6 +1014,21 @@ fn ComposeTab(tick: SettingsTick) -> Element {
                 class: "settings-note",
                 "After Send, your message holds in a status-bar countdown. "
                 "Press Esc within the window to cancel."
+            }
+
+            h2 { class: "settings-section-title", "Editor" }
+            BoolSettingRow {
+                setting_key: KEY_SPELLCHECK,
+                label: "Check spelling as you type",
+                default_on: true,
+                tick,
+            }
+            p {
+                class: "settings-note",
+                "Subject and body fields use the system spell-checker. "
+                "On Linux this is hunspell — install the dictionary "
+                "package for your language (e.g. hunspell-en_US) if "
+                "underlines aren't appearing."
             }
 
             h2 { class: "settings-section-title", "Signatures" }
