@@ -36,6 +36,7 @@ static PROFILE: ProviderProfile = ProviderProfile {
     client_secret: env!("QSL_GMAIL_CLIENT_SECRET"),
     authorization_url: "https://accounts.google.com/o/oauth2/v2/auth",
     token_url: "https://oauth2.googleapis.com/token",
+    revocation_url: "https://oauth2.googleapis.com/revoke",
     scopes: &["https://mail.google.com/"],
     kind: ProviderKind::ImapSmtp,
 };
