@@ -23,7 +23,7 @@
 
 use std::time::Duration;
 
-use qsl_core::{AccountId, BackendEvent};
+use qsl_core::{AccountId, BackendEvent, MailError, StorageError};
 use qsl_jmap_client::{dial_client, watch_account};
 use tauri::{AppHandle, Manager};
 use tokio::sync::mpsc;
@@ -51,6 +51,18 @@ pub fn spawn_watcher(
             match watch_one_session(&app, &account_id, &tx).await {
                 Ok(()) => return,
                 Err(e) => {
+                    // Account-removed self-cancel: same as imap_idle.
+                    // fresh_jmap_params returns NotFound after the row
+                    // is dropped — exit cleanly so the task drops, the
+                    // forwarder's tx clone goes with it, and the sync
+                    // engine reaps the empty receiver naturally.
+                    if matches!(e, MailError::Storage(StorageError::NotFound)) {
+                        info!(
+                            account = %account_id.0,
+                            "JMAP push watcher exiting: account removed"
+                        );
+                        return;
+                    }
                     warn!(
                         account = %account_id.0,
                         "JMAP push watcher error: {e}; reconnecting in {backoff:?}"

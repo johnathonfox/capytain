@@ -135,6 +135,23 @@ impl BlobStore {
         }
     }
 
+    /// Wipe every blob owned by `account`. Used by `accounts_remove`
+    /// because the database CASCADE drops the `messages` rows but
+    /// can't reach across the FFI boundary to clean the on-disk
+    /// `<data_dir>/blobs/<account_id>/` tree — without this call
+    /// the bodies linger as orphan files until `mailcli reset`.
+    /// Missing directory is treated as success (a fresh account that
+    /// never had any bodies persisted yet still goes through this
+    /// path on remove).
+    pub async fn delete_account(&self, account: &AccountId) -> Result<(), StorageError> {
+        let path = self.root.join(sanitize_path_component(&account.0));
+        match tokio::fs::remove_dir_all(&path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(err_io(e)),
+        }
+    }
+
     /// Absolute path a blob *would* live at, whether or not it exists.
     ///
     /// Each ID component is percent-encoded against the Windows filename

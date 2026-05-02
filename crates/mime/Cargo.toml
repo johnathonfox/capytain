@@ -14,15 +14,13 @@ publish.workspace = true
 [dependencies]
 adblock = { workspace = true }
 ammonia = { workspace = true }
+base64 = { workspace = true }
 qsl-core = { workspace = true }
 chrono = { workspace = true }
 mail-builder = { workspace = true }
 mail-parser = { workspace = true }
 rand = { workspace = true }
 thiserror = { workspace = true }
-
-[dev-dependencies]
-base64 = { workspace = true }
 
 [lints]
 workspace = true

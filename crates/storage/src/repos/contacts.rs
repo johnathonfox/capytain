@@ -192,3 +192,18 @@ pub async fn query_prefix(
         })
         .collect()
 }
+
+/// Wipe every row in `contacts_v1`. Called by `accounts_remove` when
+/// the last account is removed — without this, the autocomplete
+/// table keeps every email address the user has ever corresponded
+/// with even after the originating account is gone, which the user
+/// reasonably reads as "identity information sticking around after
+/// I deleted my account." Per-account scoping isn't possible here
+/// because `contacts_v1` doesn't carry an `account_id` column
+/// (schema design limit, see migration 0006); switching to a global
+/// truncate-on-empty policy is the pragmatic shape.
+pub async fn clear_all(conn: &dyn DbConn) -> Result<(), StorageError> {
+    conn.execute("DELETE FROM contacts_v1", Params::empty())
+        .await
+        .map(|_| ())
+}

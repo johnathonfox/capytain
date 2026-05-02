@@ -280,9 +280,18 @@ pub async fn fresh_imap_params(
     account_id: &AccountId,
 ) -> Result<ImapDialParams, MailError> {
     let db = state.db.lock().await;
-    let account = repos::accounts::get(&*db, account_id)
-        .await
-        .map_err(|e| MailError::Other(format!("loading account {} for IDLE: {e}", account_id.0)))?;
+    // NotFound stays NotFound (StorageError::NotFound -> MailError::Storage
+    // via the From impl on MailError) so the IDLE watcher loop can detect
+    // "account was removed under us" and exit cleanly instead of
+    // reconnecting forever. Other errors collapse to Other so the message
+    // includes the account id for debuggability.
+    let account = repos::accounts::get(&*db, account_id).await.map_err(|e| {
+        if matches!(e, qsl_core::StorageError::NotFound) {
+            MailError::Storage(qsl_core::StorageError::NotFound)
+        } else {
+            MailError::Other(format!("loading account {} for IDLE: {e}", account_id.0))
+        }
+    })?;
     drop(db);
 
     if !matches!(account.kind, BackendKind::ImapSmtp) {
@@ -331,11 +340,17 @@ pub async fn fresh_jmap_params(
     account_id: &AccountId,
 ) -> Result<JmapDialParams, MailError> {
     let db = state.db.lock().await;
+    // Preserve NotFound so the JMAP push watcher can self-cancel on
+    // account removal — same shape as `fresh_imap_params`.
     let account = repos::accounts::get(&*db, account_id).await.map_err(|e| {
-        MailError::Other(format!(
-            "loading account {} for JMAP push: {e}",
-            account_id.0
-        ))
+        if matches!(e, qsl_core::StorageError::NotFound) {
+            MailError::Storage(qsl_core::StorageError::NotFound)
+        } else {
+            MailError::Other(format!(
+                "loading account {} for JMAP push: {e}",
+                account_id.0
+            ))
+        }
     })?;
     drop(db);
 

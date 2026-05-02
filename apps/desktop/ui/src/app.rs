@@ -573,9 +573,52 @@ fn full_app_shell() -> Element {
     // sync's first FolderSynced event to arrive — that latency was
     // the gap users were noticing as "I removed the account but
     // it's still in the sidebar."
+    //
+    // After the bump, we also validate global selection state against
+    // the fresh accounts list and clear anything that referenced the
+    // removed account. Without this step, removing the currently-
+    // selected account leaves the message list and reader pane
+    // painting rows from the deleted account until the user
+    // navigates elsewhere or reloads — the storage-side CASCADE
+    // wiped the rows, but the UI's cached `Selection` still pointed
+    // at a now-empty folder. Validates instead of clearing
+    // unconditionally so adding a new account doesn't disrupt the
+    // user's current view of an existing one.
+    let mut selection_for_listener = selection;
+    let mut bulk_for_listener = bulk_selected;
+    let mut visible_for_listener = visible_messages;
+    let mut compose_for_listener = compose;
+    let mut folder_tokens_for_listener = folder_tokens;
     use_hook(move || {
         let cb = Closure::<dyn FnMut(JsValue)>::new(move |_payload: JsValue| {
             sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+            wasm_bindgen_futures::spawn_local(async move {
+                let Ok(accounts) = invoke::<Vec<Account>>("accounts_list", ()).await else {
+                    return;
+                };
+                let alive: HashSet<AccountId> = accounts.iter().map(|a| a.id.clone()).collect();
+                let selection_stale = selection_for_listener
+                    .peek()
+                    .account
+                    .as_ref()
+                    .map(|a| !alive.contains(a))
+                    .unwrap_or(false);
+                if selection_stale {
+                    selection_for_listener.set(Selection::default());
+                    visible_for_listener.set(Vec::new());
+                    bulk_for_listener.set(HashSet::new());
+                    folder_tokens_for_listener.set(HashMap::new());
+                }
+                let compose_stale = compose_for_listener
+                    .peek()
+                    .as_ref()
+                    .and_then(|c| c.default_account.as_ref())
+                    .map(|a| !alive.contains(a))
+                    .unwrap_or(false);
+                if compose_stale {
+                    compose_for_listener.set(None);
+                }
+            });
         });
         wasm_bindgen_futures::spawn_local(async move {
             let func = cb.as_ref().unchecked_ref::<js_sys::Function>();
@@ -600,6 +643,34 @@ fn full_app_shell() -> Element {
     });
 
     use_appearance_hooks();
+
+    // Listen for the global "always load remote images" setting
+    // changing in the Settings window. Bump `sync_tick` so the
+    // currently-open reader pane refetches via `messages_get` and
+    // applies the new policy without the user having to reselect
+    // the message. Only fires on the privacy key — theme/density
+    // changes are already handled inside `use_appearance_hooks`.
+    use_hook(move || {
+        let cb = Closure::<dyn FnMut(JsValue)>::new(move |payload: JsValue| {
+            #[derive(serde::Deserialize)]
+            struct Changed {
+                key: String,
+            }
+            let Ok(evt) = serde_wasm_bindgen::from_value::<Changed>(payload) else {
+                return;
+            };
+            if evt.key == "privacy.remote_images_always" {
+                sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+            }
+        });
+        wasm_bindgen_futures::spawn_local(async move {
+            let func = cb.as_ref().unchecked_ref::<js_sys::Function>();
+            if let Err(e) = tauri_listen("app_settings_changed", func).await {
+                web_sys_log(&format!("app_settings_changed for reader listen: {e:?}"));
+            }
+            Box::leak(Box::new(cb));
+        });
+    });
 
     // Tell the Rust side the UI is mounted so the sync engine can
     // start its bootstrap pass. Without this signal the engine waits
@@ -3184,6 +3255,34 @@ fn SidebarV2(
         async move { invoke::<Vec<Account>>("accounts_list", ()).await }
     });
 
+    // First-launch auto-open: if the very first accounts_list result is
+    // empty, jump straight to the add-account window instead of leaving
+    // the user staring at the empty-state blurb. Gated on a one-shot
+    // flag so a mid-session "remove the last account" doesn't re-pop
+    // the window — the empty-state's "Add an account" button covers
+    // that path. The flag is signal-local to this SidebarV2 mount,
+    // which matches the process lifetime, so a fresh app launch
+    // re-enables the auto-open.
+    let mut oauth_auto_opened: Signal<bool> = use_signal(|| false);
+    use_effect(move || {
+        if *oauth_auto_opened.read() {
+            return;
+        }
+        let read = accounts.read_unchecked();
+        let Some(Ok(list)) = read.as_ref() else {
+            return;
+        };
+        if !list.is_empty() {
+            return;
+        }
+        oauth_auto_opened.set(true);
+        spawn(async {
+            if let Err(e) = invoke::<()>("oauth_add_open", serde_json::json!({})).await {
+                web_sys_log(&format!("oauth_add_open (auto): {e}"));
+            }
+        });
+    });
+
     rsx! {
         aside {
             class: "sidebar",
@@ -3260,16 +3359,28 @@ fn SidebarAccountBlock(
     selection: Signal<Selection>,
     sync_tick: SyncTick,
 ) -> Element {
-    let id = account.id.clone();
-    let tick_value = sync_tick();
-    let folders = use_resource(use_reactive!(|id, tick_value| async move {
-        let _ = tick_value;
-        invoke::<Vec<Folder>>(
-            "folders_list",
-            serde_json::json!({ "input": { "account": id } }),
-        )
-        .await
-    }));
+    // Inline-read on `sync_tick` inside the closure (same canonical
+    // Dioxus 0.7 pattern as SidebarV2's accounts fetch). Was on the
+    // `use_reactive!` macro form, which has a documented wrinkle of
+    // missing the first signal change after mount on at least one
+    // component — observed as "added a fresh Gmail account, the
+    // sidebar shows the account header but never populates folders
+    // until I reload the UI." First sync_event from the bootstrap
+    // bumps sync_tick, the inline read picks it up, this resource
+    // refetches and the sidebar fills in.
+    let id_for_fetch = account.id.clone();
+    let mut tick_for_refetch = sync_tick;
+    let folders = use_resource(move || {
+        let id = id_for_fetch.clone();
+        let _ = tick_for_refetch();
+        async move {
+            invoke::<Vec<Folder>>(
+                "folders_list",
+                serde_json::json!({ "input": { "account": id } }),
+            )
+            .await
+        }
+    });
 
     // Auto-select INBOX on first folder-list load, but only if the
     // user hasn't already picked something. Runs once per account
@@ -3299,11 +3410,21 @@ fn SidebarAccountBlock(
         });
     }
 
+    // Hide the email line when the display name is just the same email
+    // (the default for a fresh OAuth add) or empty — otherwise the
+    // header paints the address twice. A user-customised display name
+    // ("Work", "Personal", ...) keeps both lines so the email stays
+    // visible somewhere in the sidebar.
+    let show_email_line = !account.display_name.is_empty()
+        && account.display_name.trim() != account.email_address.trim();
+
     rsx! {
         div {
             class: "sidebar-account-header",
             span { class: "sidebar-account-label", "{account.display_name}" }
-            span { class: "sidebar-account-email", "{account.email_address}" }
+            if show_email_line {
+                span { class: "sidebar-account-email", "{account.email_address}" }
+            }
         }
         match &*folders.read_unchecked() {
             None => rsx! {},
@@ -3573,7 +3694,7 @@ fn MessageListPaneV2(
                         }
                     },
                     Some(fid) => rsx! {
-                        MessageListV2 { folder: fid, selection, folder_tokens, bulk_selected, visible_messages }
+                        MessageListV2 { folder: fid, selection, sync_tick, folder_tokens, bulk_selected, visible_messages }
                     },
                 }
             }
@@ -3949,26 +4070,46 @@ fn UnifiedMessageListV2(
 fn MessageListV2(
     folder: FolderId,
     selection: Signal<Selection>,
+    sync_tick: SyncTick,
     folder_tokens: FolderTokens,
     bulk_selected: Signal<HashSet<MessageId>>,
     visible_messages: Signal<Vec<MessageId>>,
 ) -> Element {
     let mut visible_limit = use_signal(|| 200u32);
+    // Inline-read pattern (per feedback_dioxus_use_resource_reactive.md):
+    // `use_reactive!` has been observed to miss the first signal change
+    // on at least one component, so read the signals inside the closure
+    // and let Dioxus's hook runtime track the deps directly.
+    //
+    // Three deps:
+    // - `folder_tokens[folder]` — bumped by backend `sync_event` for this
+    //   specific folder; per-folder so an unrelated folder syncing
+    //   doesn't fan out a refetch here.
+    // - `sync_tick` — bumped by client-initiated actions (context menu
+    //   Archive/Delete/Mark-read, bulk bar, keyboard shortcuts). Those
+    //   write straight to the local DB and never round-trip through the
+    //   sync engine, so `folder_tokens` is never bumped for them.
+    // - `visible_limit` — paginated load-older.
     let folder_for_fetch = folder.clone();
-    // Read this folder's per-folder token. Reading the signal here
-    // makes use_reactive! see a u64 dep that only changes when *this*
-    // folder synced — refetches no longer fan out across all open
-    // message lists when an unrelated folder pushes an event.
-    let tick_value = folder_tokens.read().get(&folder).copied().unwrap_or(0u64);
-    let limit_value = visible_limit();
-    let page = use_resource(use_reactive!(
-        |folder_for_fetch, tick_value, limit_value| async move {
-            let _ = tick_value;
+    let folder_for_token_read = folder.clone();
+    let folder_tokens_for_fetch = folder_tokens;
+    let mut sync_tick_for_fetch = sync_tick;
+    let page = use_resource(move || {
+        let folder = folder_for_fetch.clone();
+        let folder_for_token = folder_for_token_read.clone();
+        let _ = folder_tokens_for_fetch
+            .read()
+            .get(&folder_for_token)
+            .copied()
+            .unwrap_or(0u64);
+        let _ = sync_tick_for_fetch();
+        let limit_value = visible_limit();
+        async move {
             invoke::<MessagePage>(
                 "messages_list",
                 serde_json::json!({
                     "input": {
-                        "folder": folder_for_fetch,
+                        "folder": folder,
                         "limit": limit_value,
                         "offset": 0,
                         "sort": SortOrder::DateDesc,
@@ -3977,7 +4118,7 @@ fn MessageListV2(
             )
             .await
         }
-    ));
+    });
 
     // Lazy-fetch new IMAP messages whenever this folder is opened.
     // Fires once per `folder` value change. The Tauri command emits
@@ -4632,29 +4773,33 @@ fn ReaderV2(
         }));
     }
 
+    // Inline-read pattern (per feedback_dioxus_use_resource_reactive.md).
+    // Three deps: the message id, the per-render force_trusted override,
+    // and sync_tick — the latter so a settings flip ("always load remote
+    // images" toggle) re-runs `messages_get` for whatever message is
+    // currently open. The App-level `app_settings_changed` listener
+    // bumps sync_tick on the privacy key.
     let id_for_fetch = id.clone();
-    let force_trusted_val = *force_trusted.read();
-    let msg = use_resource(use_reactive!(
-        |id_for_fetch, force_trusted_val| async move {
+    let mut force_trusted_for_fetch = force_trusted;
+    let mut sync_tick_for_fetch = sync_tick;
+    let msg = use_resource(move || {
+        let id = id_for_fetch.clone();
+        let force_trusted_val = *force_trusted_for_fetch.read();
+        let _ = sync_tick_for_fetch();
+        async move {
             let rendered = invoke::<RenderedMessage>(
                 "messages_get",
                 serde_json::json!({
                     "input": {
-                        "id": id_for_fetch,
+                        "id": id,
                         "force_trusted": force_trusted_val,
                     }
                 }),
             )
             .await?;
-            // The body HTML is rendered by stuffing
-            // `compose_reader_html(&rendered)` into an `<iframe srcdoc>`
-            // in the rsx! tree below. No IPC hop, no overlay surface,
-            // no rect-tracker — webkit2gtk's iframe sandbox owns the
-            // render. The `RenderedMessage` itself is what we keep
-            // around for the headers and attachment list.
             Ok::<_, String>(rendered)
         }
-    ));
+    });
 
     // Mark-as-read on selection. Fires once per `id` change. The
     // command also queues an outbox entry for the server flag write,

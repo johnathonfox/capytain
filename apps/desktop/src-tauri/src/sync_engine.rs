@@ -541,26 +541,35 @@ pub(crate) async fn sync_one_account(app: &AppHandle, blobs: &BlobStore, account
         }
     };
 
-    let db = state.sync_db.lock().await;
-    let outcomes =
-        match qsl_sync::sync_account(&*db, backend.as_ref(), Some(blobs), Some(200)).await {
-            Ok(o) => o,
-            Err(e) => {
-                warn!(account = %account_id.0, "live sync_account: {e}");
-                return;
-            }
+    // Iterate folders ourselves and emit `sync_event` after each one
+    // commits, instead of going through `qsl_sync::sync_account` which
+    // returns the entire outcome vec at once. The batchy form left the
+    // UI staring at a partial sidebar for the whole sync window
+    // (~30-60s on a fresh Gmail add) — the per-folder events that bump
+    // `sync_tick` for the sidebar refetch all fired in a single burst
+    // at the end, and a mid-sync UI reload would only see whatever had
+    // been committed so far. Per-folder emit gives the sidebar a
+    // refresh trigger as each new folder lands.
+    //
+    // Releasing the sync_db lock between folders also lets the IPC
+    // connection (`state.db`) read the freshly-committed state without
+    // waiting for the entire bootstrap to finish.
+    let folders = match backend.list_folders().await {
+        Ok(f) => f,
+        Err(e) => {
+            warn!(account = %account_id.0, "live list_folders: {e}");
+            return;
+        }
+    };
+    for folder in folders {
+        let result = {
+            let db = state.sync_db.lock().await;
+            qsl_sync::sync_folder(&*db, backend.as_ref(), Some(blobs), &folder, Some(200)).await
         };
-    drop(db);
-
-    for outcome in outcomes {
-        emit_folder_outcome(
-            app,
-            account_id,
-            &outcome.folder_id,
-            &outcome.result,
-            /* live = */ true,
-        )
-        .await;
+        if let Err(e) = &result {
+            warn!(folder = %folder.id.0, "live sync_folder: {e}");
+        }
+        emit_folder_outcome(app, account_id, &folder.id, &result, /* live = */ true).await;
     }
 }
 

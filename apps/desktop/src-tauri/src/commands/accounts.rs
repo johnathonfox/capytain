@@ -206,11 +206,26 @@ pub async fn accounts_add_oauth(
     // the UI's existing listener consumes to bump `sync_tick` and
     // refetch the sidebar's account list. Failure is non-fatal: the
     // account row is already persisted, the user can hit refresh.
+    //
+    // Also re-emits `accounts_changed` once the spawned sync returns
+    // so the UI gets one final "everything is ready" refetch trigger.
+    // Without this, the rapid burst of per-folder `sync_event`s gets
+    // coalesced by Dioxus into a single refetch that occasionally
+    // lands while the last sync_folder is still committing — symptom
+    // is "only some of my folders showed up after add until I
+    // reloaded." The `accounts_changed` arrives strictly AFTER the
+    // full sync_account commit, breaking the race.
     let blobs = BlobStore::new(state.data_dir.join("blobs"));
     let app_for_sync = app.clone();
     let account_id_for_sync = account_id.clone();
     tauri::async_runtime::spawn(async move {
         sync_engine::sync_one_account(&app_for_sync, &blobs, &account_id_for_sync).await;
+        if let Err(e) = app_for_sync.emit(ACCOUNTS_EVENT, ()) {
+            tracing::warn!(
+                account = %account_id_for_sync.0,
+                "post-bootstrap re-emit accounts_changed failed: {e}"
+            );
+        }
     });
 
     if let Err(e) = app.emit(ACCOUNTS_EVENT, ()) {
@@ -243,7 +258,7 @@ pub struct AccountsRemoveInput {
 
 /// `accounts_remove` — delete an account row.
 ///
-/// Order matters here. Four classes of state hang off an account:
+/// Order matters here. Six classes of state hang off an account:
 ///
 ///   1. **In-flight history-sync drivers.** Their cancel flags live in
 ///      `state.history_cancellers`; the driver task notices the flip
@@ -266,6 +281,17 @@ pub struct AccountsRemoveInput {
 ///      entry under `com.qsl.app/<provider>:<email>`. Without this
 ///      step the keychain entry orphaned across removes, leaving
 ///      stale credentials around forever.
+///   5. **On-disk message bodies under
+///      `<data_dir>/blobs/<account_id>/`**. The DB CASCADE drops the
+///      `messages` rows but can't reach the filesystem. Without this
+///      step, the body files linger as orphans until `mailcli reset`.
+///   6. **Global autocomplete `contacts_v1`** if this is the last
+///      account. The table doesn't carry an `account_id` column —
+///      contacts dedup by email globally — so per-account cleanup
+///      isn't possible without a schema change. When zero accounts
+///      remain post-delete we truncate the table so the user's
+///      correspondent list doesn't outlive every account they had
+///      configured.
 ///
 /// Then the database row goes. With `PRAGMA foreign_keys=ON` (set in
 /// `TursoConn::open`) the schema's `ON DELETE CASCADE` clauses fire,
@@ -315,12 +341,30 @@ pub async fn accounts_remove(
 
     let db = state.db.lock().await;
     accounts_repo::delete(&*db, &input.id).await?;
+    let remaining = accounts_repo::list(&*db).await?.len();
+    if remaining == 0 {
+        if let Err(e) = qsl_storage::repos::contacts::clear_all(&*db).await {
+            tracing::warn!("accounts_remove: contacts_v1 truncate failed (continuing): {e}");
+        }
+    }
     drop(db);
+
+    let blobs = BlobStore::new(state.data_dir.join("blobs"));
+    if let Err(e) = blobs.delete_account(&input.id).await {
+        tracing::warn!(
+            account = %input.id.0,
+            "accounts_remove: blob dir cleanup failed (continuing): {e}"
+        );
+    }
 
     if let Err(e) = app.emit(ACCOUNTS_EVENT, ()) {
         tracing::warn!("accounts_remove: emit accounts_changed failed: {e}");
     }
-    tracing::info!(account = %input.id.0, "accounts_remove");
+    tracing::info!(
+        account = %input.id.0,
+        last_account = remaining == 0,
+        "accounts_remove"
+    );
     Ok(())
 }
 
