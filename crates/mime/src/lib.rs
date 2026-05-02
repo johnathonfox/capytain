@@ -140,6 +140,16 @@ fn sanitize(raw_html: &str, block_remote: bool) -> String {
     let cleaned = ammonia::Builder::default()
         .add_generic_attributes(["style"])
         .add_url_schemes(["data", "cid"])
+        // ammonia's `rm_tags` strips the tag wrapper but leaves the
+        // text content as a plain text node. That bit us on Microsoft
+        // 365 newsletters whose `<title>Learn simple prompts...</title>`
+        // ended up rendering as a stray text line at the top of the
+        // body. `add_clean_content_tags` is the right hammer for any
+        // element whose contents are non-display markup that should
+        // never render as text — `<head>` / `<title>` (HTML metadata)
+        // and `<noscript>` (script-required-fallback messaging) join
+        // ammonia's defaults of `<script>` / `<style>`.
+        .add_clean_content_tags(["head", "title", "noscript"])
         .rm_tags([
             "script", "iframe", "object", "embed", "form", "input", "button", "textarea", "select",
             "style", "link",
@@ -1210,6 +1220,40 @@ caf"
             out.contains("color: #222"),
             "sibling declaration dropped along with the blocked one: {out}"
         );
+    }
+
+    #[test]
+    fn sanitize_strips_title_text_content() {
+        // Many marketing emails (Microsoft 365 example) include a full
+        // <html><head><title>...</title></head> structure inside the
+        // text/html part. Without `clean_content_tags`, ammonia would
+        // strip the `<title>` tag wrapper but keep the inner text,
+        // producing a duplicate-of-subject line at the top of the
+        // rendered body. The user noticed this as "what is this text
+        // at the top of the email?"
+        let probe = r#"<html><head><title>Learn simple prompts</title></head><body><p>Real body</p></body></html>"#;
+        let out = sanitize_email_html(probe);
+        assert!(
+            !out.contains("Learn simple prompts"),
+            "title text leaked: {out}"
+        );
+        assert!(out.contains("Real body"), "body content lost: {out}");
+    }
+
+    #[test]
+    fn sanitize_strips_noscript_text_content() {
+        // <noscript> is the standard fallback element for users with
+        // JS disabled — but our reader has scripts enabled and the
+        // text is invariably a "your browser doesn't support…" notice
+        // that would render confusingly inline.
+        let probe = r#"<p>Hi</p><noscript>Please enable JavaScript</noscript><p>Bye</p>"#;
+        let out = sanitize_email_html(probe);
+        assert!(
+            !out.contains("Please enable JavaScript"),
+            "noscript text leaked: {out}"
+        );
+        assert!(out.contains("Hi"));
+        assert!(out.contains("Bye"));
     }
 
     #[test]
