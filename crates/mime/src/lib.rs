@@ -10,6 +10,8 @@
 
 use std::borrow::Cow;
 
+use base64::engine::general_purpose::STANDARD as base64_engine;
+use base64::Engine as _;
 use chrono::{TimeZone, Utc};
 use mail_parser::{Address, HeaderValue, Message, MessageParser, MimeHeaders, PartType};
 
@@ -634,6 +636,10 @@ fn body_from(parsed: &Message<'_>) -> (Option<String>, Option<String>, Vec<Attac
         .filter(|s| !s.is_empty());
 
     let mut attachments = Vec::new();
+    // (content_id, "data:<mime>;base64,<bytes>") pairs for inline parts
+    // referenced by `cid:` URLs in the HTML body. Built alongside the
+    // attachment list so we walk parts only once.
+    let mut cid_map: Vec<(String, String)> = Vec::new();
     for (i, part) in parsed.parts.iter().enumerate() {
         if !matches!(part.body, PartType::Binary(_) | PartType::InlineBinary(_)) {
             continue;
@@ -649,6 +655,23 @@ fn body_from(parsed: &Message<'_>) -> (Option<String>, Option<String>, Vec<Attac
         let size = part.len() as u64;
         let inline = matches!(part.body, PartType::InlineBinary(_));
         let content_id = part.content_id().map(str::to_string);
+        // Resolve `cid:` refs whenever a binary part advertises a
+        // Content-ID, regardless of whether mail-parser categorized
+        // it as InlineBinary or Binary. The disposition vs. inline
+        // distinction is fuzzy in real-world email and the
+        // authoritative signal for "this is referenced from the
+        // HTML body" is just having a Content-ID.
+        if let Some(cid) = content_id.as_deref() {
+            let bytes_opt: Option<&[u8]> = match &part.body {
+                PartType::InlineBinary(b) => Some(b.as_ref()),
+                PartType::Binary(b) => Some(b.as_ref()),
+                _ => None,
+            };
+            if let Some(bytes) = bytes_opt {
+                let b64 = base64_engine.encode(bytes);
+                cid_map.push((cid.to_string(), format!("data:{mime_type};base64,{b64}")));
+            }
+        }
         attachments.push(Attachment {
             // The part index is the stable, backend-agnostic handle for
             // this attachment within the message. IMAP callers can map
@@ -661,7 +684,39 @@ fn body_from(parsed: &Message<'_>) -> (Option<String>, Option<String>, Vec<Attac
             content_id,
         });
     }
+    let body_html = body_html.map(|html| rewrite_cid_refs(&html, &cid_map));
     (body_text, body_html, attachments)
+}
+
+/// Replace every `cid:<id>` URL in `html` with the matching inline
+/// `data:` URI from `cid_map`. Without this rewrite the sanitizer
+/// happily passes the `cid:` URL through (it's a non-network scheme),
+/// but webkit2gtk has no resolver for it, so the embedded image
+/// renders as broken-image / alt-text only — what the Apple Store
+/// "AppleLogo" placeholder bug looked like.
+///
+/// String-replace is sufficient: mail-parser strips the angle brackets
+/// from `Content-ID` so `cid_map` keys are bare ids, and HTML emails
+/// reference them with the same bare form (`<img src="cid:foo@bar">`).
+/// We also try the angle-bracketed variant defensively for parsers
+/// that retain them.
+fn rewrite_cid_refs(html: &str, cid_map: &[(String, String)]) -> String {
+    if cid_map.is_empty() {
+        return html.to_string();
+    }
+    let mut out = html.to_string();
+    for (cid, data_uri) in cid_map {
+        let bare = cid.trim_start_matches('<').trim_end_matches('>');
+        if bare.is_empty() {
+            continue;
+        }
+        // Most-specific replacement: the cid as-it-appears in HTML.
+        // Quoted (`src="cid:foo"`), unquoted, and CSS `url(cid:foo)`
+        // forms all share this `cid:<id>` substring, so one
+        // replacement covers all three.
+        out = out.replace(&format!("cid:{bare}"), data_uri);
+    }
+    out
 }
 
 fn snippet_from(parsed: &Message<'_>) -> String {
@@ -1155,6 +1210,46 @@ caf"
             out.contains("color: #222"),
             "sibling declaration dropped along with the blocked one: {out}"
         );
+    }
+
+    #[test]
+    fn parse_rfc822_rewrites_cid_refs_in_html() {
+        // multipart/related with an HTML body that references an
+        // inline image via `cid:`. Parser should rewrite the cid:
+        // src to a data: URI built from the part's bytes.
+        let raw = b"From: a@example.com\r\n\
+To: b@example.com\r\n\
+Subject: hi\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/related; boundary=\"BOUND\"\r\n\
+\r\n\
+--BOUND\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+\r\n\
+<p>before</p><img src=\"cid:logo@example.com\" alt=\"AppleLogo\"><p>after</p>\r\n\
+--BOUND\r\n\
+Content-Type: image/png\r\n\
+Content-Disposition: inline\r\n\
+Content-ID: <logo@example.com>\r\n\
+Content-Transfer-Encoding: base64\r\n\
+\r\n\
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=\r\n\
+--BOUND--\r\n";
+        let id = MessageId("m".into());
+        let acct = AccountId("a".into());
+        let folder = FolderId("f".into());
+        let flags = MessageFlags::default();
+        let body = parse_rfc822(raw, ident(&id, &acct, &folder, &flags)).expect("parse");
+        let html = body.body_html.expect("html present");
+        assert!(
+            !html.contains("cid:logo"),
+            "cid: ref survived the rewrite: {html}"
+        );
+        assert!(
+            html.contains("data:image/png;base64,"),
+            "data URI not produced: {html}"
+        );
+        assert!(html.contains(r#"alt="AppleLogo""#), "alt text lost: {html}");
     }
 
     #[test]
