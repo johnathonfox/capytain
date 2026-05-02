@@ -24,7 +24,10 @@ apps/desktop/ui/dist/
 
 # Claude Code session state — runtime lock + scheduled-task ledger.
 # Committed once by mistake; pinning here so it can't slip back in.
-.claude/
+# Ignore everything under .claude/ EXCEPT shared agent definitions
+# (project-level prompts that teammates and worktrees should pick up).
+.claude/*
+!.claude/agents/
 
 # Local env
 .env
