@@ -1626,30 +1626,17 @@ ul {
   background: var(--bg-primary);
 }
 
-/* Expanded cards default to a sensible reading height and can be
- * resized individually via the bottom-right grip (`resize:
- * vertical`). `overflow: hidden` is required for the resize handle
- * to activate; the iframe inside still scrolls its own content. */
+/* Expanded cards stretch to fill any remaining vertical space in
+ * the stack so a single-message thread (or any thread whose only
+ * expanded card sits at the bottom) doesn't leave a blank gap
+ * under the body. Multiple expanded cards share the remaining
+ * space equally; the per-card min-height keeps each one readable
+ * even when several are open. The whole reader pane is still
+ * user-resizable via the column splitter on its left edge. */
 .thread-card.thread-card-expanded {
-  flex: 0 0 auto;
-  height: 420px;
-  min-height: 200px;
-  max-height: 90vh;
-  resize: vertical;
-  overflow: hidden;
-  background: var(--bg-primary);
-}
-
-/* The last expanded card stretches to fill any remaining stack
- * height — covers the singleton-thread case (one card, also the
- * last) and the common "scroll down to the most recent reply" case
- * (last card expanded, earlier ones collapsed). The user can still
- * resize earlier cards via the grip; the last one just acts as the
- * pane-filler. */
-.thread-card.thread-card-expanded:last-of-type {
   flex: 1 1 auto;
-  height: auto;
-  resize: none;
+  min-height: 280px;
+  background: var(--bg-primary);
 }
 
 .thread-card.thread-card-collapsed {
