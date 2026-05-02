@@ -5592,6 +5592,7 @@ dependencies = [
  "tracing",
  "url",
  "webbrowser",
+ "webkit2gtk",
 ]
 
 [[package]]

@@ -93,5 +93,16 @@ mime_guess = "2"
 # Already in the dep graph via qsl-auth, so no build-cost increase.
 rand = { workspace = true }
 
+# Linux-only: needed to enable webkit2gtk's spell-checker at the
+# WebContext level. The `spellcheck` HTML attribute is a per-field
+# opt-in but the engine itself is gated by
+# `WebContext::set_spell_checking_enabled(true)`, which Tauri 2 / wry
+# don't expose on their high-level API. We reach through
+# `WebviewWindow::with_webview` to the underlying webkit2gtk handle.
+# Pinned to the same minor as Tauri 2's transitive dep so the
+# `webkit2gtk::WebView` types match.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = "2.0"
+
 [lints]
 workspace = true

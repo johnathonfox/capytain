@@ -174,6 +174,33 @@ fn main() {
             // so this single hook covers every path.
             mailto::install(app.handle());
 
+            // Enable the WebKit spell-checker on Linux. The
+            // `spellcheck="true"` attribute we set on compose
+            // <input>/<textarea> nodes is a per-field opt-in, but
+            // webkit2gtk's engine itself is gated by a separate
+            // `WebContext` flag that defaults off — so without this
+            // call no underlines appear regardless of the attribute.
+            // macOS / Windows webviews enable spell-check when the
+            // attribute is present, so they don't need this.
+            #[cfg(target_os = "linux")]
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(e) = window.with_webview(|webview| {
+                    use webkit2gtk::{WebContextExt, WebViewExt};
+                    let inner = webview.inner();
+                    if let Some(ctx) = inner.context() {
+                        ctx.set_spell_checking_enabled(true);
+                        // Empty languages list ⇒ webkit2gtk picks the
+                        // user's locale via $LANG / $LC_MESSAGES,
+                        // falling back to the first available
+                        // dictionary. Avoids hard-coding "en_US" for
+                        // non-English users.
+                        ctx.set_spell_checking_languages(&[]);
+                    }
+                }) {
+                    tracing::warn!("spell-check enable failed: {e}");
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
