@@ -1607,20 +1607,34 @@ ul {
   background: var(--bg-primary);
 }
 
-/* Expanded cards stretch to fill any remaining vertical space in
- * the stack so a thread with N collapsed + 1 expanded card doesn't
- * leave a blank gap under the last header. Multiple expanded cards
- * share the remaining space equally; the per-card min-height keeps
- * each one readable even when several are open. */
+/* Expanded cards default to a sensible reading height and can be
+ * resized individually via the bottom-right grip (`resize:
+ * vertical`). `overflow: hidden` is required for the resize handle
+ * to activate; the iframe inside still scrolls its own content.
+ * `flex: 0 0 auto` keeps the explicit height stable instead of
+ * letting flex-grow fight the user's drag. */
 .thread-card.thread-card-expanded {
-  flex: 1 1 auto;
-  min-height: 280px;
+  flex: 0 0 auto;
+  height: 420px;
+  min-height: 200px;
+  max-height: 90vh;
+  resize: vertical;
+  overflow: hidden;
   background: var(--bg-primary);
 }
 
 .thread-card.thread-card-collapsed {
   flex: 0 0 auto;
   background: var(--bg-tertiary);
+}
+
+/* Bottom filler so a thread whose cards don't fill the pane
+ * shows the reader-pane background (rather than a hard
+ * boundary line) under the stack. */
+.thread-stack::after {
+  content: "";
+  flex: 1 0 auto;
+  min-height: 0;
 }
 
 /* Header strip — clickable. Reset the default <button> chrome since
@@ -1689,18 +1703,19 @@ ul {
   flex-direction: column;
   padding: 8px 14px 14px;
   gap: 8px;
-  /* Fill the expanded card so the iframe inside doesn't pin the
-   * card to a fixed height while leaving white space below. */
+  /* Fill the expanded card; the card's explicit height is what
+   * actually bounds us, so the iframe inside flex-grows to fill
+   * whatever space is left after the recipients / banners /
+   * attachments. */
   flex: 1 1 auto;
   min-height: 0;
 }
 
-/* When a card is expanded, give the body iframe a minimum height
- * so short messages still get a visible body slot, but let it grow
- * to fill the card's flex space. */
+/* The iframe takes the rest of the card body — no own height,
+ * just flex-grow inside the card's bounded box. */
 .thread-card-body .reader-body-iframe {
   flex: 1 1 auto;
-  min-height: 200px;
+  min-height: 0;
 }
 
 .reader-action {
