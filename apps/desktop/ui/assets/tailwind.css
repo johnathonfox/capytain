@@ -1629,9 +1629,7 @@ ul {
 /* Expanded cards default to a sensible reading height and can be
  * resized individually via the bottom-right grip (`resize:
  * vertical`). `overflow: hidden` is required for the resize handle
- * to activate; the iframe inside still scrolls its own content.
- * `flex: 0 0 auto` keeps the explicit height stable instead of
- * letting flex-grow fight the user's drag. */
+ * to activate; the iframe inside still scrolls its own content. */
 .thread-card.thread-card-expanded {
   flex: 0 0 auto;
   height: 420px;
@@ -1642,18 +1640,21 @@ ul {
   background: var(--bg-primary);
 }
 
+/* The last expanded card stretches to fill any remaining stack
+ * height — covers the singleton-thread case (one card, also the
+ * last) and the common "scroll down to the most recent reply" case
+ * (last card expanded, earlier ones collapsed). The user can still
+ * resize earlier cards via the grip; the last one just acts as the
+ * pane-filler. */
+.thread-card.thread-card-expanded:last-of-type {
+  flex: 1 1 auto;
+  height: auto;
+  resize: none;
+}
+
 .thread-card.thread-card-collapsed {
   flex: 0 0 auto;
   background: var(--bg-tertiary);
-}
-
-/* Bottom filler so a thread whose cards don't fill the pane
- * shows the reader-pane background (rather than a hard
- * boundary line) under the stack. */
-.thread-stack::after {
-  content: "";
-  flex: 1 0 auto;
-  min-height: 0;
 }
 
 /* Header strip — clickable. Reset the default <button> chrome since
