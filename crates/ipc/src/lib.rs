@@ -85,6 +85,16 @@ pub struct MessagePage {
     /// Total unread messages in the folder (i.e. `!seen`), independent
     /// of paging.
     pub unread_count: u32,
+    /// `thread_id.0 → total messages in that thread`. Populated for
+    /// every distinct thread referenced by `messages`. The list view
+    /// looks up each row's thread id and shows a count badge when
+    /// the value is greater than 1, so the user can tell from the
+    /// list "this conversation has N replies" before clicking. Keyed
+    /// by the inner string so the JSON wire-form stays a flat
+    /// object — `serde_json` can't produce `HashMap<ThreadId, _>`
+    /// directly.
+    #[serde(default)]
+    pub thread_counts: std::collections::HashMap<String, u32>,
 }
 
 /// Events the sync engine emits to the UI as folders sync. The

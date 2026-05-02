@@ -22,7 +22,8 @@ use qsl_mime::{
 use qsl_storage::{
     repos::accounts as accounts_repo, repos::app_settings as app_settings_repo,
     repos::drafts as drafts_repo, repos::folders as folders_repo, repos::messages as messages_repo,
-    repos::outbox as outbox_repo, repos::remote_content_opt_ins, BlobStore,
+    repos::outbox as outbox_repo, repos::remote_content_opt_ins, repos::threads as threads_repo,
+    BlobStore,
 };
 use serde::Deserialize;
 use tauri::State;
@@ -33,6 +34,29 @@ use crate::state::AppState;
 /// Phase 0 Week 5 caps a single page to 500 headers. Sync engine paging
 /// (Phase 1) negotiates higher bounds directly with the backend.
 const MAX_PAGE_LIMIT: u32 = 500;
+
+/// Look up `threads.message_count` for every distinct thread id
+/// referenced by a page of headers. Returns the wire-form
+/// `HashMap<String, u32>` that ships in `MessagePage::thread_counts`
+/// — empty if no message in the page has a `thread_id`. Keyed by
+/// `ThreadId.0` so JSON serialization is a flat string-to-int
+/// object instead of nested.
+async fn thread_counts_for_page(
+    db: &dyn qsl_storage::DbConn,
+    messages: &[qsl_core::MessageHeaders],
+) -> IpcResult<std::collections::HashMap<String, u32>> {
+    let mut seen: std::collections::HashSet<&qsl_core::ThreadId> = std::collections::HashSet::new();
+    let mut ids: Vec<qsl_core::ThreadId> = Vec::new();
+    for m in messages {
+        if let Some(tid) = &m.thread_id {
+            if seen.insert(tid) {
+                ids.push(tid.clone());
+            }
+        }
+    }
+    let counts = threads_repo::counts_by_ids(db, &ids).await?;
+    Ok(counts.into_iter().map(|(k, v)| (k.0, v)).collect())
+}
 
 /// `app_settings_v1` key for the global "always load remote images"
 /// toggle. Mirrored from `apps/desktop/ui/src/settings.rs::KEY_REMOTE_IMAGES`
@@ -78,6 +102,7 @@ pub async fn messages_list(
     let messages = messages_repo::list_by_folder(&*db, &folder, limit, offset).await?;
     let total_count = messages_repo::count_by_folder(&*db, &folder).await?;
     let unread_count = messages_repo::count_unread_by_folder(&*db, &folder).await?;
+    let thread_counts = thread_counts_for_page(&*db, &messages).await?;
 
     tracing::debug!(
         folder = %folder.0,
@@ -91,6 +116,7 @@ pub async fn messages_list(
         messages,
         total_count,
         unread_count,
+        thread_counts,
     })
 }
 
@@ -134,6 +160,7 @@ pub async fn messages_list_unified(
     let messages = messages_repo::list_by_folders(&*db, &folder_ids, limit, offset).await?;
     let total_count = messages_repo::count_by_folders(&*db, &folder_ids).await?;
     let unread_count = messages_repo::count_unread_by_folders(&*db, &folder_ids).await?;
+    let thread_counts = thread_counts_for_page(&*db, &messages).await?;
     drop(db);
 
     tracing::debug!(
@@ -148,6 +175,7 @@ pub async fn messages_list_unified(
         messages,
         total_count,
         unread_count,
+        thread_counts,
     })
 }
 
@@ -193,6 +221,7 @@ pub async fn messages_search(
             messages: Vec::new(),
             total_count: 0,
             unread_count: 0,
+            thread_counts: std::collections::HashMap::new(),
         });
     }
 
@@ -217,6 +246,10 @@ pub async fn messages_search(
         .try_into()
         .unwrap_or(u32::MAX);
     let total_count: u32 = messages.len().try_into().unwrap_or(u32::MAX);
+    let thread_counts = {
+        let db = state.db.lock().await;
+        thread_counts_for_page(&*db, &messages).await?
+    };
 
     tracing::debug!(
         query = %query,
@@ -228,6 +261,7 @@ pub async fn messages_search(
         messages,
         total_count,
         unread_count,
+        thread_counts,
     })
 }
 

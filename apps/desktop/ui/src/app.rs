@@ -320,6 +320,16 @@ pub struct MessageContextMenu {
 #[derive(Clone, Copy)]
 pub struct UnreadVisible(pub Signal<Vec<MessageId>>);
 
+/// `thread_id.0 → message-count` for the threads referenced by the
+/// currently-rendered message list. Populated by whichever list
+/// pane is active (folder / unified / search) from
+/// `MessagePage::thread_counts`. The list rows look up their own
+/// thread id and render a count badge when the value > 1, so the
+/// user can see "this conversation has N replies" without opening
+/// it.
+#[derive(Clone, Copy)]
+pub struct ThreadCounts(pub Signal<std::collections::HashMap<String, u32>>);
+
 // ---------- Root ----------
 
 /// Apply the persisted `appearance.theme` + `appearance.density`
@@ -454,6 +464,13 @@ fn full_app_shell() -> Element {
     // in `MessageListPaneV2`, the unified inbox, and the search
     // results pane.
     let unread_visible: Signal<Vec<MessageId>> = use_signal(Vec::new);
+    // `thread_id.0 -> message-count` for the threads referenced by
+    // the active list pane. Each pane writes its `MessagePage::
+    // thread_counts` here; rows read it to decide whether to show a
+    // "(N)" badge alongside the subject. Wrapped with a newtype for
+    // the same reason as `UnreadVisible`.
+    let thread_counts: Signal<std::collections::HashMap<String, u32>> =
+        use_signal(std::collections::HashMap::new);
 
     // Command palette visibility (⌘K) and recent-search ring buffer for
     // the palette's "Recent" section. Both live at App root so the
@@ -506,6 +523,7 @@ fn full_app_shell() -> Element {
     // type-keyed, so two registrations of the same concrete type
     // would shadow each other.
     use_context_provider(|| UnreadVisible(unread_visible));
+    use_context_provider(|| ThreadCounts(thread_counts));
     use_context_provider(|| selection);
 
     // Capture cleared search queries into the recent ring buffer.
@@ -1570,6 +1588,7 @@ fn CommandPalette(
                 messages: Vec::new(),
                 total_count: 0,
                 unread_count: 0,
+                thread_counts: std::collections::HashMap::new(),
             });
         }
         invoke::<MessagePage>(
@@ -4234,11 +4253,18 @@ fn SearchResults(
     {
         let mut visible_messages = visible_messages;
         let UnreadVisible(mut unread_visible) = use_context::<UnreadVisible>();
+        let ThreadCounts(mut thread_counts) = use_context::<ThreadCounts>();
         use_effect(move || {
             let read = page.read_unchecked();
-            let Some(Ok(MessagePage { messages, .. })) = read.as_ref() else {
+            let Some(Ok(MessagePage {
+                messages,
+                thread_counts: tc,
+                ..
+            })) = read.as_ref()
+            else {
                 visible_messages.set(Vec::new());
                 unread_visible.set(Vec::new());
+                thread_counts.set(std::collections::HashMap::new());
                 return;
             };
             let filter = account_filter.read().clone();
@@ -4254,6 +4280,7 @@ fn SearchResults(
                 .collect();
             visible_messages.set(ids);
             unread_visible.set(unread);
+            thread_counts.set(tc.clone());
         });
     }
 
@@ -4261,7 +4288,7 @@ fn SearchResults(
         match &*page.read_unchecked() {
             None => rsx! { p { class: "msglist-empty", "Searching…" } },
             Some(Err(e)) => rsx! { p { class: "msglist-empty", "{e}" } },
-            Some(Ok(MessagePage { messages, total_count, unread_count })) => {
+            Some(Ok(MessagePage { messages, total_count, unread_count, .. })) => {
                 // Account filter is applied client-side — `messages_search`
                 // is account-agnostic so we can scope without a re-query.
                 let filter = account_filter.read().clone();
@@ -4499,11 +4526,18 @@ fn UnifiedMessageListV2(
     {
         let mut visible_messages = visible_messages;
         let UnreadVisible(mut unread_visible) = use_context::<UnreadVisible>();
+        let ThreadCounts(mut thread_counts) = use_context::<ThreadCounts>();
         use_effect(move || {
             let read = page.read_unchecked();
-            let Some(Ok(MessagePage { messages, .. })) = read.as_ref() else {
+            let Some(Ok(MessagePage {
+                messages,
+                thread_counts: tc,
+                ..
+            })) = read.as_ref()
+            else {
                 visible_messages.set(Vec::new());
                 unread_visible.set(Vec::new());
+                thread_counts.set(std::collections::HashMap::new());
                 return;
             };
             let filter = account_filter.read().clone();
@@ -4519,6 +4553,7 @@ fn UnifiedMessageListV2(
                 .collect();
             visible_messages.set(ids);
             unread_visible.set(unread);
+            thread_counts.set(tc.clone());
         });
     }
 
@@ -4526,7 +4561,7 @@ fn UnifiedMessageListV2(
         match &*page.read_unchecked() {
             None => rsx! { p { class: "msglist-empty", "Loading…" } },
             Some(Err(e)) => rsx! { p { class: "msglist-empty", "{e}" } },
-            Some(Ok(MessagePage { messages, total_count, unread_count })) => {
+            Some(Ok(MessagePage { messages, total_count, unread_count, .. })) => {
                 // Account filter applies post-fetch — `messages_list_unified`
                 // returns every account so a single chip flip doesn't pay
                 // a re-query cost.
@@ -4721,11 +4756,18 @@ fn MessageListV2(
     {
         let mut visible_messages = visible_messages;
         let UnreadVisible(mut unread_visible) = use_context::<UnreadVisible>();
+        let ThreadCounts(mut thread_counts) = use_context::<ThreadCounts>();
         use_effect(move || {
             let read = page.read_unchecked();
-            let Some(Ok(MessagePage { messages, .. })) = read.as_ref() else {
+            let Some(Ok(MessagePage {
+                messages,
+                thread_counts: tc,
+                ..
+            })) = read.as_ref()
+            else {
                 visible_messages.set(Vec::new());
                 unread_visible.set(Vec::new());
+                thread_counts.set(std::collections::HashMap::new());
                 return;
             };
             let ids: Vec<MessageId> = messages.iter().map(|m| m.id.clone()).collect();
@@ -4736,6 +4778,7 @@ fn MessageListV2(
                 .collect();
             visible_messages.set(ids);
             unread_visible.set(unread);
+            thread_counts.set(tc.clone());
         });
     }
 
@@ -4743,7 +4786,7 @@ fn MessageListV2(
         match &*page.read_unchecked() {
             None => rsx! { p { class: "msglist-empty", "Loading…" } },
             Some(Err(e)) => rsx! { p { class: "msglist-empty", "{e}" } },
-            Some(Ok(MessagePage { messages, total_count, unread_count })) => {
+            Some(Ok(MessagePage { messages, total_count, unread_count, .. })) => {
                 rsx! {
                     MessageListHeader {
                         title: folder_title_from_selection(&folder, &selection),
@@ -4834,6 +4877,17 @@ fn MessageRowV2(
     } else {
         format!("{subject} · {snippet}")
     };
+    // Thread-count badge: when the message belongs to a thread with
+    // more than one entry, show "(N)" before the subject so the user
+    // knows clicking will open a stacked thread of N messages.
+    // Looked up via the shared `ThreadCounts` context so we don't
+    // need a per-row prop.
+    let ThreadCounts(thread_counts_signal) = use_context::<ThreadCounts>();
+    let thread_count: Option<u32> = msg
+        .thread_id
+        .as_ref()
+        .and_then(|t| thread_counts_signal.read().get(&t.0).copied())
+        .filter(|n| *n > 1);
     // `checked` is its own row state — the row stays a `selected` row
     // only when *opened* in the reader; bulk-checking just adds a
     // visual marker without taking over reader focus.
@@ -4949,7 +5003,13 @@ fn MessageRowV2(
             }
             div { class: "{flag_div_class}", "{flag_glyph}" }
             div { class: "msg-row-from", "{from_name}" }
-            div { class: "msg-row-subject", "{subject_line}" }
+            div {
+                class: "msg-row-subject",
+                if let Some(n) = thread_count {
+                    span { class: "msg-row-thread-count", title: "{n} messages in this thread", "{n}" }
+                }
+                "{subject_line}"
+            }
             div { class: "msg-row-time", "{date}" }
         }
     }

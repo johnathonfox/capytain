@@ -1289,6 +1289,25 @@ ul {
   color: var(--text-secondary);
 }
 
+/* Thread-count badge before the subject — small bordered pill
+ * that reads as "(N messages)" without consuming the column
+ * width a full word would. */
+.msg-row-thread-count {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--text-tertiary);
+  border-radius: 8px;
+  font-size: var(--fs-10);
+  color: var(--text-tertiary);
+  line-height: 1.2;
+}
+
+.msg-row.unread .msg-row-thread-count {
+  border-color: var(--accent-amber);
+  color: var(--accent-amber);
+}
+
 .msg-row-subject {
   font-size: var(--fs-11);
   color: var(--text-secondary);
