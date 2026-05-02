@@ -178,7 +178,7 @@ pub struct Contact {
 /// `sanitized_html` is always `None` and `remote_content_blocked` is
 /// always `false`. `sender_is_trusted` is likewise stubbed to `false`
 /// until the contacts table ships.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenderedMessage {
     pub headers: MessageHeaders,
     pub sanitized_html: Option<String>,

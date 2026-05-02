@@ -216,6 +216,7 @@ fn main() {
             commands::messages::messages_archive,
             commands::messages::messages_delete,
             commands::messages::messages_get,
+            commands::messages::messages_thread,
             commands::messages::messages_trust_sender,
             commands::messages::messages_load_older,
             commands::messages::messages_refresh_folder,

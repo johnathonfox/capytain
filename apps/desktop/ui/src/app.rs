@@ -313,6 +313,13 @@ pub struct MessageContextMenu {
     pub is_unread: bool,
 }
 
+/// Newtype around the unread-subset signal so it can ride the
+/// type-keyed `use_context` system without colliding with the
+/// `Signal<Vec<MessageId>>` already used for `visible_messages`.
+/// Read with `use_context::<UnreadVisible>().0.read()`.
+#[derive(Clone, Copy)]
+pub struct UnreadVisible(pub Signal<Vec<MessageId>>);
+
 // ---------- Root ----------
 
 /// Apply the persisted `appearance.theme` + `appearance.density`
@@ -439,6 +446,14 @@ fn full_app_shell() -> Element {
     // publishes its rendered set so `j` / `k` can step through them
     // without re-fetching. Sorted by date-desc to match the rendering.
     let visible_messages: Signal<Vec<MessageId>> = use_signal(Vec::new);
+    // Subset of `visible_messages` that's still unread, in the same
+    // display order. Drives the `n` "next unread" shortcut so the
+    // dispatcher doesn't have to query flags per keypress. Each list
+    // component that publishes `visible_messages` also publishes the
+    // unread subset from the same data — see the use_effect blocks
+    // in `MessageListPaneV2`, the unified inbox, and the search
+    // results pane.
+    let unread_visible: Signal<Vec<MessageId>> = use_signal(Vec::new);
 
     // Command palette visibility (⌘K) and recent-search ring buffer for
     // the palette's "Recent" section. Both live at App root so the
@@ -485,6 +500,12 @@ fn full_app_shell() -> Element {
     // move" landing point so the reader pane doesn't get stranded
     // showing a ghost copy of a message that's no longer in view.
     use_context_provider(|| visible_messages);
+    // Wrap the unread-subset signal in a newtype so it doesn't
+    // collide with `Signal<Vec<MessageId>>` (which is already
+    // claimed by `visible_messages`); Dioxus's `use_context` is
+    // type-keyed, so two registrations of the same concrete type
+    // would shadow each other.
+    use_context_provider(|| UnreadVisible(unread_visible));
     use_context_provider(|| selection);
 
     // Capture cleared search queries into the recent ring buffer.
@@ -833,6 +854,7 @@ fn full_app_shell() -> Element {
                 help_visible,
                 search_query,
                 visible_messages,
+                unread_visible,
                 palette_visible,
                 undo_send_pending,
                 context_menu,
@@ -1024,6 +1046,7 @@ fn dispatch_keyboard_command(
     mut help_visible: Signal<bool>,
     mut search_query: Signal<String>,
     visible_messages: Signal<Vec<MessageId>>,
+    unread_visible: Signal<Vec<MessageId>>,
     mut palette_visible: Signal<bool>,
     mut undo_send_pending: Signal<Option<f64>>,
     mut context_menu: Signal<Option<MessageContextMenu>>,
@@ -1134,6 +1157,36 @@ fn dispatch_keyboard_command(
                 selection.with_mut(|s| s.message = next_sel);
                 sync_tick.with_mut(|t| *t = t.wrapping_add(1));
             });
+        }
+        KeyboardCommand::NextUnread => {
+            // Walk the unread subset in display order. Pick the
+            // first unread strictly after the current selection, or
+            // wrap to the first unread overall if there's nothing
+            // later. No-op when there's nothing unread; the user
+            // just won't notice the keystroke.
+            let unread = unread_visible.read().clone();
+            if unread.is_empty() {
+                return;
+            }
+            let visible = visible_messages.read().clone();
+            let cur = selection.read().message.clone();
+            let cur_pos = cur
+                .as_ref()
+                .and_then(|c| visible.iter().position(|m| m.0 == c.0));
+            let next = match cur_pos {
+                Some(idx) => unread
+                    .iter()
+                    .find(|u| {
+                        visible
+                            .iter()
+                            .position(|m| m.0 == u.0)
+                            .is_some_and(|p| p > idx)
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| unread[0].clone()),
+                None => unread[0].clone(),
+            };
+            selection.with_mut(|s| s.message = Some(next));
         }
         KeyboardCommand::NextMessage | KeyboardCommand::PrevMessage => {
             // Walk the published `visible_messages` list relative to the
@@ -1457,6 +1510,7 @@ fn ShortcutsOverlay(mut visible: Signal<bool>) -> Element {
                             ("⌘K", "Command palette"),
                             ("j", "Next message"),
                             ("k", "Previous message"),
+                            ("n", "Next unread"),
                             ("c", "Compose"),
                             ("e", "Archive selected message"),
                             ("#", "Delete selected message"),
@@ -4179,22 +4233,27 @@ fn SearchResults(
     // in Dioxus 0.7. Re-runs on `page` or `account_filter` changes.
     {
         let mut visible_messages = visible_messages;
+        let UnreadVisible(mut unread_visible) = use_context::<UnreadVisible>();
         use_effect(move || {
             let read = page.read_unchecked();
             let Some(Ok(MessagePage { messages, .. })) = read.as_ref() else {
                 visible_messages.set(Vec::new());
+                unread_visible.set(Vec::new());
                 return;
             };
             let filter = account_filter.read().clone();
-            let ids: Vec<MessageId> = match filter {
-                Some(ref id) => messages
-                    .iter()
-                    .filter(|m| m.account_id == *id)
-                    .map(|m| m.id.clone())
-                    .collect(),
-                None => messages.iter().map(|m| m.id.clone()).collect(),
+            let filtered: Vec<&MessageHeaders> = match filter {
+                Some(ref id) => messages.iter().filter(|m| m.account_id == *id).collect(),
+                None => messages.iter().collect(),
             };
+            let ids: Vec<MessageId> = filtered.iter().map(|m| m.id.clone()).collect();
+            let unread: Vec<MessageId> = filtered
+                .iter()
+                .filter(|m| !m.flags.seen)
+                .map(|m| m.id.clone())
+                .collect();
             visible_messages.set(ids);
+            unread_visible.set(unread);
         });
     }
 
@@ -4439,22 +4498,27 @@ fn UnifiedMessageListV2(
     // in Dioxus 0.7. Re-runs on `page` or `account_filter` changes.
     {
         let mut visible_messages = visible_messages;
+        let UnreadVisible(mut unread_visible) = use_context::<UnreadVisible>();
         use_effect(move || {
             let read = page.read_unchecked();
             let Some(Ok(MessagePage { messages, .. })) = read.as_ref() else {
                 visible_messages.set(Vec::new());
+                unread_visible.set(Vec::new());
                 return;
             };
             let filter = account_filter.read().clone();
-            let ids: Vec<MessageId> = match filter {
-                Some(ref id) => messages
-                    .iter()
-                    .filter(|m| m.account_id == *id)
-                    .map(|m| m.id.clone())
-                    .collect(),
-                None => messages.iter().map(|m| m.id.clone()).collect(),
+            let filtered: Vec<&MessageHeaders> = match filter {
+                Some(ref id) => messages.iter().filter(|m| m.account_id == *id).collect(),
+                None => messages.iter().collect(),
             };
+            let ids: Vec<MessageId> = filtered.iter().map(|m| m.id.clone()).collect();
+            let unread: Vec<MessageId> = filtered
+                .iter()
+                .filter(|m| !m.flags.seen)
+                .map(|m| m.id.clone())
+                .collect();
             visible_messages.set(ids);
+            unread_visible.set(unread);
         });
     }
 
@@ -4656,14 +4720,22 @@ fn MessageListV2(
     // requires an explicit click.
     {
         let mut visible_messages = visible_messages;
+        let UnreadVisible(mut unread_visible) = use_context::<UnreadVisible>();
         use_effect(move || {
             let read = page.read_unchecked();
             let Some(Ok(MessagePage { messages, .. })) = read.as_ref() else {
                 visible_messages.set(Vec::new());
+                unread_visible.set(Vec::new());
                 return;
             };
             let ids: Vec<MessageId> = messages.iter().map(|m| m.id.clone()).collect();
+            let unread: Vec<MessageId> = messages
+                .iter()
+                .filter(|m| !m.flags.seen)
+                .map(|m| m.id.clone())
+                .collect();
             visible_messages.set(ids);
+            unread_visible.set(unread);
         });
     }
 
@@ -5254,10 +5326,12 @@ fn ReaderV2(
     sync_tick: SyncTick,
     compose: Signal<Option<ComposeState>>,
 ) -> Element {
-    // `force_trusted` is the one-shot "Load images" override. Resets
-    // to false when the user navigates to a different message — see
-    // the use_effect below — so a previously-loaded message doesn't
-    // leak its trust state into the next one.
+    // `force_trusted` is the one-shot "Load images" override.
+    // Thread-wide because remote-image trust is per-sender (and a
+    // single thread is usually one sender), so flipping it for the
+    // active card flips it for every card — matching what users do
+    // when they click "Load images" on a multi-message conversation.
+    // Resets when the user navigates to a different thread.
     let mut force_trusted: Signal<bool> = use_signal(|| false);
     {
         let id_for_reset = id.clone();
@@ -5268,21 +5342,23 @@ fn ReaderV2(
     }
 
     // Inline-read pattern (per feedback_dioxus_use_resource_reactive.md).
-    // Three deps: the message id, the per-render force_trusted override,
-    // and sync_tick — the latter so a settings flip ("always load remote
-    // images" toggle) re-runs `messages_get` for whatever message is
-    // currently open. The App-level `app_settings_changed` listener
-    // bumps sync_tick on the privacy key.
+    // Three deps: the message id (anchor for the thread query), the
+    // per-render force_trusted override, and sync_tick — the latter
+    // so a settings flip ("always load remote images" toggle) and
+    // any sync event re-renders the thread. `messages_thread`
+    // returns every message attached to the same `thread_id` as the
+    // anchor, in date-ascending order; singleton threads come back
+    // as a one-element vec so the rendering path stays uniform.
     let id_for_fetch = id.clone();
     let mut force_trusted_for_fetch = force_trusted;
     let mut sync_tick_for_fetch = sync_tick;
-    let msg = use_resource(move || {
+    let thread = use_resource(move || {
         let id = id_for_fetch.clone();
         let force_trusted_val = *force_trusted_for_fetch.read();
         let _ = sync_tick_for_fetch();
         async move {
-            let rendered = invoke::<RenderedMessage>(
-                "messages_get",
+            let messages = invoke::<Vec<RenderedMessage>>(
+                "messages_thread",
                 serde_json::json!({
                     "input": {
                         "id": id,
@@ -5291,13 +5367,16 @@ fn ReaderV2(
                 }),
             )
             .await?;
-            Ok::<_, String>(rendered)
+            Ok::<_, String>(messages)
         }
     });
 
-    // Mark-as-read on selection. Fires once per `id` change. The
-    // command also queues an outbox entry for the server flag write,
-    // so the `\Seen` flag eventually propagates over IMAP. Bump
+    // Mark-as-read on selection. Fires once per anchor `id` change —
+    // we mark only the originally-selected message, not the whole
+    // thread, so unread sibling messages remain visually unread (and
+    // therefore default-expanded) until the user clicks them. The
+    // command queues an outbox entry for the server flag write, so
+    // the `\Seen` flag eventually propagates over IMAP. Bump
     // sync_tick so the message-list row updates its visual state
     // (bold → normal) immediately rather than waiting for the next
     // sync cycle.
@@ -5321,40 +5400,42 @@ fn ReaderV2(
     }
 
     rsx! {
-        match &*msg.read_unchecked() {
+        match &*thread.read_unchecked() {
             None => rsx! { div { class: "reader-scroll", p { class: "reader-body-loading", "Loading…" } } },
             Some(Err(e)) => rsx! { div { class: "reader-scroll", p { class: "reader-body-loading", "{e}" } } },
-            Some(Ok(rendered)) => {
-                let primary = rendered.headers.from.first();
-                let from_name = primary
-                    .map(|a| {
-                        a.display_name
-                            .clone()
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| a.address.clone())
-                    })
-                    .unwrap_or_default();
-                let from_addr = primary.map(|a| a.address.clone()).unwrap_or_default();
-                let date = crate::format::format_relative_date(
-                    rendered.headers.date,
-                    chrono::Utc::now(),
-                );
-                let date_full = rendered.headers.date.to_rfc2822();
-                let subject = if rendered.headers.subject.is_empty() {
+            Some(Ok(messages)) if messages.is_empty() => rsx! {
+                div { class: "reader-empty", "Message not found." }
+            },
+            Some(Ok(messages)) => {
+                // Toolbar target: the latest message in the thread.
+                // Reply/ReplyAll/Forward all want the most recent
+                // entry (Gmail-style "reply to the conversation").
+                // Archive/Delete/Mark-read operate on every message
+                // in the thread — closing a thread tab in the
+                // message list should close the whole conversation.
+                let target = messages.last().expect("non-empty");
+                let subject = if target.headers.subject.is_empty() {
                     "(no subject)".to_string()
                 } else {
-                    rendered.headers.subject.clone()
+                    target.headers.subject.clone()
                 };
-                // The body HTML lands in the `<iframe srcdoc>` below.
-                // No IPC, no overlay surface, no tracker push.
-
+                // All ids in date-asc order; reused by the
+                // thread-level archive / delete / mark-as-read
+                // toolbar buttons.
+                let thread_ids: Vec<MessageId> =
+                    messages.iter().map(|m| m.headers.id.clone()).collect();
+                let thread_count = messages.len();
+                let primary_id = id.clone();
                 rsx! {
-                    // Toolbar above the header — keyboard hints replace
-                    // the old pill action buttons (ui-direction.md §
-                    // "Message view"). Clicking still triggers the
-                    // action; the visible `[k]` reads as the canonical
-                    // shortcut so the chrome reinforces the keyboard
-                    // language instead of competing with it.
+                    // Toolbar above the header — keyboard hints
+                    // replace the old pill action buttons. Reply
+                    // family + Flag operate on the *latest* message
+                    // (the one a user thinks of as "the
+                    // conversation"). Archive / Delete /
+                    // Mark-read-or-unread operate on the *whole
+                    // thread* — closing a thread tab in the message
+                    // list should close the whole conversation, not
+                    // leave older messages hanging in the inbox.
                     div {
                         class: "reader-toolbar",
                         button {
@@ -5362,7 +5443,7 @@ fn ReaderV2(
                             r#type: "button",
                             title: "Reply (r)",
                             onclick: {
-                                let r = rendered.clone();
+                                let r = target.clone();
                                 move |_| open_reply(r.clone(), compose, ReplyKind::Reply)
                             },
                             span { class: "reader-hint-key", "[r]" }
@@ -5373,7 +5454,7 @@ fn ReaderV2(
                             r#type: "button",
                             title: "Reply to all (a)",
                             onclick: {
-                                let r = rendered.clone();
+                                let r = target.clone();
                                 move |_| open_reply(r.clone(), compose, ReplyKind::ReplyAll)
                             },
                             span { class: "reader-hint-key", "[a]" }
@@ -5384,7 +5465,7 @@ fn ReaderV2(
                             r#type: "button",
                             title: "Forward (f)",
                             onclick: {
-                                let r = rendered.clone();
+                                let r = target.clone();
                                 move |_| open_reply(r.clone(), compose, ReplyKind::Forward)
                             },
                             span { class: "reader-hint-key", "[f]" }
@@ -5393,22 +5474,23 @@ fn ReaderV2(
                         button {
                             class: "reader-hint",
                             r#type: "button",
-                            title: "Archive (e)",
+                            title: "Archive thread (e)",
                             onclick: {
-                                let id = rendered.headers.id.clone();
+                                let ids = thread_ids.clone();
+                                let primary_id = primary_id.clone();
                                 let mut selection = selection;
                                 let mut sync_tick = sync_tick;
                                 let visible_messages = use_context::<Signal<Vec<MessageId>>>();
                                 move |_| {
-                                    let id = id.clone();
+                                    let ids = ids.clone();
                                     let next_sel = crate::format::next_selection_after_move(
                                         &visible_messages.read(),
-                                        Some(&id),
-                                        std::slice::from_ref(&id),
+                                        Some(&primary_id),
+                                        std::slice::from_ref(&primary_id),
                                     );
                                     spawn(async move {
                                         let payload = serde_json::json!({
-                                            "input": { "ids": [id.clone()] }
+                                            "input": { "ids": ids }
                                         });
                                         if let Err(e) =
                                             invoke::<()>("messages_archive", payload).await
@@ -5427,10 +5509,10 @@ fn ReaderV2(
                         button {
                             class: "reader-hint",
                             r#type: "button",
-                            title: if rendered.headers.flags.flagged { "Unflag (s)" } else { "Flag (s)" },
+                            title: if target.headers.flags.flagged { "Unflag (s)" } else { "Flag (s)" },
                             onclick: {
-                                let id = rendered.headers.id.clone();
-                                let next_flagged = !rendered.headers.flags.flagged;
+                                let id = target.headers.id.clone();
+                                let next_flagged = !target.headers.flags.flagged;
                                 let mut sync_tick = sync_tick;
                                 move |_| {
                                     let id = id.clone();
@@ -5452,23 +5534,23 @@ fn ReaderV2(
                                 }
                             },
                             span { class: "reader-hint-key", "[s]" }
-                            if rendered.headers.flags.flagged { " unflag" } else { " flag" }
+                            if target.headers.flags.flagged { " unflag" } else { " flag" }
                         }
                         span { class: "reader-hint-spacer" }
                         button {
                             class: "reader-hint",
                             r#type: "button",
-                            title: if rendered.headers.flags.seen { "Mark unread (u)" } else { "Mark read (u)" },
+                            title: if target.headers.flags.seen { "Mark thread unread (u)" } else { "Mark thread read (u)" },
                             onclick: {
-                                let id = rendered.headers.id.clone();
-                                let next_seen = !rendered.headers.flags.seen;
+                                let ids = thread_ids.clone();
+                                let next_seen = !target.headers.flags.seen;
                                 let mut sync_tick = sync_tick;
                                 move |_| {
-                                    let id = id.clone();
+                                    let ids = ids.clone();
                                     spawn(async move {
                                         let payload = serde_json::json!({
                                             "input": {
-                                                "ids": [id.clone()],
+                                                "ids": ids,
                                                 "seen": next_seen,
                                             }
                                         });
@@ -5483,27 +5565,28 @@ fn ReaderV2(
                                 }
                             },
                             span { class: "reader-hint-key", "[u]" }
-                            if rendered.headers.flags.seen { " unread" } else { " read" }
+                            if target.headers.flags.seen { " unread" } else { " read" }
                         }
                         button {
                             class: "reader-hint",
                             r#type: "button",
-                            title: "Delete (#)",
+                            title: "Delete thread (#)",
                             onclick: {
-                                let id = rendered.headers.id.clone();
+                                let ids = thread_ids.clone();
+                                let primary_id = primary_id.clone();
                                 let mut selection = selection;
                                 let mut sync_tick = sync_tick;
                                 let visible_messages = use_context::<Signal<Vec<MessageId>>>();
                                 move |_| {
-                                    let id = id.clone();
+                                    let ids = ids.clone();
                                     let next_sel = crate::format::next_selection_after_move(
                                         &visible_messages.read(),
-                                        Some(&id),
-                                        std::slice::from_ref(&id),
+                                        Some(&primary_id),
+                                        std::slice::from_ref(&primary_id),
                                     );
                                     spawn(async move {
                                         let payload = serde_json::json!({
-                                            "input": { "ids": [id.clone()] }
+                                            "input": { "ids": ids }
                                         });
                                         if let Err(e) =
                                             invoke::<()>("messages_delete", payload).await
@@ -5520,67 +5603,161 @@ fn ReaderV2(
                             " delete"
                         }
                     }
+                    // Thread chrome — one subject + a count badge for
+                    // multi-message threads. The card stack below
+                    // owns per-message headers (from / to / cc /
+                    // date) so we don't duplicate them up here.
                     div {
-                        class: "reader-header-block",
+                        class: "thread-chrome",
                         h1 { class: "reader-subject", "{subject}" }
-                        div {
-                            class: "reader-sender-card",
-                            div {
-                                class: "reader-sender-meta",
-                                span { class: "reader-sender-name", "{from_name}" }
-                                span { class: "reader-sender-addr", "{from_addr}" }
-                            }
-                            span {
-                                class: "reader-sender-date",
-                                title: "{date_full}",
-                                "{date}"
-                            }
+                        if thread_count > 1 {
+                            span { class: "thread-count", "{thread_count} messages" }
                         }
-                        if !rendered.headers.to.is_empty() {
-                            ReaderRecipientRow {
-                                label: "To".to_string(),
-                                addrs: rendered.headers.to.clone(),
-                            }
-                        }
-                        if !rendered.headers.cc.is_empty() {
-                            ReaderRecipientRow {
-                                label: "Cc".to_string(),
-                                addrs: rendered.headers.cc.clone(),
-                            }
-                        }
-                        if !rendered.attachments.is_empty() {
-                            ReaderAttachments {
-                                attachments: rendered.attachments.clone(),
-                                message_id: rendered.headers.id.clone(),
-                            }
-                        }
-                        if rendered.remote_content_blocked {
-                            RemoteContentBanner {
-                                account_id: rendered.headers.account_id.clone(),
-                                sender_addr: rendered
-                                    .headers
-                                    .from
-                                    .first()
-                                    .map(|a| a.address.clone())
-                                    .unwrap_or_default(),
+                    }
+                    // Stacked card list. Each card is its own
+                    // component with its own expansion signal so
+                    // toggling one doesn't re-render every other.
+                    // Default expansion (first paint only): unread
+                    // messages, the user's anchor selection, and the
+                    // last message are open; the rest start
+                    // collapsed.
+                    div {
+                        class: "thread-stack",
+                        for (idx, m) in messages.iter().cloned().enumerate() {
+                            MessageCard {
+                                key: "{m.headers.id.0}",
+                                rendered: m,
+                                primary_id: primary_id.clone(),
+                                is_last: idx == thread_count - 1,
                                 force_trusted,
+                                compose,
                             }
                         }
                     }
-                    // Body slot — sandboxed iframe. webkit2gtk renders
-                    // the sanitized HTML directly. Sandbox is
-                    // `allow-scripts` (without `allow-same-origin`)
-                    // so the wrapper's click-forwarder can run and
-                    // postMessage URLs to the parent — the iframe is
-                    // still a unique null origin, can't read parent
-                    // cookies or localStorage, and top-level
-                    // navigation stays blocked. Forms and pop-ups
-                    // remain disabled. The email HTML is already
-                    // script-stripped by ammonia; the only JS that
-                    // actually runs is the click forwarder injected
-                    // by `compose_reader_html`.
+                }
+            }
+        }
+    }
+}
+
+/// One card in the stacked thread reader. The card always renders
+/// its header strip (from / date / snippet) so the user can see the
+/// shape of the conversation at a glance; the body iframe + recipient
+/// rows + attachments only mount when the card is expanded. We
+/// deliberately don't render every iframe up-front — a 30-message
+/// newsletter thread would otherwise mount 30 webkit iframes the
+/// moment the thread opens, which is both slow and a real memory hit
+/// on hybrid GPU boxes (see `feedback_nvidia_wayland`).
+///
+/// Default expansion (first paint only): every unread message, the
+/// message the user clicked from the list (`primary_id`), and the
+/// last message in the thread. Read messages collapse — they're
+/// usually quotes you don't need to re-scan.
+#[component]
+fn MessageCard(
+    rendered: RenderedMessage,
+    primary_id: MessageId,
+    is_last: bool,
+    force_trusted: Signal<bool>,
+    compose: Signal<Option<ComposeState>>,
+) -> Element {
+    let initially_expanded =
+        !rendered.headers.flags.seen || rendered.headers.id == primary_id || is_last;
+    let mut expanded = use_signal(|| initially_expanded);
+
+    let primary = rendered.headers.from.first();
+    let from_name = primary
+        .map(|a| {
+            a.display_name
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| a.address.clone())
+        })
+        .unwrap_or_default();
+    let from_addr = primary.map(|a| a.address.clone()).unwrap_or_default();
+    let date = crate::format::format_relative_date(rendered.headers.date, chrono::Utc::now());
+    let date_full = rendered.headers.date.to_rfc2822();
+    // Single-line snippet for the collapsed-row preview. Real
+    // sanitized HTML still goes through the iframe when expanded;
+    // this is just a typeahead so the user knows what's behind
+    // the click without unfolding it.
+    let snippet = rendered.headers.snippet.clone();
+
+    let card_class = if *expanded.read() {
+        "thread-card thread-card-expanded"
+    } else {
+        "thread-card thread-card-collapsed"
+    };
+
+    rsx! {
+        article {
+            class: "{card_class}",
+            // The header acts as a click-to-toggle target. We
+            // intentionally use a real <button> so keyboard focus
+            // works without extra ARIA juggling.
+            button {
+                r#type: "button",
+                class: "thread-card-header",
+                onclick: move |_| {
+                    let cur = *expanded.read();
+                    expanded.set(!cur);
+                },
+                title: if *expanded.read() { "Collapse this message" } else { "Expand this message" },
+                span { class: "thread-card-from", "{from_name}" }
+                if !from_addr.is_empty() && from_addr != from_name {
+                    span { class: "thread-card-addr", "{from_addr}" }
+                }
+                if !*expanded.read() {
+                    span { class: "thread-card-snippet", "{snippet}" }
+                }
+                span {
+                    class: "thread-card-date",
+                    title: "{date_full}",
+                    "{date}"
+                }
+                if !rendered.headers.flags.seen {
+                    span { class: "thread-card-unread-dot", title: "Unread", "" }
+                }
+            }
+            if *expanded.read() {
+                div {
+                    class: "thread-card-body",
+                    if !rendered.headers.to.is_empty() {
+                        ReaderRecipientRow {
+                            label: "To".to_string(),
+                            addrs: rendered.headers.to.clone(),
+                        }
+                    }
+                    if !rendered.headers.cc.is_empty() {
+                        ReaderRecipientRow {
+                            label: "Cc".to_string(),
+                            addrs: rendered.headers.cc.clone(),
+                        }
+                    }
+                    if !rendered.attachments.is_empty() {
+                        ReaderAttachments {
+                            attachments: rendered.attachments.clone(),
+                            message_id: rendered.headers.id.clone(),
+                        }
+                    }
+                    if rendered.remote_content_blocked {
+                        RemoteContentBanner {
+                            account_id: rendered.headers.account_id.clone(),
+                            sender_addr: rendered
+                                .headers
+                                .from
+                                .first()
+                                .map(|a| a.address.clone())
+                                .unwrap_or_default(),
+                            force_trusted,
+                        }
+                    }
                     {
-                        let body_html = compose_reader_html(rendered);
+                        // Body slot — sandboxed iframe per card. See
+                        // `ReaderV2`'s body-render comments for the
+                        // sandbox / CSP rationale.
+                        let body_html = compose_reader_html(&rendered);
+                        let _ = compose;
                         rsx! {
                             iframe {
                                 class: "reader-body-iframe",

@@ -1570,6 +1570,129 @@ ul {
   font-size: var(--fs-11);
 }
 
+/* Stacked thread reader. The reader pane scrolls a list of
+ * `.thread-card` elements with a single subject + count chrome strip
+ * pinned above them. Each card has a clickable header that toggles
+ * its body, so a 12-message conversation collapses down to 12 thin
+ * rows the user can scan at a glance. */
+.thread-chrome {
+  flex: 0 0 auto;
+  padding: 10px 14px 6px;
+  border-bottom: var(--hairline);
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.thread-count {
+  font-size: var(--fs-11);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.thread-stack {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.thread-card {
+  display: flex;
+  flex-direction: column;
+  border-bottom: var(--hairline);
+  background: var(--bg-primary);
+}
+
+.thread-card-expanded {
+  background: var(--bg-primary);
+}
+
+.thread-card-collapsed {
+  background: var(--bg-tertiary);
+}
+
+/* Header strip — clickable. Reset the default <button> chrome since
+ * the row is the click target, not a pill. */
+.thread-card-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 14px;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--fs-11);
+  color: var(--text-primary);
+  width: 100%;
+}
+
+.thread-card-header:hover {
+  background: var(--bg-secondary);
+}
+
+.thread-card-from {
+  font-weight: var(--fw-bold);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.thread-card-addr {
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.thread-card-snippet {
+  color: var(--text-secondary);
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.thread-card-date {
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+/* Tiny dot in the header strip flagging an unread message. The
+ * empty content + width is intentional — the `::before` would also
+ * work but a span keeps the title attribute hover-tooltip simple. */
+.thread-card-unread-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-amber);
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+.thread-card-body {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 14px 14px;
+  gap: 8px;
+  /* Bound the iframe so a 30-message thread doesn't stretch the
+   * card stack to the size of every email body concatenated. Each
+   * body still scrolls internally. */
+  min-height: 280px;
+}
+
+/* When a card is expanded, give the body iframe a minimum height
+ * so short messages still get a visible body slot. */
+.thread-card-body .reader-body-iframe {
+  min-height: 240px;
+}
+
 .reader-action {
   display: inline-flex;
   align-items: center;

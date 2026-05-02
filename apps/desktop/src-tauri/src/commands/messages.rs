@@ -268,16 +268,97 @@ pub async fn messages_get(
     input: MessagesGetInput,
 ) -> IpcResult<RenderedMessage> {
     tracing::debug!(id = %input.id.0, "messages_get");
+    let rendered = render_message(&state, &input.id, input.force_trusted).await?;
+    // Backlog #11 — populate the single-entry cache so a subsequent
+    // `messages_open_in_window` for the same id can skip the re-fetch
+    // + re-sanitize. The cache is invalidated implicitly: the next
+    // `messages_get` for a different id (or the same id with a
+    // different `force_trusted`) overwrites the slot. Only the
+    // foreground `messages_get` writes the cache — `messages_thread`
+    // explicitly skips it because the popup reader hands back a
+    // single id, not a thread.
+    *state.last_rendered.lock().await = Some((input.id.clone(), rendered.clone()));
+    Ok(rendered)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MessagesThreadInput {
+    /// Any message in the thread — usually the one the user has
+    /// selected in the message list. The command resolves the row's
+    /// `thread_id`, then renders every message attached to that
+    /// thread in date-ascending order. Singleton threads (or
+    /// messages with `thread_id = NULL`) round-trip a one-element
+    /// vec so the caller doesn't need a fallback path.
+    pub id: MessageId,
+    /// Same `force_trusted` semantics as `messages_get` — applied to
+    /// every message in the thread. The reader's "Load images"
+    /// banner is whole-thread because remote-image trust is per
+    /// sender, not per individual message, and the user typically
+    /// flips it once for the whole conversation.
+    #[serde(default)]
+    pub force_trusted: bool,
+}
+
+/// `messages_thread` — render every message in the same thread as
+/// `input.id`. Drives the desktop UI's stacked thread reader: the
+/// caller selects one message, the renderer paints all of them as a
+/// vertical stack with prior messages collapsed.
+///
+/// Lock discipline: takes the DB mutex twice — once for the input
+/// row's headers (to resolve the thread id), then once again per
+/// rendered message via [`render_message`]. We don't hold a single
+/// lock across the loop because [`lazy_fetch_body`] inside
+/// `render_message` can block on the network for tens of seconds and
+/// we don't want that blocking IPC for unrelated reads.
+#[tauri::command]
+pub async fn messages_thread(
+    state: State<'_, AppState>,
+    input: MessagesThreadInput,
+) -> IpcResult<Vec<RenderedMessage>> {
+    tracing::debug!(id = %input.id.0, "messages_thread");
     let db = state.db.lock().await;
     let headers = messages_repo::get(&*db, &input.id).await?;
-    let body_path = messages_repo::body_path(&*db, &input.id).await?;
+    let thread_id = headers.thread_id.clone();
+    let ids: Vec<MessageId> = match thread_id {
+        Some(ref tid) => messages_repo::list_by_thread(&*db, tid)
+            .await?
+            .into_iter()
+            .map(|h| h.id)
+            .collect(),
+        None => vec![input.id.clone()],
+    };
+    drop(db);
+
+    let mut out = Vec::with_capacity(ids.len());
+    for id in &ids {
+        out.push(render_message(&state, id, input.force_trusted).await?);
+    }
+    Ok(out)
+}
+
+/// Shared rendering pipeline for `messages_get` and `messages_thread`.
+/// Pulls the row's headers + body bytes (cached or lazy-fetched),
+/// applies trust resolution against the user's three opt-in surfaces,
+/// and runs the sanitizer. Does NOT touch `state.last_rendered` —
+/// that cache is only meaningful for the singleton-render path the
+/// popup reader uses, and we don't want a thread render to clobber
+/// the user's most-recently-viewed message id with the chronologically
+/// last one.
+async fn render_message(
+    state: &AppState,
+    id: &MessageId,
+    force_trusted: bool,
+) -> IpcResult<RenderedMessage> {
+    let db = state.db.lock().await;
+    let headers = messages_repo::get(&*db, id).await?;
+    let body_path = messages_repo::body_path(&*db, id).await?;
     // Trust resolution stacks three sources, in priority order:
     //
-    // 1. `input.force_trusted` — per-render override used by the
-    //    reader's "Load images" banner button. One render, no storage.
-    // 2. Global `privacy.remote_images_always` setting — when on, every
-    //    message renders as if the sender is trusted. Stored as
-    //    "true"/"false" plain text in `app_settings_v1`.
+    // 1. `force_trusted` — per-render override used by the reader's
+    //    "Load images" banner button. One render, no storage.
+    // 2. Global `privacy.remote_images_always` setting — when on,
+    //    every message renders as if the sender is trusted. Stored
+    //    as "true"/"false" plain text in `app_settings_v1`.
     // 3. Per-sender opt-in (`remote_content_opt_ins`) — set by the
     //    "Always load from this sender" banner button.
     //
@@ -286,7 +367,7 @@ pub async fn messages_get(
         app_settings_repo::get(&*db, KEY_REMOTE_IMAGES_ALWAYS).await?,
         Some(ref v) if v == "true"
     );
-    let sender_is_trusted = if input.force_trusted || global_remote_images_on {
+    let sender_is_trusted = if force_trusted || global_remote_images_on {
         true
     } else {
         match headers.from.first() {
@@ -297,9 +378,9 @@ pub async fn messages_get(
         }
     };
     tracing::debug!(
-        id = %input.id.0,
+        id = %id.0,
         sender_is_trusted,
-        "messages_get sanitize path"
+        "render_message sanitize path"
     );
     drop(db);
 
@@ -307,7 +388,7 @@ pub async fn messages_get(
     let bytes = if body_path.is_some() {
         load_cached_body(&blobs, &headers).await
     } else {
-        lazy_fetch_body(&state, &blobs, &headers).await
+        lazy_fetch_body(state, &blobs, &headers).await
     };
 
     let (body_text, sanitized_html, attachments) = match bytes {
@@ -315,21 +396,14 @@ pub async fn messages_get(
         None => (None, None, Vec::new()),
     };
 
-    let rendered = RenderedMessage {
+    Ok(RenderedMessage {
         headers,
         sanitized_html,
         body_text,
         attachments,
         sender_is_trusted,
         remote_content_blocked: !sender_is_trusted,
-    };
-    // Backlog #11 — populate the single-entry cache so a subsequent
-    // `messages_open_in_window` for the same id can skip the re-fetch
-    // + re-sanitize. The cache is invalidated implicitly: the next
-    // `messages_get` for a different id (or the same id with a
-    // different `force_trusted`) overwrites the slot.
-    *state.last_rendered.lock().await = Some((input.id.clone(), rendered.clone()));
-    Ok(rendered)
+    })
 }
 
 #[derive(Debug, Deserialize)]
