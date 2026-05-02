@@ -4,7 +4,10 @@
 //! readable when rendering logic is named and tested here rather
 //! than inlined into `rsx!`.
 
+use std::borrow::Cow;
+
 use chrono::{DateTime, Datelike, Local, Utc};
+use qsl_core::FolderRole;
 use qsl_ipc::MessageFlags;
 
 /// One-character glyph + CSS class describing the dominant IMAP
@@ -52,6 +55,44 @@ pub fn display_name_for_folder(name: &str) -> &str {
     } else {
         name
     }
+}
+
+/// Role-aware display name. Same as [`display_name_for_folder`] when
+/// the server-provided name already looks human-friendly, but falls
+/// back to [`FolderRole::canonical_display_name`] when the name looks
+/// unfriendly (all-uppercase ASCII letters, e.g. `DRAFTS` / `SENT` /
+/// `TRASH` from a self-hosted IMAP or Microsoft 365 server).
+///
+/// Gmail and Fastmail return mixed-case names like `Sent Mail` and
+/// `All Mail`; we deliberately preserve those rather than overriding
+/// them with the canonical role label, since the server name is what
+/// the user sees in the official web client and matching that
+/// reduces surprise.
+///
+/// `INBOX` is uppercase per the IMAP spec (RFC 3501 §5.1) and is
+/// always normalized to `Inbox`, even when no role is attached.
+pub fn display_name_for_folder_with_role<'a>(
+    name: &'a str,
+    role: Option<&FolderRole>,
+) -> Cow<'a, str> {
+    // Server name looks unfriendly when it's all uppercase ASCII
+    // letters (length > 0). Pure all-caps short codes ("AOL", "BBC")
+    // are rare for top-level mailbox names and the worst case is they
+    // map to their role's canonical name when one is set — i.e. a
+    // user folder named "AOL" with a role attached would render as
+    // the role label, which would only happen if some adapter
+    // mistakenly tagged a user folder with a role. Plain pass-through
+    // is safe when `role.is_none()`.
+    let looks_unfriendly = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || !c.is_ascii_alphabetic());
+    if looks_unfriendly {
+        if let Some(role) = role {
+            return Cow::Borrowed(role.canonical_display_name());
+        }
+    }
+    Cow::Borrowed(display_name_for_folder(name))
 }
 
 /// Format a [`DateTime<Utc>`] for the message-list date column.
@@ -230,5 +271,64 @@ mod tests {
         assert_eq!(display_name_for_folder("Newsletters"), "Newsletters");
         // Unknown / user-defined names too.
         assert_eq!(display_name_for_folder("Receipts/2026"), "Receipts/2026");
+    }
+
+    #[test]
+    fn display_name_with_role_canonicalizes_unfriendly_names() {
+        // Self-hosted IMAP / Microsoft 365 conventions: ALL CAPS leaf
+        // names with a SPECIAL-USE role attached. Map to canonical.
+        assert_eq!(
+            display_name_for_folder_with_role("DRAFTS", Some(&FolderRole::Drafts)),
+            "Drafts"
+        );
+        assert_eq!(
+            display_name_for_folder_with_role("SENT", Some(&FolderRole::Sent)),
+            "Sent"
+        );
+        assert_eq!(
+            display_name_for_folder_with_role("TRASH", Some(&FolderRole::Trash)),
+            "Trash"
+        );
+        // INBOX always maps to Inbox even with no role attached
+        // (IMAP RFC 3501 §5.1 mandate).
+        assert_eq!(
+            display_name_for_folder_with_role("INBOX", Some(&FolderRole::Inbox)),
+            "Inbox"
+        );
+        assert_eq!(display_name_for_folder_with_role("INBOX", None), "Inbox");
+    }
+
+    #[test]
+    fn display_name_with_role_keeps_friendly_server_names() {
+        // Gmail / Fastmail return mixed-case display names that the
+        // user already recognizes from the official client. Don't
+        // override even when a role is set.
+        assert_eq!(
+            display_name_for_folder_with_role("Sent Mail", Some(&FolderRole::Sent)),
+            "Sent Mail"
+        );
+        assert_eq!(
+            display_name_for_folder_with_role("All Mail", Some(&FolderRole::All)),
+            "All Mail"
+        );
+        assert_eq!(
+            display_name_for_folder_with_role("Drafts", Some(&FolderRole::Drafts)),
+            "Drafts"
+        );
+        // User-defined folders pass through.
+        assert_eq!(
+            display_name_for_folder_with_role("Receipts/2026", None),
+            "Receipts/2026"
+        );
+    }
+
+    #[test]
+    fn display_name_with_role_falls_back_when_role_missing() {
+        // ALL CAPS leaf name without a role tag: we don't know what
+        // it should map to, so let the string-based helper do its
+        // existing INBOX / Junk handling and pass everything else
+        // through untouched.
+        assert_eq!(display_name_for_folder_with_role("DRAFTS", None), "DRAFTS");
+        assert_eq!(display_name_for_folder_with_role("URGENT", None), "URGENT");
     }
 }

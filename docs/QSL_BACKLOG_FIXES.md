@@ -53,20 +53,14 @@ quick smoke pass before v0.1 cuts.
 
 ## 3. Sentence case folder names
 
-**Status: Open.** UI renders the raw IMAP `Folder.name` directly. No display-name mapper exists today.
+**Status: Done.** Two-stage mapper in `apps/desktop/ui/src/format.rs`:
 
-**Symptom:** Sidebar and message-list header show "INBOX" in all caps. Other folder names are sentence case ("Sent Mail", "Drafts", "All Mail", "Spam", "Trash") — only "INBOX" is the outlier.
+- `display_name_for_folder(name)` — the string-only fallback for callers that only have a `Folder.name`. Covers the IMAP RFC 3501 §5.1 `INBOX` mandate (`INBOX` → "Inbox") plus the older `Junk` / `Junk E-mail` / `Junk Email` → "Spam" rewrites. Used by the message-list header (`folder_title_from_selection`) and the command-palette folder list, both of which only have a `FolderId`.
+- `display_name_for_folder_with_role(name, role)` — adds role-aware fallback: when the server-provided name looks unfriendly (all-uppercase ASCII letters) AND a SPECIAL-USE / JMAP role is attached, returns `FolderRole::canonical_display_name()` (`Inbox` / `Sent` / `Drafts` / `Trash` / `Spam` / `Archive` / `Important` / `All Mail` / `Starred`). Gmail and Fastmail return mixed-case display names like `Sent Mail` and `All Mail` and pass through unchanged so they match the user's mental model from the official web client. Used by both sidebar rows where the full `Folder` is in scope.
 
-**Cause:** Almost certainly the IMAP folder name is the literal string `INBOX` (it's the standard IMAP convention) and the UI is rendering it raw. Other folders are showing their display names from Gmail's metadata.
+`FolderRole::canonical_display_name()` lives in `qsl_core::folder` so non-UI callers (e.g. an eventual MCP server's `list_folders` tool) can reuse the same canonical strings.
 
-**Fix:**
-- Add a display-name mapping for canonical IMAP folder names. At minimum: `INBOX` → "Inbox". Consider also: `Sent` → "Sent Mail", `Junk` → "Spam" if you encounter non-Gmail accounts.
-- Apply the mapping at the UI layer, not in the cache. The cache should keep the canonical IMAP name; the UI translates for display.
-- Apply consistently in sidebar and message-list header.
-
-**Verification:** Sidebar shows "Inbox", message-list header shows "Inbox". Both update if folder is renamed.
-
-**Side benefit:** This same display-name mapping will be used by the MCP server's `list_folders` tool to populate the `display_name` field per the spec. Build it in a place both UI and MCP can reuse.
+**Symptom (resolved):** Sidebar and message-list header show "INBOX" in all caps.
 
 ## 4. Remote image gating (privacy/tracking)
 

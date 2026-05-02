@@ -3488,7 +3488,7 @@ fn SidebarMailboxRow(
                 MailboxRoleIcon { role: role.clone() }
                 span {
                     class: "sidebar-row-name",
-                    "{crate::format::display_name_for_folder(&folder.name)}"
+                    "{crate::format::display_name_for_folder_with_role(&folder.name, folder.role.as_ref())}"
                 }
             }
             if unread > 0 {
@@ -3532,7 +3532,7 @@ fn SidebarLabelRow(folder: Folder, account_id: AccountId, selection: Signal<Sele
                 }
                 span {
                     class: "sidebar-row-name",
-                    "{crate::format::display_name_for_folder(&folder.name)}"
+                    "{crate::format::display_name_for_folder_with_role(&folder.name, folder.role.as_ref())}"
                 }
             }
             if unread > 0 {
