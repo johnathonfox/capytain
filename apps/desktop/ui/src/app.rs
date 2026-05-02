@@ -330,6 +330,16 @@ pub struct UnreadVisible(pub Signal<Vec<MessageId>>);
 #[derive(Clone, Copy)]
 pub struct ThreadCounts(pub Signal<std::collections::HashMap<String, u32>>);
 
+/// Conversation-threading toggle (`reading.threading`). When `true`
+/// (default): the message list rolls adjacent same-thread rows into
+/// a `ThreadRow` with a count badge, the reader pane fetches the
+/// whole thread via `messages_thread`, and `MessageRowV2` shows
+/// "(N)" badges. When `false`: every message is its own row + the
+/// reader shows only the selected message. Newtype so the bool
+/// signal doesn't collide with other `Signal<bool>` contexts.
+#[derive(Clone, Copy)]
+pub struct ThreadingEnabled(pub Signal<bool>);
+
 // ---------- Root ----------
 
 /// Apply the persisted `appearance.theme` + `appearance.density`
@@ -471,6 +481,45 @@ fn full_app_shell() -> Element {
     // the same reason as `UnreadVisible`.
     let thread_counts: Signal<std::collections::HashMap<String, u32>> =
         use_signal(std::collections::HashMap::new);
+    // Conversation-threading toggle. Loaded once at boot and live-
+    // updated via `app_settings_changed`. Default-on so existing
+    // users see no change unless they opt out.
+    let mut threading_enabled: Signal<bool> = use_signal(|| true);
+    use_hook(move || {
+        wasm_bindgen_futures::spawn_local(async move {
+            let v = invoke::<Option<String>>(
+                "app_settings_get",
+                serde_json::json!({ "input": { "key": crate::settings::KEY_THREADING } }),
+            )
+            .await
+            .ok()
+            .flatten();
+            // Stored "true"/"false"; absent → default on.
+            threading_enabled.set(!matches!(v.as_deref(), Some("false")));
+        });
+    });
+    use_hook(move || {
+        let cb = Closure::<dyn FnMut(JsValue)>::new(move |payload: JsValue| {
+            #[derive(serde::Deserialize)]
+            struct Changed {
+                key: String,
+                value: String,
+            }
+            let Ok(evt) = serde_wasm_bindgen::from_value::<Changed>(payload) else {
+                return;
+            };
+            if evt.key == crate::settings::KEY_THREADING {
+                threading_enabled.set(evt.value != "false");
+            }
+        });
+        wasm_bindgen_futures::spawn_local(async move {
+            let func = cb.as_ref().unchecked_ref::<js_sys::Function>();
+            if let Err(e) = tauri_listen("app_settings_changed", func).await {
+                web_sys_log(&format!("threading toggle listen failed: {e:?}"));
+            }
+            Box::leak(Box::new(cb));
+        });
+    });
 
     // Command palette visibility (⌘K) and recent-search ring buffer for
     // the palette's "Recent" section. Both live at App root so the
@@ -524,6 +573,7 @@ fn full_app_shell() -> Element {
     // would shadow each other.
     use_context_provider(|| UnreadVisible(unread_visible));
     use_context_provider(|| ThreadCounts(thread_counts));
+    use_context_provider(|| ThreadingEnabled(threading_enabled));
     use_context_provider(|| selection);
 
     // Capture cleared search queries into the recent ring buffer.
@@ -4800,14 +4850,36 @@ fn MessageListV2(
                         if messages.is_empty() {
                             p { class: "msglist-empty", "No messages in this mailbox." }
                         } else {
-                            for item in crate::threading::group_by_thread(messages.clone()) {
-                                match item {
-                                    crate::threading::MessageListItem::Single(m) => rsx! {
-                                        MessageRowV2 { msg: m, selection, bulk_selected }
-                                    },
-                                    crate::threading::MessageListItem::Thread { head, members } => rsx! {
-                                        ThreadRow { head, members, selection, bulk_selected }
-                                    },
+                            // When the user has turned off conversation
+                            // threading, render every message as a
+                            // standalone row — same data shape, just
+                            // skip the `group_by_thread` rollup so
+                            // adjacent same-thread messages stay
+                            // separate.
+                            {
+                                let ThreadingEnabled(threading_on) =
+                                    use_context::<ThreadingEnabled>();
+                                let items: Vec<crate::threading::MessageListItem> =
+                                    if *threading_on.read() {
+                                        crate::threading::group_by_thread(messages.clone())
+                                    } else {
+                                        messages
+                                            .iter()
+                                            .cloned()
+                                            .map(crate::threading::MessageListItem::Single)
+                                            .collect()
+                                    };
+                                rsx! {
+                                    for item in items {
+                                        match item {
+                                            crate::threading::MessageListItem::Single(m) => rsx! {
+                                                MessageRowV2 { msg: m, selection, bulk_selected }
+                                            },
+                                            crate::threading::MessageListItem::Thread { head, members } => rsx! {
+                                                ThreadRow { head, members, selection, bulk_selected }
+                                            },
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -4881,13 +4953,18 @@ fn MessageRowV2(
     // more than one entry, show "(N)" before the subject so the user
     // knows clicking will open a stacked thread of N messages.
     // Looked up via the shared `ThreadCounts` context so we don't
-    // need a per-row prop.
+    // need a per-row prop. Suppressed entirely when the user has
+    // turned off conversation threading.
     let ThreadCounts(thread_counts_signal) = use_context::<ThreadCounts>();
-    let thread_count: Option<u32> = msg
-        .thread_id
-        .as_ref()
-        .and_then(|t| thread_counts_signal.read().get(&t.0).copied())
-        .filter(|n| *n > 1);
+    let ThreadingEnabled(threading_enabled) = use_context::<ThreadingEnabled>();
+    let thread_count: Option<u32> = if *threading_enabled.read() {
+        msg.thread_id
+            .as_ref()
+            .and_then(|t| thread_counts_signal.read().get(&t.0).copied())
+            .filter(|n| *n > 1)
+    } else {
+        None
+    };
     // `checked` is its own row state — the row stays a `selected` row
     // only when *opened* in the reader; bulk-checking just adds a
     // visual marker without taking over reader focus.
@@ -5412,11 +5489,32 @@ fn ReaderV2(
     let id_for_fetch = id.clone();
     let mut force_trusted_for_fetch = force_trusted;
     let mut sync_tick_for_fetch = sync_tick;
+    let ThreadingEnabled(threading_enabled) = use_context::<ThreadingEnabled>();
+    let mut threading_for_fetch = threading_enabled;
     let thread = use_resource(move || {
         let id = id_for_fetch.clone();
         let force_trusted_val = *force_trusted_for_fetch.read();
         let _ = sync_tick_for_fetch();
+        let threading_on = *threading_for_fetch.read();
         async move {
+            // When threading is off, fetch only the single selected
+            // message and wrap it in a one-element vec so the
+            // stacked-card rendering path stays uniform. The reader
+            // still shows one card; the user gets the same actions
+            // and chrome, just no thread navigation.
+            if !threading_on {
+                let single = invoke::<RenderedMessage>(
+                    "messages_get",
+                    serde_json::json!({
+                        "input": {
+                            "id": id,
+                            "force_trusted": force_trusted_val,
+                        }
+                    }),
+                )
+                .await?;
+                return Ok::<_, String>(vec![single]);
+            }
             let messages = invoke::<Vec<RenderedMessage>>(
                 "messages_thread",
                 serde_json::json!({

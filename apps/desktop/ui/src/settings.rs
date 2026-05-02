@@ -716,6 +716,15 @@ const KEY_DENSITY: &str = "appearance.density";
 const KEY_TRAY_ENABLED: &str = "appearance.tray_enabled";
 const KEY_NOTIFY_MASTER: &str = "notifications.master";
 const KEY_REMOTE_IMAGES: &str = "privacy.remote_images_always";
+/// Setting that toggles conversation threading throughout the
+/// reader. When on (default): the message list collapses adjacent
+/// same-thread messages into a count-badged row, the reader pane
+/// renders the whole thread as a stacked card list, and the
+/// message-list rows show "(N)" badges for multi-message threads.
+/// When off: every message renders as its own row + the reader
+/// shows only the selected message. Stored as plain text
+/// "true"/"false" in `app_settings_v1`.
+pub const KEY_THREADING: &str = "reading.threading";
 
 #[component]
 fn AppearanceTab(tick: SettingsTick) -> Element {
@@ -749,6 +758,21 @@ fn AppearanceTab(tick: SettingsTick) -> Element {
             }
             AutostartRow {}
             DefaultEmailClientRow {}
+
+            h2 { class: "settings-section-title", "Reading" }
+            BoolSettingRow {
+                setting_key: KEY_THREADING,
+                label: "Group conversations into threads",
+                default_on: true,
+                tick,
+            }
+            p {
+                class: "settings-note",
+                "When on, the message list collapses adjacent same-thread "
+                "messages into a single row, and opening a conversation "
+                "shows every reply stacked together. Turn off to see "
+                "every message as its own list row and reader pane."
+            }
         }
     }
 }
