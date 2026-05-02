@@ -645,6 +645,34 @@ fn full_app_shell() -> Element {
 
     use_appearance_hooks();
 
+    // Listen for the global "always load remote images" setting
+    // changing in the Settings window. Bump `sync_tick` so the
+    // currently-open reader pane refetches via `messages_get` and
+    // applies the new policy without the user having to reselect
+    // the message. Only fires on the privacy key — theme/density
+    // changes are already handled inside `use_appearance_hooks`.
+    use_hook(move || {
+        let cb = Closure::<dyn FnMut(JsValue)>::new(move |payload: JsValue| {
+            #[derive(serde::Deserialize)]
+            struct Changed {
+                key: String,
+            }
+            let Ok(evt) = serde_wasm_bindgen::from_value::<Changed>(payload) else {
+                return;
+            };
+            if evt.key == "privacy.remote_images_always" {
+                sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+            }
+        });
+        wasm_bindgen_futures::spawn_local(async move {
+            let func = cb.as_ref().unchecked_ref::<js_sys::Function>();
+            if let Err(e) = tauri_listen("app_settings_changed", func).await {
+                web_sys_log(&format!("app_settings_changed for reader listen: {e:?}"));
+            }
+            Box::leak(Box::new(cb));
+        });
+    });
+
     // Tell the Rust side the UI is mounted so the sync engine can
     // start its bootstrap pass. Without this signal the engine waits
     // up to 10s before kicking off, but firing it explicitly keeps
@@ -4746,29 +4774,33 @@ fn ReaderV2(
         }));
     }
 
+    // Inline-read pattern (per feedback_dioxus_use_resource_reactive.md).
+    // Three deps: the message id, the per-render force_trusted override,
+    // and sync_tick — the latter so a settings flip ("always load remote
+    // images" toggle) re-runs `messages_get` for whatever message is
+    // currently open. The App-level `app_settings_changed` listener
+    // bumps sync_tick on the privacy key.
     let id_for_fetch = id.clone();
-    let force_trusted_val = *force_trusted.read();
-    let msg = use_resource(use_reactive!(
-        |id_for_fetch, force_trusted_val| async move {
+    let mut force_trusted_for_fetch = force_trusted;
+    let mut sync_tick_for_fetch = sync_tick;
+    let msg = use_resource(move || {
+        let id = id_for_fetch.clone();
+        let force_trusted_val = *force_trusted_for_fetch.read();
+        let _ = sync_tick_for_fetch();
+        async move {
             let rendered = invoke::<RenderedMessage>(
                 "messages_get",
                 serde_json::json!({
                     "input": {
-                        "id": id_for_fetch,
+                        "id": id,
                         "force_trusted": force_trusted_val,
                     }
                 }),
             )
             .await?;
-            // The body HTML is rendered by stuffing
-            // `compose_reader_html(&rendered)` into an `<iframe srcdoc>`
-            // in the rsx! tree below. No IPC hop, no overlay surface,
-            // no rect-tracker — webkit2gtk's iframe sandbox owns the
-            // render. The `RenderedMessage` itself is what we keep
-            // around for the headers and attachment list.
             Ok::<_, String>(rendered)
         }
-    ));
+    });
 
     // Mark-as-read on selection. Fires once per `id` change. The
     // command also queues an outbox entry for the server flag write,

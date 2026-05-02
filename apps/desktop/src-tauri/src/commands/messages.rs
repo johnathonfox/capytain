@@ -20,7 +20,8 @@ use qsl_mime::{
     sanitize_email_html_trusted, MessageIdentity,
 };
 use qsl_storage::{
-    repos::accounts as accounts_repo, repos::drafts as drafts_repo, repos::folders as folders_repo,
+    repos::accounts as accounts_repo, repos::app_settings as app_settings_repo,
+    repos::drafts as drafts_repo, repos::folders as folders_repo,
     repos::messages as messages_repo, repos::outbox as outbox_repo, repos::remote_content_opt_ins,
     BlobStore,
 };
@@ -33,6 +34,11 @@ use crate::state::AppState;
 /// Phase 0 Week 5 caps a single page to 500 headers. Sync engine paging
 /// (Phase 1) negotiates higher bounds directly with the backend.
 const MAX_PAGE_LIMIT: u32 = 500;
+
+/// `app_settings_v1` key for the global "always load remote images"
+/// toggle. Mirrored from `apps/desktop/ui/src/settings.rs::KEY_REMOTE_IMAGES`
+/// — keep both in sync. Stored as plain text "true"/"false".
+const KEY_REMOTE_IMAGES_ALWAYS: &str = "privacy.remote_images_always";
 
 #[derive(Debug, Deserialize)]
 pub struct MessagesListInput {
@@ -266,10 +272,22 @@ pub async fn messages_get(
     let db = state.db.lock().await;
     let headers = messages_repo::get(&*db, &input.id).await?;
     let body_path = messages_repo::body_path(&*db, &input.id).await?;
-    // `input.force_trusted` is the per-render override used by the
-    // reader's "Load images" banner button — it bypasses the opt-in
-    // check for one render without writing anything to storage.
-    let sender_is_trusted = if input.force_trusted {
+    // Trust resolution stacks three sources, in priority order:
+    //
+    // 1. `input.force_trusted` — per-render override used by the
+    //    reader's "Load images" banner button. One render, no storage.
+    // 2. Global `privacy.remote_images_always` setting — when on, every
+    //    message renders as if the sender is trusted. Stored as
+    //    "true"/"false" plain text in `app_settings_v1`.
+    // 3. Per-sender opt-in (`remote_content_opt_ins`) — set by the
+    //    "Always load from this sender" banner button.
+    //
+    // Any one of these flips the renderer to the trusted path.
+    let global_remote_images_on = matches!(
+        app_settings_repo::get(&*db, KEY_REMOTE_IMAGES_ALWAYS).await?,
+        Some(ref v) if v == "true"
+    );
+    let sender_is_trusted = if input.force_trusted || global_remote_images_on {
         true
     } else {
         match headers.from.first() {
