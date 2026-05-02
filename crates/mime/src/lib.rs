@@ -96,12 +96,16 @@ pub fn parse_rfc822(raw: &[u8], identity: MessageIdentity<'_>) -> Option<Message
 ///   explicit — if ammonia ever loosens its defaults in a minor
 ///   release, these stay stripped.
 ///
-/// Phase 1 Week 8 adds **remote-content blocking**: every URL in a
-/// `src` / `background` / `poster` / `srcset` attribute runs
-/// through [`remote_content::is_blocked`] against the default
-/// curated adblock engine. Blocked URLs get the attribute dropped,
-/// which neutralizes the resource load (browsers render the
-/// placeholder "missing image" glyph when `<img>` has no `src`).
+/// **Remote-content blocking** (default): every URL in a `src` /
+/// `background` / `poster` / `srcset` attribute is dropped unless
+/// it is `data:` (inline base64) or `cid:` (inline multipart
+/// content-id reference). Tracker filtering by adblock rules
+/// (Mailchimp open pixels, GA collect, etc.) was the original
+/// design but it leaked: marketing CDNs the user hadn't opted in
+/// to still loaded. Default-block-all matches the reader UI
+/// promise ("Images blocked for privacy" / "Load images" / "Always
+/// load from this sender"). The user opts in per-sender, which
+/// flips `messages_get` over to [`sanitize_email_html_trusted`].
 /// Link hrefs are deliberately not filtered here — blocking an
 /// outbound anchor is user-hostile; link-click cleaning (utm_*
 /// stripping, Mailchimp/SendGrid redirect unwrapping) is a
@@ -131,29 +135,36 @@ pub fn sanitize_email_html_trusted(raw_html: &str) -> String {
 }
 
 fn sanitize(raw_html: &str, block_remote: bool) -> String {
-    let engine = remote_content::default_engine();
     let cleaned = ammonia::Builder::default()
         .add_generic_attributes(["style"])
+        .add_url_schemes(["data", "cid"])
         .rm_tags([
             "script", "iframe", "object", "embed", "form", "input", "button", "textarea", "select",
             "style", "link",
         ])
         .attribute_filter(move |_element, attribute, value| -> Option<Cow<'_, str>> {
-            // Only URL-bearing attributes on media elements go
-            // through the blocker. Everything else passes.
+            // In `block_remote` mode (default), drop any image-loading
+            // attribute that points at a remote URL. The reader UI
+            // banner ("Images blocked for privacy" / "Load images" /
+            // "Always load from this sender") is the user's gate;
+            // letting non-tracker CDN images through silently would
+            // contradict that promise. Inline `data:` and inline-CID
+            // `cid:` references stay — they don't phone home.
+            //
+            // Trusted-sender mode (`block_remote=false`) skips this
+            // filter entirely and lets every URL through.
             match attribute {
-                "src" | "background" | "poster" | "srcset"
-                    if block_remote && remote_content::is_blocked(engine, value, "image") =>
-                {
+                "src" | "background" | "poster" if block_remote && !url_is_inline_safe(value) => {
                     None
                 }
+                "srcset" if block_remote && !srcset_is_inline_safe(value) => None,
                 "style" if block_remote => {
                     // CSS `background-image: url(...)` and friends are
                     // a second remote-content vector that the
-                    // attribute-name match above misses. Drop blocked
-                    // declarations from the inline style; keep the
-                    // rest. See `filter_inline_style` for the parser.
-                    Some(Cow::Owned(filter_inline_style(value, engine)))
+                    // attribute-name match above misses. Drop any
+                    // declaration that references a non-inline URL;
+                    // keep the rest. See `filter_inline_style`.
+                    Some(Cow::Owned(filter_inline_style(value)))
                 }
                 _ => Some(Cow::Borrowed(value)),
             }
@@ -306,12 +317,45 @@ fn img_attrs_have_src(attrs: &str) -> bool {
 /// `url()`) tend to fight the email's existing fallback chain,
 /// whereas dropping the property entirely lets any earlier
 /// declaration in the cascade or the user-agent default take over.
-fn filter_inline_style(style: &str, engine: &adblock::Engine) -> String {
-    // Fast path: scan once for blocked URLs. If nothing matches,
-    // return the input verbatim — this preserves exact whitespace +
-    // trailing-semicolon shape, which keeps the common no-tracker
-    // case (most inline styles) byte-identical to the input and
-    // avoids spurious diffs in existing sanitizer tests.
+/// True if a single URL string is safe to keep without user opt-in:
+/// `data:` (inline base64) and `cid:` (inline content-id reference
+/// to a multipart/related body) don't make a network request.
+/// Anything else is treated as remote and gets blocked in
+/// untrusted-sender mode.
+fn url_is_inline_safe(url: &str) -> bool {
+    let trimmed = url.trim_start();
+    let lower_first = trimmed
+        .as_bytes()
+        .iter()
+        .take(5)
+        .map(u8::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let prefix = std::str::from_utf8(&lower_first).unwrap_or("");
+    prefix.starts_with("data:") || prefix.starts_with("cid:")
+}
+
+/// True if every URL in a `srcset` value is inline-safe. `srcset` is a
+/// comma-separated list of `<url> [<descriptor>]` entries (e.g.
+/// `"a.png 1x, b.png 2x"`). One non-inline URL drops the whole
+/// attribute — letting partial URLs through would defeat the block
+/// since browsers pick from the list opportunistically.
+fn srcset_is_inline_safe(srcset: &str) -> bool {
+    srcset.split(',').all(|entry| {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            return true;
+        }
+        let url = trimmed.split_whitespace().next().unwrap_or("");
+        url_is_inline_safe(url)
+    })
+}
+
+fn filter_inline_style(style: &str) -> String {
+    // Fast path: scan once for declarations carrying remote `url(...)`
+    // tokens. If nothing matches, return the input verbatim — this
+    // preserves exact whitespace + trailing-semicolon shape, which
+    // keeps the common no-image-styling case byte-identical to the
+    // input and avoids spurious diffs in existing sanitizer tests.
     let mut any_blocked = false;
     let kept: Vec<&str> = style
         .split(';')
@@ -321,7 +365,7 @@ fn filter_inline_style(style: &str, engine: &adblock::Engine) -> String {
                 return None;
             }
             for url in css_url_tokens(trimmed) {
-                if remote_content::is_blocked(engine, url, "image") {
+                if !url_is_inline_safe(url) {
                     any_blocked = true;
                     return None;
                 }
@@ -879,20 +923,76 @@ caf"
     }
 
     #[test]
-    fn sanitize_preserves_benign_image_src() {
-        // Not in any filter rule — should pass through intact.
-        let probe = r#"<img src="https://example.com/logo.png" alt="logo">"#;
+    fn sanitize_blocks_benign_remote_image_src() {
+        // Default policy is block-all-remote: even a non-tracker
+        // CDN image is dropped until the user opts in via "Always
+        // load from this sender" (which routes through
+        // `sanitize_email_html_trusted`).
+        let probe = r#"<img src="https://example.com/logo.png" alt="logo" width="100" height="40">"#;
         let out = sanitize_email_html(probe);
         assert!(
-            out.contains(r#"src="https://example.com/logo.png""#),
-            "benign src lost: {out}"
+            !out.contains("https://example.com/logo.png"),
+            "remote src kept: {out}"
         );
         assert!(out.contains(r#"alt="logo""#), "alt lost: {out}");
-        // Benign image is not blocked → no placeholder marker.
+        assert!(
+            out.contains("data-qsl-blocked"),
+            "blocked marker missing: {out}"
+        );
+        // Dimensions are kept by ammonia's default allowlist so the
+        // reader CSS reserves the original layout box.
+        assert!(out.contains(r#"width="100""#), "width attr lost: {out}");
+    }
+
+    #[test]
+    fn sanitize_preserves_inline_data_image_src() {
+        // `data:` URIs are local, no network — pass through.
+        let probe = r#"<img src="data:image/png;base64,iVBORw0KGgo=" alt="logo">"#;
+        let out = sanitize_email_html(probe);
+        assert!(out.contains("data:image/png;base64"), "data URI lost: {out}");
         assert!(
             !out.contains("data-qsl-blocked"),
-            "benign img picked up a blocked marker: {out}"
+            "inline data img picked up a blocked marker: {out}"
         );
+    }
+
+    #[test]
+    fn sanitize_preserves_inline_cid_image_src() {
+        // `cid:` references resolve against multipart/related parts in
+        // the same message — no network either.
+        let probe = r#"<img src="cid:logo@example.com" alt="logo">"#;
+        let out = sanitize_email_html(probe);
+        assert!(out.contains("cid:logo@example.com"), "cid URI lost: {out}");
+        assert!(
+            !out.contains("data-qsl-blocked"),
+            "inline cid img picked up a blocked marker: {out}"
+        );
+    }
+
+    #[test]
+    fn sanitize_blocks_remote_srcset_entries() {
+        // `srcset` is a comma-separated `<url> <descriptor>` list. One
+        // remote URL in the list is enough to drop the whole attribute
+        // — partial passthrough lets the browser load the entry the
+        // user didn't want.
+        let probe = r#"<img srcset="https://cdn.example.com/a.png 1x, https://cdn.example.com/a@2x.png 2x" alt="hero">"#;
+        let out = sanitize_email_html(probe);
+        assert!(!out.contains("cdn.example.com"), "srcset URLs kept: {out}");
+        assert!(
+            out.contains("data-qsl-blocked"),
+            "blocked marker missing: {out}"
+        );
+    }
+
+    #[test]
+    fn sanitize_blocks_remote_inline_background_image() {
+        // CSS `background-image: url(...)` is the second remote-content
+        // vector — must follow the same default-block policy.
+        let probe = r#"<div style="color: #c00; background-image: url(https://cdn.example.com/bg.png);">hi</div>"#;
+        let out = sanitize_email_html(probe);
+        assert!(!out.contains("cdn.example.com"), "bg url survived: {out}");
+        // The non-URL declaration on the same attribute survives.
+        assert!(out.contains("color: #c00"), "color decl lost: {out}");
     }
 
     #[test]
@@ -1040,14 +1140,29 @@ caf"
     }
 
     #[test]
-    fn sanitize_keeps_benign_background_image_url() {
+    fn sanitize_blocks_benign_remote_background_image_url() {
+        // Default policy is block-all-remote — non-tracker CDN bg
+        // image is dropped. The trusted-sender variant
+        // (sanitize_email_html_trusted) is the user's opt-in path.
         let probe =
-            r#"<div style="background-image: url(https://example.com/hero.png);">hero</div>"#;
+            r#"<div style="background-image: url(https://example.com/hero.png); color: #222;">hero</div>"#;
         let out = sanitize_email_html(probe);
         assert!(
-            out.contains("hero.png"),
-            "benign background URL erroneously dropped: {out}"
+            !out.contains("hero.png"),
+            "benign background URL kept: {out}"
         );
+        assert!(
+            out.contains("color: #222"),
+            "sibling declaration dropped along with the blocked one: {out}"
+        );
+    }
+
+    #[test]
+    fn sanitize_keeps_inline_data_background_image_url() {
+        // `data:` URIs in CSS url() pass through — local bytes only.
+        let probe = r#"<div style="background-image: url(data:image/png;base64,iVBORw0KGgo=);">hi</div>"#;
+        let out = sanitize_email_html(probe);
+        assert!(out.contains("data:image/png"), "data URL stripped: {out}");
     }
 
     #[test]
