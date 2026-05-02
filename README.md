@@ -1,105 +1,157 @@
 # QSL
 
-> A modern, Rust-native, privacy-respecting desktop email client.
+> A local-first, privacy-respecting desktop email client written
+> end-to-end in Rust.
 
-**Status:** 🚧 Experimental. Do not use for real email. This is a personal experiment published in the open — **there is no maintainer committed to support, response, or review at this time.** Issues and pull requests may or may not receive a reply. See [`PHASE_0.md`](./PHASE_0.md) for the execution plan and [`DESIGN.md`](./DESIGN.md) for the full design.
+**Status:** v0.1 ready, not yet tagged. Linux is the primary
+platform; macOS and Windows compile but are unverified at runtime.
+Three release blockers remain — see
+[`docs/releases/v0.1.0.md`](./docs/releases/v0.1.0.md). This is a
+personal project published in the open; **there is no maintainer
+committed to support, response, or review at this time.**
 
 ---
 
 ## What this is
 
-QSL is a cross-platform desktop email client for macOS, Windows, and Linux, written end-to-end in Rust. It connects directly to your mail provider — no intermediary servers, no telemetry, no ad networks — and is built on a deliberately experimental pure-Rust stack: [Tauri](https://tauri.app/) + [Dioxus](https://dioxuslabs.com/) for the app, [ammonia](https://github.com/rust-ammonia/ammonia) sanitization plus a sandboxed WebKit `<iframe srcdoc>` for rendering HTML email, [Turso](https://turso.tech/) for storage, [adblock-rust](https://github.com/brave/adblock-rust) for tracker blocking.
+QSL is a Tauri 2 + Dioxus 0.7 desktop app over a Rust core. It talks
+directly to your mail provider (Gmail via IMAP+SMTP+OAuth2, Fastmail
+via JMAP+OAuth2) — no intermediary servers, no telemetry, no ad
+networks. Local state lives in Turso (pure-Rust SQLite-compatible).
+The reader sanitizes incoming HTML through `ammonia` and renders it
+in a sandboxed `<iframe sandbox="allow-scripts" srcdoc>` inside
+webkit2gtk; remote content is blocked until you trust the sender.
+The chrome is a warm-dark monospace UI in the aerc/mutt density
+tradition rather than a webmail clone.
 
-The goal is a mail client that respects the user by default and demonstrates that a fully Rust-native desktop stack is viable for a real-world, consumer-facing application.
+### Wait, didn't this use Servo?
 
-## Why another email client
+It did, briefly. The embedded Servo renderer was removed on
+2026-04-28 in favor of webkit2gtk's iframe — Servo's GL composition
+path produced blank reader bodies on hybrid AMD/NVIDIA hardware, and
+weeks of yak-shaving (NVIDIA EGL-Wayland explicit-sync, GTK 3
+child-subsurface gaps, surfman/llvmpipe interactions) couldn't get
+the multi-process embedder past "works on some hardware some of the
+time." The full tombstone — what shipped, why we paused, and what
+would have to happen to bring it back — is in
+[`docs/servo-tombstone.md`](./docs/servo-tombstone.md). The
+sandboxed iframe is GPU-agnostic, well-trodden, and gives up process
+isolation while keeping every other architectural win.
 
-Every modern desktop client makes at least one of the following compromises:
+## Features
 
-- Ships a full Chromium engine (Electron), bloating binary size and memory use.
-- Routes mail, images, or links through the vendor's servers (for "features" like link tracking, image proxying, or AI summarization).
-- Uses the system webview uniformly, causing emails to render differently across platforms.
-- Depends on C/C++ libraries for the most security-sensitive parts of the pipeline (HTML parsing, image decoding).
+See [`docs/releases/v0.1.0.md`](./docs/releases/v0.1.0.md) for the
+full v0.1 surface. The shape:
 
-QSL makes the opposite bet on each: pure-Rust end to end, no intermediary servers, the platform's own WebKit-derived webview as the rendering surface (so the binary stays small and predictable), and memory-safe by default.
+- **Accounts & sync.** Gmail OAuth2+PKCE end-to-end; Fastmail JMAP
+  wired (live-validation pending). IMAP IDLE + JMAP EventSource live
+  push. History sync with chunked FETCH, UID-gap skipping, instant
+  cancel. Multi-account from day one.
+- **Reading.** Sanitized HTML in a sandboxed iframe with a
+  CSP-locked egress fence. Per-sender remote-content opt-in.
+  Stacked thread reader. Popup reader windows.
+- **Writing.** Compose with reply / reply-all / forward,
+  per-identity signatures, attachments, undo-send, `mailto:` deep
+  links, Cc/Bcc reveal, address autocomplete from a write-only
+  contact store, hunspell spell-check.
+- **Lists & search.** Unified inbox, Gmail-style operators
+  (`from:` / `subject:` / `has:attachment` / …), `⌘K` command
+  palette, drag-and-drop into folders, multi-select with bulk apply,
+  Gmail-family keyboard shortcuts.
+- **Desktop.** System tray with unread tooltip, launch on login,
+  window state restore, single-instance enforcement, default-mailto
+  toggle, Settings window with live theme + density + notification
+  controls, in-app first-run OAuth.
+- **Privacy & security.** Tracker URL filter (`adblock-rust`),
+  redirect-service unwrap on outbound clicks, OS-keychain refresh
+  tokens with zeroize-on-drop and revoke-on-remove, OAuth2 + PKCE
+  with explicit state validation.
 
-## Design principles
+## Build
 
-1. **Rust-native throughout.** Prefer pure-Rust crates over C/C++ bindings even when the pure-Rust option is newer. File bugs upstream; carry patches when needed. See [`DESIGN.md` §1](./DESIGN.md#1-overview-and-goals).
-2. **Modern protocols only.** OAuth2-only authentication. IMAP with CONDSTORE/QRESYNC/IDLE, JMAP. No POP3, no Exchange/EAS, no password auth.
-3. **Private by default.** No telemetry. No third-party servers between you and your mail provider. Tracker and ad-network blocking built in. Link cleaning on click.
-4. **Offline-first.** Your mail works without a network. Actions queue and replay when connectivity returns.
-5. **Permissively open source.** Apache License 2.0. Fork it, sell it, close it, rebrand it — just keep the license and notices.
-
-## Supported providers
-
-| Provider | Protocol | Target phase |
-|---|---|---|
-| Gmail / Google Workspace | IMAP + SMTP + OAuth2 | **v1** |
-| Fastmail | JMAP + OAuth2 | **v1** |
-| Microsoft 365 / Outlook.com | IMAP + SMTP + OAuth2 | v1.x |
-| Self-hosted with OAuth2 (Stalwart, Dovecot+OAUTHBEARER) | IMAP / JMAP + OAuth2 | v1.x |
-| iCloud, Yahoo | — | ❌ No OAuth2 support from the provider |
-| ProtonMail, Tutanota | — | ❌ Proprietary protocols |
-| On-prem Exchange | — | ❌ Out of scope |
-
-## System requirements
-
-- **macOS** 12 Monterey or newer (x86_64 or Apple Silicon)
-- **Windows** 10 22H2 or newer (x86_64)
-- **Linux** with a modern Wayland or X11 session (x86_64); GTK 3.24+ for the webview. On NVIDIA-equipped boxes the desktop app force-disables webkit2gtk's DMA-BUF renderer because libgbm fails to allocate framebuffers on the proprietary driver; see [Linux environment overrides](#linux-environment-overrides) below.
-
-## Getting started (for developers)
-
-> Note: there is nothing to download yet. These instructions are for working on the code.
+Workspace has two user-facing binaries: `qsl-desktop` (the Tauri app)
+and `mailcli` (the headless protocol CLI used during Phase 0 as a
+forcing function and now used for maintenance: `mailcli reset`,
+`mailcli doctor`).
 
 ### Prerequisites
 
-- Rust toolchain (version pinned in `rust-toolchain.toml`; install via [rustup](https://rustup.rs/))
-- Node.js 20+ (only for the Tauri CLI tooling)
-- `dioxus-cli` for the UI build: `cargo install dioxus-cli --locked`. `apps/desktop/src-tauri/build.rs` invokes `dx build --platform web` so `cargo run -p qsl-desktop` produces a working UI bundle. Set `QSL_SKIP_UI_BUILD=1` to skip this step (CI already does).
-- Platform build deps:
+- Rust toolchain (pinned in `rust-toolchain.toml`; install via
+  [rustup](https://rustup.rs/))
+- `dioxus-cli` for the UI build: `cargo install dioxus-cli --locked`.
+  `apps/desktop/src-tauri/build.rs` invokes `dx build --platform web`
+  so `cargo run -p qsl-desktop` produces a working UI bundle. Set
+  `QSL_SKIP_UI_BUILD=1` to skip the Dioxus build for fast Rust-only
+  iteration (CI already does).
+- Platform deps:
+  - **Linux:** `build-essential`, `libwebkit2gtk-4.1-dev`,
+    `libssl-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`,
+    `hunspell` + dictionaries (e.g. `hunspell-en_us`)
   - **macOS:** Xcode command-line tools
-  - **Windows:** Visual Studio 2022 with "Desktop development with C++"
-  - **Linux:** `build-essential`, `libwebkit2gtk-4.1-dev`, `libssl-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`
+  - **Windows:** Visual Studio 2022 with "Desktop development
+    with C++"
 
-### Linux environment overrides
-
-On systems with the NVIDIA proprietary driver in the GBM stack — common on hybrid laptops and any desktop where libgbm lands on the NVIDIA side — webkit2gtk's DMA-BUF renderer fails to allocate framebuffers (`Failed to create GBM buffer of size WxH: Invalid argument`) and the webview paints nothing. To stay rendered out of the box, `qsl-desktop` exports `WEBKIT_DISABLE_DMABUF_RENDERER=1` at startup on Linux (only if it is not already set), which rolls webkit back to its SHM rendering path. The performance hit is negligible for an email client.
-
-If you want the DMA-BUF path back — e.g. on a pure Mesa box where it works — export `WEBKIT_DISABLE_DMABUF_RENDERER=0` (or any value) before launching and the binary will leave your choice alone.
-
-Non-Linux platforms are unaffected.
-
-### Building from source
+### Common commands
 
 ```sh
 git clone https://github.com/johnathonfox/qsl.git
 cd qsl
+
 cargo check --workspace          # verifies the whole workspace compiles
 cargo test --workspace           # runs all tests
+cargo run -p qsl-desktop         # the desktop app (Tauri + Dioxus)
 cargo run -p mailcli -- --help   # the headless protocol CLI
 ```
 
-The Tauri desktop app (`cargo tauri dev`) lands in Phase 0 Week 5. See [`PHASE_0.md`](./PHASE_0.md) for the current state.
-
-A full quickstart — including platform build deps, contributor tooling, and the PR-gate local checks — lives in [`CONTRIBUTING.md`](./CONTRIBUTING.md#development-setup).
-
-### Running the headless protocol CLI
-
-`mailcli` is QSL's headless protocol CLI, used during Phase 0 as a forcing function for crate boundaries. Once the Phase 0 weeks 3–4 subcommands ship, it'll look like:
+Fast iteration when you're only changing Rust:
 
 ```sh
-cargo run -p mailcli -- auth add gmail your@gmail.com     # Phase 0 Week 3
-cargo run -p mailcli -- list-folders your@gmail.com       # Phase 0 Week 4
-cargo run -p mailcli -- list-messages your@gmail.com INBOX
+QSL_SKIP_UI_BUILD=1 cargo run -p qsl-desktop
 ```
 
-Until then, `cargo run -p mailcli -- --log-level debug` exercises the binary stub and shared tracing init.
+The Dioxus UI is built standalone with:
 
-### Resetting local data
+```sh
+dx build --platform web --package qsl-ui
+```
 
-QSL's local cache (the Turso database, fetched message blobs, and queued outbox items) lives in the OS data directory:
+A full quickstart — including PR-gate local checks — lives in
+[`CONTRIBUTING.md`](./CONTRIBUTING.md#development-setup).
+
+### Linux: NVIDIA / hybrid GPU
+
+`qsl-desktop` exports `WEBKIT_DISABLE_DMABUF_RENDERER=1` at startup
+on Linux (only if it isn't already set), rolling webkit2gtk back to
+its SHM rendering path. Without this, hybrid AMD/NVIDIA boxes paint
+nothing — webkit2gtk's DMA-BUF renderer can't allocate GBM buffers
+on the proprietary NVIDIA driver. To force the DMA-BUF path back
+(e.g. on a pure Mesa box), export `WEBKIT_DISABLE_DMABUF_RENDERER=0`
+before launching. macOS and Windows are unaffected.
+
+## Project layout
+
+```
+apps/
+  desktop/            # qsl-desktop — Tauri shell + Dioxus UI
+    src-tauri/        #   Rust host (commands, tray, mailto, sync engine)
+    ui/               #   Dioxus 0.7 webview UI
+  mailcli/            # mailcli — headless protocol CLI (reset, doctor)
+crates/
+  core/               # domain types: Folder, Message, MailBackend trait
+  storage/            # Turso schema + repos + migrations + outbox
+  imap-client/        # async IMAP with CONDSTORE / QRESYNC / IDLE
+  smtp-client/        # SMTP submission via lettre + XOAUTH2
+  jmap-client/        # JMAP client for Fastmail (auth, sync, push, send)
+  mime/               # RFC 5322 assembly + ammonia sanitization wrapper
+  search/             # query AST → Turso FTS MATCH
+  sync/               # the unified sync engine + outbox replay loop
+  auth/               # OAuth2 + PKCE + libsecret token storage
+  ipc/                # IPC commands shared across host + UI
+  telemetry/          # tracing init + log routing
+docs/                 # design, phases, plans, security audit, release notes
+```
+
+## Local data
 
 | Platform | Path |
 |---|---|
@@ -107,72 +159,60 @@ QSL's local cache (the Turso database, fetched message blobs, and queued outbox 
 | **macOS** | `~/Library/Application Support/app.qsl.qsl/` |
 | **Windows** | `%APPDATA%\qsl\qsl\data\` |
 
-To wipe the cache (e.g. after a schema migration wedge or to clear a corrupted state), quit the app and remove that directory. The next launch starts from scratch and re-syncs.
-
-OAuth refresh tokens live in the OS keychain under service `com.qsl.app`, separate from the cache. Clear them with:
+Refresh tokens live in the OS keychain under service `com.qsl.app`,
+separate from the cache.
 
 ```sh
-# Linux (libsecret / GNOME Keyring / KWallet)
+# Wipe local state
+cargo run -p mailcli -- reset
+
+# Diagnose / repair drift
+cargo run -p mailcli -- doctor --fix --rebuild-fts --vacuum --yes
+
+# Clear OAuth tokens (Linux)
 secret-tool clear service com.qsl.app
-
-# macOS
-security delete-generic-password -s com.qsl.app
-
-# Windows: Credential Manager → Generic Credentials → entries starting with com.qsl.app
-```
-
-## Project structure
-
-See [`DESIGN.md` §8](./DESIGN.md#8-project-structure-cargo-workspace) for the full layout. At a glance:
-
-```
-crates/         # library crates: core, storage, imap-client, jmap-client, ...
-apps/
-  desktop/      # Tauri + Dioxus desktop app
-  mailcli/      # headless protocol CLI
-docs/           # long-form design + operational docs
 ```
 
 ## Documentation
 
-- **[`DESIGN.md`](./DESIGN.md)** — full design specification; protocols, architecture, security, licensing.
-- **[`PHASE_0.md`](./PHASE_0.md)** — the current six-week execution plan.
-- **[`TRAITS.md`](./TRAITS.md)** — core trait signatures (`MailBackend`, `DbConn`, `EmailRenderer`) and domain types.
-- **[`COMMANDS.md`](./COMMANDS.md)** — IPC surface between the Dioxus UI and the Rust core.
-- **[`CONTRIBUTING.md`](./CONTRIBUTING.md)** — how to contribute, DCO sign-off, PR process.
-- **[`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md)** — Contributor Covenant 2.1.
-- **[`docs/KNOWN_ISSUES.md`](./docs/KNOWN_ISSUES.md)** — consciously-accepted Phase 0 issues with path-out criteria for each.
+- **[`docs/releases/v0.1.0.md`](./docs/releases/v0.1.0.md)** — what
+  shipped in v0.1 and what's deferred.
+- **[`docs/servo-tombstone.md`](./docs/servo-tombstone.md)** — the
+  Servo renderer's life and removal.
+- **[`docs/QSL_BACKLOG_FIXES.md`](./docs/QSL_BACKLOG_FIXES.md)** —
+  consciously-accepted gaps with path-out criteria.
+- **[`docs/security/audit-2026-05-01.md`](./docs/security/audit-2026-05-01.md)** —
+  most recent security review.
+- **[`DESIGN.md`](./DESIGN.md)** — full design specification:
+  protocols, architecture, security, licensing.
+- **[`PHASE_0.md`](./PHASE_0.md)**, **[`PHASE_1.md`](./PHASE_1.md)**,
+  **[`PHASE_2.md`](./PHASE_2.md)** — execution-plan archive.
+- **[`docs/plans/post-phase-2.md`](./docs/plans/post-phase-2.md)** —
+  the v0.1 feature plan that this README's "Features" section
+  summarizes.
+- **[`CONTRIBUTING.md`](./CONTRIBUTING.md)** — DCO, PR gate, local
+  checks.
 
 ## Contributing
 
-Pull requests are welcome, but please read the status note at the top of this README first: **there is no maintainer committed to reviewing or merging contributions at this time.** If you open a PR, it may sit. That's not rudeness; it's the honest state of the project. Fork freely.
-
-If you want to contribute anyway, see [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the DCO sign-off process (required for anything that does get merged) and the general shape of a good PR.
-
-## Status and roadmap
-
-Currently in **Phase 0** — foundations. The eventual 0.1 release targets Gmail and Fastmail support with a polished desktop experience on macOS, Windows, and Linux. See [`DESIGN.md` §11](./DESIGN.md#11-roadmap) for the full phased roadmap.
-
-Phase weeks are aspirational, not scheduled. No release date is committed.
+Pull requests are welcome, but please read the status note at the
+top of this README first: **there is no maintainer committed to
+reviewing or merging contributions at this time.** Fork freely.
+[`CONTRIBUTING.md`](./CONTRIBUTING.md) covers the DCO sign-off and
+the shape of a good PR if you want to open one anyway.
 
 ## License
 
-Apache License 2.0. See [`LICENSE`](./LICENSE) for the full text and [`NOTICE`](./NOTICE) for third-party attributions.
+Apache License 2.0. Every source file carries an SPDX header. See
+[`LICENSE`](./LICENSE) for the full text and [`NOTICE`](./NOTICE)
+for third-party attributions.
 
-> This project is provided as-is. The authors do not assert ownership over downstream use — fork it, sell it, rebrand it, build a business on it. The only thing asked is that you carry the license text and notices along with it.
+> Fork it, sell it, close it, rebrand it — just keep the license
+> text and notices.
 
 ## Trademarks
 
-QSL is not a registered trademark and the project asserts no trademark rights. If you hold an existing trademark and our name conflicts with yours, open an issue and we will rename. No letters or lawyers required.
-
-## Acknowledgments
-
-This project stands on the work of many:
-
-- [Tauri](https://tauri.app/) — cross-platform Rust app framework
-- [Dioxus](https://dioxuslabs.com/) — React-like UI in Rust
-- [Turso](https://turso.tech/) — pure-Rust SQLite-compatible database
-- [adblock-rust](https://github.com/brave/adblock-rust) — Brave's tracker-blocking engine
-- [mail-parser](https://github.com/stalwartlabs/mail-parser), [lettre](https://github.com/lettre/lettre), [async-imap](https://github.com/async-email/async-imap), [jmap-client](https://github.com/stalwartlabs/jmap-client), and the broader Rust mail ecosystem
-
-See [`NOTICE`](./NOTICE) for complete third-party attributions.
+QSL is not a registered trademark and the project asserts no
+trademark rights. If you hold an existing trademark and our name
+conflicts with yours, open an issue and we'll rename. No letters
+or lawyers required.
