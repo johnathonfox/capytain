@@ -219,6 +219,20 @@ If not this pass: ship the rest, leave threading for after MCP. The MCP spec alr
 
 **Out of scope:** light mode (defer until dark ships clean), custom wordmark typeface, command-palette implementation if it grows past one bundle.
 
+## 14. Drag-and-drop: drop semantics for Important / Flagged / All Mail
+
+**Status: Open (deferred from drag-and-drop v1, 2026-05-01).** The drag-and-drop pass landed with these three roles **blocked** as drop targets (no-drop cursor) — a `messages_move` into them would be either meaningless (`All Mail` is everywhere already) or surprising (Gmail's `Important` and `Starred` are label-views, not real folders).
+
+The right semantic is *add the label* on drop, not move:
+
+- Drop on `FolderRole::Flagged` → set `\Flagged` on the dragged ids (Gmail's `\Starred` IMAP keyword, equivalent to `messages_flag(true)`).
+- Drop on `FolderRole::Important` → add the `\Important` Gmail label (no equivalent on JMAP / non-Gmail; would need backend dispatch).
+- Drop on `FolderRole::All` → silently no-op or refuse with a tooltip ("messages are already in All Mail").
+
+**Why deferred:** label-add semantics need a separate IPC (or a new mode on `messages_move`) plus per-backend dispatch (Gmail X-GM-LABELS, JMAP keyword set, plain IMAP no-op for Important). v1 drag-and-drop targets the move-to-folder use case and avoids surprising the user.
+
+**Fix shape:** either (a) extend `messages_move` with a `mode: 'move' | 'add_label'` discriminator, or (b) add `messages_label_add` / `messages_flag_set` and have the drop handler dispatch by `FolderRole`. (b) is cleaner. Update the sidebar drop guard to route Flagged/Important through it.
+
 ## Suggested order
 
 Updated to reflect status. Strikethrough = nothing to do.

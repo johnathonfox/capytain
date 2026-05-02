@@ -111,6 +111,34 @@ pub async fn insert(conn: &dyn DbConn, t: &Thread) -> Result<(), StorageError> {
     .map(|_| ())
 }
 
+/// Pull the `message_count` for a batch of thread ids in a single
+/// query. Drives the message-list "this thread has N messages"
+/// badge: the list view JOINs each row's `thread_id` against this
+/// map and renders the count when greater than 1.
+pub async fn counts_by_ids(
+    conn: &dyn DbConn,
+    ids: &[ThreadId],
+) -> Result<std::collections::HashMap<ThreadId, u32>, StorageError> {
+    if ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let placeholders: String = (1..=ids.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!("SELECT id, message_count FROM threads WHERE id IN ({placeholders})");
+    let params: Vec<Value> = ids.iter().map(|t| Value::Text(&t.0)).collect();
+    let rows = conn.query(&sql, Params(params)).await?;
+    let mut out = std::collections::HashMap::with_capacity(rows.len());
+    for r in &rows {
+        let id = ThreadId(r.get_str("id")?.to_string());
+        let count = u32::try_from(r.get_i64("message_count")?)
+            .map_err(|e| StorageError::Db(format!("message_count out of range: {e}")))?;
+        out.insert(id, count);
+    }
+    Ok(out)
+}
+
 pub async fn get(conn: &dyn DbConn, id: &ThreadId) -> Result<Thread, StorageError> {
     let row = conn
         .query_one(SELECT_BY_ID, Params(vec![Value::Text(&id.0)]))

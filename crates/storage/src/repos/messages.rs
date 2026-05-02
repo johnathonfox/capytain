@@ -278,6 +278,28 @@ pub async fn count_unread_by_folder(
     Ok(c.max(0) as u32)
 }
 
+/// All messages attached to a thread, sorted ascending by date.
+/// Drives the stacked-thread reader in the desktop UI: given the
+/// currently-selected message, the reader pulls the whole
+/// conversation in one round-trip and renders each entry as its own
+/// card. Empty result for an unknown thread id (caller already
+/// dereferenced through `messages.thread_id`, so this should be
+/// non-empty in normal use).
+pub async fn list_by_thread(
+    conn: &dyn DbConn,
+    thread: &ThreadId,
+) -> Result<Vec<MessageHeaders>, StorageError> {
+    let sql = format!(
+        "SELECT {COLS} FROM messages \
+         WHERE thread_id = ?1 \
+         ORDER BY date ASC"
+    );
+    let rows = conn
+        .query(&sql, Params(vec![Value::Text(&thread.0)]))
+        .await?;
+    rows.iter().map(row_to_headers).collect()
+}
+
 /// Every persisted message id in a folder. Drives the sync engine's
 /// server-side-deletion reconciliation pass: after the regular sync
 /// it diffs this against `MailBackend::list_known_ids` and deletes

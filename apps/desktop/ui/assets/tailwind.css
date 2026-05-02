@@ -906,6 +906,26 @@ ul {
   color: var(--text-primary);
 }
 
+/* Drag-and-drop decorations. `.sidebar-row-drop-target` lights up the
+   row currently under the cursor during a valid drag; the inset amber
+   outline reads as "yes, drop here" without crowding the 124px sidebar
+   width. `.sidebar-row-drop-blocked` paints a no-drop cursor on Gmail
+   label-views (Important / Flagged / All Mail) so the user sees they
+   can't aim there before they release. The block class is applied for
+   the *entire* drag, not just on hover, because the cue needs to be
+   visible the moment the user starts dragging — not after they've
+   already aimed at the wrong row. */
+.sidebar-row.sidebar-row-drop-target {
+  background: var(--bg-secondary);
+  outline: 2px solid var(--accent-amber);
+  outline-offset: -2px;
+}
+
+.sidebar-row.sidebar-row-drop-blocked {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .sidebar-row-left {
   display: flex;
   align-items: center;
@@ -1158,6 +1178,11 @@ ul {
   border-bottom: 0;
   cursor: pointer;
   user-select: none;
+  /* webkit's drag init reads `-webkit-user-drag` to decide whether
+     a `draggable="true"` element can actually start a drag. With
+     `user-select: none` set above, webkit2gtk needs the explicit
+     `element` value or the drag never fires. */
+  -webkit-user-drag: element;
   border-left: 2px solid transparent;
   font-size: var(--fs-12);
 }
@@ -1262,6 +1287,25 @@ ul {
 
 .msg-row.unread .msg-row-time {
   color: var(--text-secondary);
+}
+
+/* Thread-count badge before the subject — small bordered pill
+ * that reads as "(N messages)" without consuming the column
+ * width a full word would. */
+.msg-row-thread-count {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--text-tertiary);
+  border-radius: 8px;
+  font-size: var(--fs-10);
+  color: var(--text-tertiary);
+  line-height: 1.2;
+}
+
+.msg-row.unread .msg-row-thread-count {
+  border-color: var(--accent-amber);
+  color: var(--accent-amber);
 }
 
 .msg-row-subject {
@@ -1543,6 +1587,154 @@ ul {
   gap: 16px;
   flex: 0 0 auto;
   font-size: var(--fs-11);
+}
+
+/* Stacked thread reader. The reader pane scrolls a list of
+ * `.thread-card` elements with a single subject + count chrome strip
+ * pinned above them. Each card has a clickable header that toggles
+ * its body, so a 12-message conversation collapses down to 12 thin
+ * rows the user can scan at a glance. */
+.thread-chrome {
+  flex: 0 0 auto;
+  padding: 10px 14px 6px;
+  border-bottom: var(--hairline);
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.thread-count {
+  font-size: var(--fs-11);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.thread-stack {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.thread-card {
+  display: flex;
+  flex-direction: column;
+  border-bottom: var(--hairline);
+  background: var(--bg-primary);
+}
+
+/* Expanded cards default to a sensible reading height and can be
+ * resized individually via the bottom-right grip (`resize:
+ * vertical`). `overflow: hidden` is required for the resize handle
+ * to activate; the iframe inside still scrolls its own content.
+ * `flex: 0 0 auto` keeps the explicit height stable instead of
+ * letting flex-grow fight the user's drag. */
+.thread-card.thread-card-expanded {
+  flex: 0 0 auto;
+  height: 420px;
+  min-height: 200px;
+  max-height: 90vh;
+  resize: vertical;
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+
+.thread-card.thread-card-collapsed {
+  flex: 0 0 auto;
+  background: var(--bg-tertiary);
+}
+
+/* Bottom filler so a thread whose cards don't fill the pane
+ * shows the reader-pane background (rather than a hard
+ * boundary line) under the stack. */
+.thread-stack::after {
+  content: "";
+  flex: 1 0 auto;
+  min-height: 0;
+}
+
+/* Header strip — clickable. Reset the default <button> chrome since
+ * the row is the click target, not a pill. */
+.thread-card-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 14px;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--fs-11);
+  color: var(--text-primary);
+  width: 100%;
+}
+
+.thread-card-header:hover {
+  background: var(--bg-secondary);
+}
+
+.thread-card-from {
+  font-weight: var(--fw-bold);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.thread-card-addr {
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.thread-card-snippet {
+  color: var(--text-secondary);
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.thread-card-date {
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+/* Tiny dot in the header strip flagging an unread message. The
+ * empty content + width is intentional — the `::before` would also
+ * work but a span keeps the title attribute hover-tooltip simple. */
+.thread-card-unread-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-amber);
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+.thread-card-body {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 14px 14px;
+  gap: 8px;
+  /* Fill the expanded card; the card's explicit height is what
+   * actually bounds us, so the iframe inside flex-grows to fill
+   * whatever space is left after the recipients / banners /
+   * attachments. */
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* The iframe takes the rest of the card body — no own height,
+ * just flex-grow inside the card's bounded box. */
+.thread-card-body .reader-body-iframe {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .reader-action {
@@ -1926,6 +2118,12 @@ ul {
   padding: 12px 0;
   font-size: var(--fs-11);
   color: var(--text-tertiary);
+}
+
+.settings-hint {
+  font-size: var(--fs-11);
+  color: var(--text-tertiary);
+  margin: 2px 0 6px 0;
 }
 
 .settings-error {

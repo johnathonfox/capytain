@@ -713,6 +713,7 @@ fn NotifyToggle(account_id: AccountId, initial: bool, tick: SettingsTick) -> Ele
 
 const KEY_THEME: &str = "appearance.theme";
 const KEY_DENSITY: &str = "appearance.density";
+const KEY_TRAY_ENABLED: &str = "appearance.tray_enabled";
 const KEY_NOTIFY_MASTER: &str = "notifications.master";
 const KEY_REMOTE_IMAGES: &str = "privacy.remote_images_always";
 
@@ -739,6 +740,139 @@ fn AppearanceTab(tick: SettingsTick) -> Element {
                     ("large", "Large"),
                 ],
                 tick,
+            }
+            BoolSettingRow {
+                setting_key: KEY_TRAY_ENABLED,
+                label: "Show system tray icon",
+                default_on: true,
+                tick,
+            }
+            AutostartRow {}
+            DefaultEmailClientRow {}
+        }
+    }
+}
+
+/// "Default email client" row. Source of truth lives outside
+/// `app_settings_v1` — on Linux it's whatever `xdg-mime query default
+/// x-scheme-handler/mailto` returns, on macOS it's
+/// `LSCopyDefaultHandlerForURLScheme(mailto)`, on Windows it's the
+/// `HKCU\Software\Classes\mailto\shell\open\command` value. The plugin
+/// abstracts all three; we just call `default_email_client_is` on
+/// mount and re-poll on toggle.
+#[component]
+fn DefaultEmailClientRow() -> Element {
+    let mut is_default = use_signal(|| false);
+    let mut in_flight = use_signal(|| false);
+    use_hook(move || {
+        spawn(async move {
+            match invoke::<bool>("default_email_client_is", serde_json::json!({})).await {
+                Ok(v) => is_default.set(v),
+                Err(e) => web_sys_log(&format!("default_email_client_is: {e}")),
+            }
+        });
+    });
+    let cur = *is_default.read();
+    let busy = *in_flight.read();
+    let (button_label, cmd) = if cur {
+        ("Restore previous default", "default_email_client_unset")
+    } else {
+        ("Make QSL the default", "default_email_client_set")
+    };
+    let status_text = if cur {
+        "QSL handles mailto: links."
+    } else {
+        "Another app is handling mailto: links."
+    };
+    rsx! {
+        div {
+            class: "settings-field",
+            label { class: "settings-label", "Default email client" }
+            p { class: "settings-hint", "{status_text}" }
+            button {
+                class: "settings-button",
+                r#type: "button",
+                disabled: busy,
+                onclick: move |_| {
+                    if *in_flight.read() {
+                        return;
+                    }
+                    in_flight.set(true);
+                    spawn(async move {
+                        if let Err(e) = invoke::<()>(cmd, serde_json::json!({})).await {
+                            web_sys_log(&format!("{cmd}: {e}"));
+                            in_flight.set(false);
+                            return;
+                        }
+                        // Re-poll the live state instead of trusting the
+                        // optimistic flip — on Linux the plugin can
+                        // succeed at writing the .desktop entry but the
+                        // user's XDG environment may still report a
+                        // different default if there's a higher-priority
+                        // file (e.g. a system-wide override).
+                        match invoke::<bool>(
+                            "default_email_client_is",
+                            serde_json::json!({}),
+                        )
+                        .await
+                        {
+                            Ok(v) => is_default.set(v),
+                            Err(e) => web_sys_log(&format!("re-check: {e}")),
+                        }
+                        in_flight.set(false);
+                    });
+                },
+                "{button_label}"
+            }
+        }
+    }
+}
+
+/// "Launch QSL on login" toggle. Source of truth is the autostart
+/// plugin's own state (XDG `~/.config/autostart/qsl.desktop` on Linux,
+/// LaunchAgent on macOS, registry Run key on Windows) — we don't
+/// shadow it in `app_settings_v1`. The component reads the live state
+/// once on mount, then writes through `enable` / `disable` on toggle.
+#[component]
+fn AutostartRow() -> Element {
+    let mut enabled = use_signal(|| false);
+    use_hook(move || {
+        spawn(async move {
+            match invoke::<bool>("plugin:autostart|is_enabled", serde_json::json!({})).await {
+                Ok(v) => enabled.set(v),
+                Err(e) => web_sys_log(&format!("autostart is_enabled: {e}")),
+            }
+        });
+    });
+    let checked = *enabled.read();
+    rsx! {
+        div {
+            class: "settings-field",
+            label {
+                class: "settings-checkbox-label",
+                input {
+                    class: "settings-checkbox",
+                    r#type: "checkbox",
+                    checked: checked,
+                    onchange: move |e: Event<FormData>| {
+                        let next = matches!(e.value().as_str(), "true" | "on");
+                        let cmd = if next {
+                            "plugin:autostart|enable"
+                        } else {
+                            "plugin:autostart|disable"
+                        };
+                        spawn(async move {
+                            if let Err(err) =
+                                invoke::<()>(cmd, serde_json::json!({})).await
+                            {
+                                web_sys_log(&format!("{cmd}: {err}"));
+                                return;
+                            }
+                            enabled.set(next);
+                        });
+                    },
+                }
+                span { "Launch QSL on login" }
             }
         }
     }
@@ -846,6 +980,13 @@ pub fn compose_signature_key(account_id: &AccountId) -> String {
 /// `"5"`, `"10"`, `"30"` (seconds).
 pub const KEY_UNDO_SEND: &str = "compose.undo_send";
 
+/// Setting that toggles inline spell-checking on the compose subject
+/// and body fields. webkit2gtk reads the standard `spellcheck="true"`
+/// HTML attribute and uses the system hunspell dictionaries; on macOS
+/// / Windows the platform webview's native spell-checker takes over
+/// the same way. Default: on.
+pub const KEY_SPELLCHECK: &str = "compose.spellcheck";
+
 #[component]
 fn ComposeTab(tick: SettingsTick) -> Element {
     let tick_value = *tick.read();
@@ -873,6 +1014,21 @@ fn ComposeTab(tick: SettingsTick) -> Element {
                 class: "settings-note",
                 "After Send, your message holds in a status-bar countdown. "
                 "Press Esc within the window to cancel."
+            }
+
+            h2 { class: "settings-section-title", "Editor" }
+            BoolSettingRow {
+                setting_key: KEY_SPELLCHECK,
+                label: "Check spelling as you type",
+                default_on: true,
+                tick,
+            }
+            p {
+                class: "settings-note",
+                "Subject and body fields use the system spell-checker. "
+                "On Linux this is hunspell — install the dictionary "
+                "package for your language (e.g. hunspell-en_US) if "
+                "underlines aren't appearing."
             }
 
             h2 { class: "settings-section-title", "Signatures" }

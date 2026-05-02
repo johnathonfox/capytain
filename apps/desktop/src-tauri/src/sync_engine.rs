@@ -761,7 +761,7 @@ async fn drain_outbox_once(app: &AppHandle) -> Result<(), qsl_core::StorageError
     for outcome in outcomes {
         match outcome {
             qsl_sync::outbox_drain::DrainOutcome::Sent { id, op_kind } => {
-                debug!(id, op_kind, "outbox: sent");
+                tracing::info!(id, op_kind, "outbox: sent");
             }
             qsl_sync::outbox_drain::DrainOutcome::Retrying {
                 id,
@@ -769,9 +769,12 @@ async fn drain_outbox_once(app: &AppHandle) -> Result<(), qsl_core::StorageError
                 attempts_after,
                 error,
             } => {
-                debug!(
+                tracing::warn!(
                     id,
-                    op_kind, attempts_after, error, "outbox: scheduled retry"
+                    op_kind,
+                    attempts_after,
+                    error,
+                    "outbox: scheduled retry"
                 );
             }
             qsl_sync::outbox_drain::DrainOutcome::DeadLettered { id, op_kind, error } => {

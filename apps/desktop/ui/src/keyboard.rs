@@ -46,6 +46,12 @@ pub enum KeyboardCommand {
     /// Move the message-list selection to the previous message.
     /// `k` matches Gmail; wraps at the start of the list.
     PrevMessage,
+    /// Jump to the next unread message after the current selection.
+    /// `n` — there is no canonical Gmail binding for this (Gmail's
+    /// `n` walks the conversation, not unread mail), so we claim
+    /// the freed key. Wraps to the first unread when no later one
+    /// exists.
+    NextUnread,
     /// Toggle the command palette overlay (⌘K / Ctrl+K).
     /// The only Ctrl/Cmd-modified shortcut we claim — every other
     /// modified keystroke still passes through to the OS / browser.
@@ -82,6 +88,7 @@ pub fn parse(key: &str, ctrl_or_meta: bool) -> Option<KeyboardCommand> {
         "/" => Some(KeyboardCommand::FocusSearch),
         "j" => Some(KeyboardCommand::NextMessage),
         "k" => Some(KeyboardCommand::PrevMessage),
+        "n" => Some(KeyboardCommand::NextUnread),
         _ => None,
     }
 }
@@ -113,13 +120,18 @@ mod tests {
     fn ctrl_or_meta_swallows_everything_except_palette() {
         // Ctrl+C / Cmd+R should reach the OS, not us — every modified
         // keystroke except `k` (palette toggle) passes through.
-        for key in ["c", "e", "r", "a", "f", "j", "Escape", "?", "#", "/"] {
+        for key in ["c", "e", "r", "a", "f", "j", "n", "Escape", "?", "#", "/"] {
             assert_eq!(
                 parse(key, true),
                 None,
                 "Ctrl/Cmd+{key} must not produce a KeyboardCommand"
             );
         }
+    }
+
+    #[test]
+    fn parses_n_for_next_unread() {
+        assert_eq!(parse("n", false), Some(KeyboardCommand::NextUnread));
     }
 
     #[test]
@@ -141,6 +153,13 @@ mod tests {
         for key in ["x", "z", "Enter", "Tab", "ArrowUp", " "] {
             assert_eq!(parse(key, false), None, "{key} should not be ours");
         }
+    }
+
+    #[test]
+    fn n_is_claimed_for_next_unread() {
+        // Sanity: `n` is in our keymap so it doesn't fall through
+        // to the unknown-keys list above.
+        assert!(parse("n", false).is_some());
     }
 
     #[test]
