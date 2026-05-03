@@ -12,7 +12,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -104,6 +104,15 @@ pub async fn pull_history<F>(
 where
     F: FnMut(HistoryProgress),
 {
+    let pull_started_at = Instant::now();
+    info!(
+        account = %account.0,
+        folder = %folder.0,
+        start_anchor,
+        total_estimate = ?total_estimate,
+        "history sync starting"
+    );
+
     // Persist the running row up front. Brief lock; release so the
     // sync engine can use the connection while we wait on IMAP.
     {
@@ -130,6 +139,7 @@ where
 
     let mut anchor = start_anchor;
     let mut fetched_total: u32 = 0;
+    let mut chunks_processed: u32 = 0;
     let mut consecutive_failures: u32 = 0;
 
     loop {
@@ -138,6 +148,8 @@ where
                 account = %account.0,
                 folder = %folder.0,
                 fetched = fetched_total,
+                chunks = chunks_processed,
+                wall_clock_ms = pull_started_at.elapsed().as_millis() as u64,
                 "history sync canceled"
             );
             let conn = db.lock().await;
@@ -157,6 +169,8 @@ where
                 account = %account.0,
                 folder = %folder.0,
                 fetched = fetched_total,
+                chunks = chunks_processed,
+                wall_clock_ms = pull_started_at.elapsed().as_millis() as u64,
                 "history sync exhausted tail"
             );
             let conn = db.lock().await;
@@ -170,6 +184,8 @@ where
             });
             return Ok(());
         }
+
+        let chunk_started_at = Instant::now();
 
         // Network fetch — explicitly NOT holding the DB lock. This
         // is where the wall-clock seconds go on a big mailbox.
@@ -192,6 +208,14 @@ where
                 );
                 if consecutive_failures >= MAX_CHUNK_RETRIES {
                     let msg = format!("{consecutive_failures} consecutive failures: {e}");
+                    tracing::error!(
+                        account = %account.0,
+                        folder = %folder.0,
+                        anchor,
+                        chunks = chunks_processed,
+                        wall_clock_ms = pull_started_at.elapsed().as_millis() as u64,
+                        "history sync giving up: {msg}"
+                    );
                     let conn = db.lock().await;
                     history_repo::set_status(
                         &*conn,
@@ -232,6 +256,7 @@ where
 
         let advanced = next_anchor < anchor;
         anchor = next_anchor;
+        chunks_processed = chunks_processed.saturating_add(1);
 
         progress(HistoryProgress {
             fetched_total,
@@ -240,14 +265,33 @@ where
             finished: false,
         });
 
-        info!(
-            account = %account.0,
-            folder = %folder.0,
-            anchor,
-            inserted,
-            fetched_total,
-            "history chunk persisted"
-        );
+        let chunk_ms = chunk_started_at.elapsed().as_millis() as u64;
+        if chunk_ms >= qsl_telemetry::slow::limits::IMAP_CMD_MS {
+            warn!(
+                target: "qsl::slow::sync",
+                op = "history_chunk",
+                account = %account.0,
+                folder = %folder.0,
+                anchor,
+                inserted,
+                fetched_total,
+                chunk_index = chunks_processed,
+                elapsed_ms = chunk_ms,
+                limit_ms = qsl_telemetry::slow::limits::IMAP_CMD_MS,
+                "slow history chunk"
+            );
+        } else {
+            info!(
+                account = %account.0,
+                folder = %folder.0,
+                anchor,
+                inserted,
+                fetched_total,
+                chunk_index = chunks_processed,
+                chunk_ms,
+                "history chunk persisted"
+            );
+        }
 
         // If the backend returned an anchor that didn't move forward
         // (towards 1) and the chunk was empty, we're stuck. Treat as
@@ -256,6 +300,14 @@ where
         // the chunk equals the previous anchor minus 1 — that's
         // legitimate progress because subsequent loop reads anchor.
         if !advanced && headers.is_empty() {
+            info!(
+                account = %account.0,
+                folder = %folder.0,
+                fetched = fetched_total,
+                chunks = chunks_processed,
+                wall_clock_ms = pull_started_at.elapsed().as_millis() as u64,
+                "history sync completed (anchor stuck, empty chunk)"
+            );
             let conn = db.lock().await;
             history_repo::set_status(&*conn, account, folder, RepoStatus::Completed, None).await?;
             drop(conn);

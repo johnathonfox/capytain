@@ -26,6 +26,8 @@ use std::error::Error;
 
 use tracing_subscriber::{fmt, EnvFilter};
 
+pub mod slow;
+
 /// Error returned by [`init`] when subscriber installation fails.
 ///
 /// Opaque by design — this is a startup-only failure mode, and callers

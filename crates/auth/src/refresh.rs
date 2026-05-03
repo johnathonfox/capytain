@@ -60,16 +60,21 @@ pub async fn revoke_refresh_token(
     // helps providers route to the right revocation path. Google
     // accepts both `token=` and a query-string variant; the body
     // form is the standards-compliant shape.
-    let resp = client
-        .post(profile.revocation_url)
-        .header("Accept", "application/json")
-        .form(&[
-            ("token", refresh.expose()),
-            ("token_type_hint", "refresh_token"),
-        ])
-        .send()
-        .await
-        .map_err(|e| AuthError::Other(format!("revoke HTTP: {e}")))?;
+    let resp = qsl_telemetry::time_op!(
+        target: "qsl::slow::auth",
+        limit_ms: qsl_telemetry::slow::limits::OAUTH_TOKEN_MS,
+        op: "token_revoke",
+        fields: { provider = %profile.slug },
+        client
+            .post(profile.revocation_url)
+            .header("Accept", "application/json")
+            .form(&[
+                ("token", refresh.expose()),
+                ("token_type_hint", "refresh_token"),
+            ])
+            .send()
+    )
+    .map_err(|e| AuthError::Other(format!("revoke HTTP: {e}")))?;
 
     let status = resp.status();
     if status.is_success() {
@@ -107,13 +112,18 @@ pub async fn refresh_access_token(
 
     debug!(account = %account.0, provider = profile.slug, "refreshing access token");
 
-    let tokens = post_refresh(
-        profile.token_url,
-        client_id,
-        profile.client_secret,
-        &refresh,
-    )
-    .await?;
+    let tokens = qsl_telemetry::time_op!(
+        target: "qsl::slow::auth",
+        limit_ms: qsl_telemetry::slow::limits::OAUTH_TOKEN_MS,
+        op: "token_refresh",
+        fields: { provider = %profile.slug, account = %account.0 },
+        post_refresh(
+            profile.token_url,
+            client_id,
+            profile.client_secret,
+            &refresh,
+        )
+    )?;
 
     // If the provider rotated the refresh token, store the new one.
     if let Some(new_refresh) = &tokens.refresh {

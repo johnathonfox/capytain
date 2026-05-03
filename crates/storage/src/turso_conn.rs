@@ -19,11 +19,30 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use qsl_telemetry::{slow::limits, time_op};
 use turso::params::params_from_iter;
 
 use qsl_core::StorageError;
 
 use crate::conn::{DbConn, OwnedValue, Params, Row, Tx, Value};
+
+/// Truncate a SQL string for logging. The full text is kept private
+/// because parameter bindings can contain user data (subjects,
+/// addresses) that we don't want dumped into stderr.
+fn sql_head(sql: &str) -> &str {
+    const MAX: usize = 80;
+    if sql.len() <= MAX {
+        sql
+    } else {
+        // Find the longest valid char boundary <= MAX so we never
+        // panic on a multi-byte split.
+        let mut end = MAX;
+        while end > 0 && !sql.is_char_boundary(end) {
+            end -= 1;
+        }
+        &sql[..end]
+    }
+}
 
 /// A live handle to a Turso database.
 pub struct TursoConn {
@@ -142,19 +161,33 @@ impl TursoConn {
 #[async_trait]
 impl DbConn for TursoConn {
     async fn execute(&self, sql: &str, params: Params<'_>) -> Result<u64, StorageError> {
-        self.conn
-            .execute(sql, params_from_iter(to_turso_values(params)))
-            .await
-            .map_err(err_db)
+        let r = time_op!(
+            target: "qsl::slow::db",
+            limit_ms: limits::DB_QUERY_MS,
+            op: "execute",
+            fields: { sql = %sql_head(sql) },
+            self.conn
+                .execute(sql, params_from_iter(to_turso_values(params)))
+        );
+        r.map_err(err_db)
     }
 
     async fn query(&self, sql: &str, params: Params<'_>) -> Result<Vec<Row>, StorageError> {
-        let mut rows = self
-            .conn
-            .query(sql, params_from_iter(to_turso_values(params)))
-            .await
-            .map_err(err_db)?;
-        materialize_rows(&mut rows).await
+        let r: Result<Vec<Row>, StorageError> = time_op!(
+            target: "qsl::slow::db",
+            limit_ms: limits::DB_QUERY_MS,
+            op: "query",
+            fields: { sql = %sql_head(sql) },
+            async {
+                let mut rows = self
+                    .conn
+                    .query(sql, params_from_iter(to_turso_values(params)))
+                    .await
+                    .map_err(err_db)?;
+                materialize_rows(&mut rows).await
+            }
+        );
+        r
     }
 
     async fn query_one(&self, sql: &str, params: Params<'_>) -> Result<Row, StorageError> {
@@ -237,41 +270,61 @@ struct TursoTx<'a> {
 #[async_trait]
 impl<'a> Tx for TursoTx<'a> {
     async fn execute(&mut self, sql: &str, params: Params<'_>) -> Result<u64, StorageError> {
-        self.conn
-            .execute(sql, params_from_iter(to_turso_values(params)))
-            .await
-            .map_err(err_db)
+        let r = time_op!(
+            target: "qsl::slow::db",
+            limit_ms: limits::DB_QUERY_MS,
+            op: "tx_execute",
+            fields: { sql = %sql_head(sql) },
+            self.conn
+                .execute(sql, params_from_iter(to_turso_values(params)))
+        );
+        r.map_err(err_db)
     }
 
     async fn query(&mut self, sql: &str, params: Params<'_>) -> Result<Vec<Row>, StorageError> {
-        let mut rows = self
-            .conn
-            .query(sql, params_from_iter(to_turso_values(params)))
-            .await
-            .map_err(err_db)?;
-        materialize_rows(&mut rows).await
+        let r: Result<Vec<Row>, StorageError> = time_op!(
+            target: "qsl::slow::db",
+            limit_ms: limits::DB_QUERY_MS,
+            op: "tx_query",
+            fields: { sql = %sql_head(sql) },
+            async {
+                let mut rows = self
+                    .conn
+                    .query(sql, params_from_iter(to_turso_values(params)))
+                    .await
+                    .map_err(err_db)?;
+                materialize_rows(&mut rows).await
+            }
+        );
+        r
     }
 
     async fn commit(mut self: Box<Self>) -> Result<(), StorageError> {
-        self.conn
-            .execute(
+        let r = time_op!(
+            target: "qsl::slow::db",
+            limit_ms: limits::TX_COMMIT_MS,
+            op: "tx_commit",
+            self.conn.execute(
                 "COMMIT",
                 turso::params::IntoParams::into_params(()).unwrap(),
             )
-            .await
-            .map_err(err_db)?;
+        );
+        r.map_err(err_db)?;
         self.finished = true;
         Ok(())
     }
 
     async fn rollback(mut self: Box<Self>) -> Result<(), StorageError> {
-        self.conn
-            .execute(
+        let r = time_op!(
+            target: "qsl::slow::db",
+            limit_ms: limits::TX_COMMIT_MS,
+            op: "tx_rollback",
+            self.conn.execute(
                 "ROLLBACK",
                 turso::params::IntoParams::into_params(()).unwrap(),
             )
-            .await
-            .map_err(err_db)?;
+        );
+        r.map_err(err_db)?;
         self.finished = true;
         Ok(())
     }

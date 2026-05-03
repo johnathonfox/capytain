@@ -422,30 +422,41 @@ pub async fn batch_insert_skip_existing(
     if headers.is_empty() {
         return Ok(0);
     }
+    let total = headers.len();
 
-    let placeholders: String = (1..=headers.len())
-        .map(|i| format!("?{i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let select_sql = format!("SELECT id FROM messages WHERE id IN ({placeholders})");
-    let select_params: Vec<Value> = headers.iter().map(|h| Value::Text(&h.id.0)).collect();
-    let rows = conn.query(&select_sql, Params(select_params)).await?;
-    let mut existing: HashSet<String> = HashSet::with_capacity(rows.len());
-    for r in &rows {
-        existing.insert(r.get_str("id")?.to_string());
-    }
+    qsl_telemetry::time_op!(
+        target: "qsl::slow::db",
+        limit_ms: qsl_telemetry::slow::limits::TX_COMMIT_MS,
+        op: "messages::batch_insert_skip_existing",
+        fields: { count = total as u64 },
+        async {
+            let placeholders: String = (1..=headers.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let select_sql =
+                format!("SELECT id FROM messages WHERE id IN ({placeholders})");
+            let select_params: Vec<Value> =
+                headers.iter().map(|h| Value::Text(&h.id.0)).collect();
+            let rows = conn.query(&select_sql, Params(select_params)).await?;
+            let mut existing: HashSet<String> = HashSet::with_capacity(rows.len());
+            for r in &rows {
+                existing.insert(r.get_str("id")?.to_string());
+            }
 
-    let mut tx = conn.begin().await?;
-    let mut inserted: u32 = 0;
-    for h in headers {
-        if existing.contains(&h.id.0) {
-            continue;
+            let mut tx = conn.begin().await?;
+            let mut inserted: u32 = 0;
+            for h in headers {
+                if existing.contains(&h.id.0) {
+                    continue;
+                }
+                tx.execute(INSERT, to_params(h, None)?).await?;
+                inserted = inserted.saturating_add(1);
+            }
+            tx.commit().await?;
+            Ok::<u32, StorageError>(inserted)
         }
-        tx.execute(INSERT, to_params(h, None)?).await?;
-        inserted = inserted.saturating_add(1);
-    }
-    tx.commit().await?;
-    Ok(inserted)
+    )
 }
 
 fn to_params<'a>(

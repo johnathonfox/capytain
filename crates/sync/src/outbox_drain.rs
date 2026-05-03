@@ -160,7 +160,13 @@ async fn process_one(
     resolver: &dyn BackendResolver,
     entry: &outbox_repo::OutboxEntry,
 ) -> DrainOutcome {
-    let result = dispatch(conn, resolver, entry).await;
+    let result = qsl_telemetry::time_op!(
+        target: "qsl::slow::sync",
+        limit_ms: qsl_telemetry::slow::limits::IMAP_CMD_MS,
+        op: "outbox_dispatch",
+        fields: { op_kind = %entry.op_kind, account = %entry.account_id.0, attempt = entry.attempts },
+        dispatch(conn, resolver, entry)
+    );
     match result {
         Ok(()) => match outbox_repo::delete(conn, &entry.id).await {
             Ok(()) => DrainOutcome::Sent {

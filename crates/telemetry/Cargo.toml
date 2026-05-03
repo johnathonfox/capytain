@@ -15,5 +15,8 @@ publish.workspace = true
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
 [lints]
 workspace = true
