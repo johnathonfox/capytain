@@ -24,7 +24,7 @@
 
 use qsl_core::StorageError;
 
-use crate::conn::{DbConn, Params, Value};
+use crate::conn::{DbConn, Params, Tx, Value};
 
 /// Where the address came from. Stored as a TEXT discriminator in
 /// the `source` column so a future privacy toggle ("don't suggest
@@ -105,6 +105,48 @@ pub async fn upsert_seen(
     };
 
     conn.execute(
+        sql,
+        Params(vec![
+            Value::Text(trimmed),
+            display_value,
+            Value::Integer(now_secs),
+            Value::Text(source.as_str()),
+        ]),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Tx-bound counterpart to [`upsert_seen`]. SQL is identical; this
+/// version routes through `tx.execute` so a `sync_folder` chunk's
+/// contacts upserts can land in the same transaction as its
+/// messages writes (one Tantivy commit, not N+contacts).
+pub async fn upsert_seen_in_tx(
+    tx: &mut dyn Tx,
+    address: &str,
+    display_name: Option<&str>,
+    source: Source,
+    now_secs: i64,
+) -> Result<(), StorageError> {
+    let trimmed = address.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    let display_for_insert = display_name.filter(|s| !s.is_empty()).map(str::to_string);
+    let sql = "
+        INSERT INTO contacts_v1 (address, display_name, last_seen_at, seen_count, source)
+        VALUES (?1, ?2, ?3, 1, ?4)
+        ON CONFLICT(address) DO UPDATE SET
+            display_name  = COALESCE(NULLIF(?2, ''), display_name),
+            last_seen_at  = ?3,
+            seen_count    = seen_count + 1,
+            source        = ?4
+    ";
+    let display_value = match display_for_insert.as_deref() {
+        Some(s) => Value::Text(s),
+        None => Value::Null,
+    };
+    tx.execute(
         sql,
         Params(vec![
             Value::Text(trimmed),

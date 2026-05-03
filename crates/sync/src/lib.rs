@@ -20,9 +20,11 @@ pub mod threading;
 use thiserror::Error;
 use tracing::{debug, instrument, warn};
 
-use qsl_core::{Folder, MailBackend, MailError, MessageHeaders, StorageError};
+use std::collections::HashMap;
+
+use qsl_core::{Folder, MailBackend, MailError, MessageHeaders, MessageId, StorageError, ThreadId};
 use qsl_storage::{
-    repos::{contacts, folders, messages, sync_states},
+    repos::{contacts, folders, messages, sync_states, threads as threads_repo},
     BlobStore, DbConn,
 };
 
@@ -144,63 +146,7 @@ pub async fn sync_folder(
 
     let mut report = SyncReport::default();
     let mut new_headers: Vec<MessageHeaders> = Vec::new();
-    for h in &result.messages {
-        match messages::find(conn, &h.id).await? {
-            Some(existing) => {
-                messages::update(conn, h, None).await?;
-                report.updated += 1;
-                // Heal-on-update: if the existing row never got a
-                // thread_id (synced before threading-pipeline land,
-                // or orphaned by the historical `UPDATE messages SET
-                // thread_id = ?4 ...` bug), opportunistically run the
-                // assembly pass against the freshly-updated row. Once
-                // the column is `Some(_)` we leave it alone, so this
-                // is at-most-once-per-orphan and free on the steady-
-                // state path.
-                if existing.thread_id.is_none() {
-                    if let Err(e) = threading::attach_to_thread(conn, h).await {
-                        warn!(message = %h.id.0, "thread heal-on-update failed: {e}");
-                    }
-                }
-            }
-            None => {
-                messages::insert(conn, h, None).await?;
-                // Thread assembly runs immediately after the row
-                // lands so subsequent inserts in this same cycle
-                // see the thread_id we just minted via the
-                // `find_by_rfc822_id` chain. Failures are logged
-                // and skipped — a missing thread_id is recoverable
-                // (the message just won't group), unlike a missing
-                // header row which is a hard cache bug.
-                if let Err(e) = threading::attach_to_thread(conn, h).await {
-                    warn!(message = %h.id.0, "thread assembly failed: {e}");
-                }
-                // Contacts collection: the `From:` of every
-                // newly-inserted message (one per address; bounce
-                // notifications occasionally have multiple) seeds
-                // the autocomplete dropdown. PR-C2 surfaces this in
-                // compose. Collection failures are logged and
-                // skipped — the message is fully valid even if the
-                // contact upsert blew up.
-                let now = chrono::Utc::now().timestamp();
-                for addr in &h.from {
-                    if let Err(e) = contacts::upsert_seen(
-                        conn,
-                        &addr.address,
-                        addr.display_name.as_deref(),
-                        contacts::Source::Inbound,
-                        now,
-                    )
-                    .await
-                    {
-                        warn!(message = %h.id.0, "contact upsert failed: {e}");
-                    }
-                }
-                report.added += 1;
-                new_headers.push(h.clone());
-            }
-        }
-    }
+    apply_chunk(conn, &result.messages, &mut report, &mut new_headers).await?;
     // Apply backend-reported deletions (JMAP's `Email/changes.destroyed`
     // is the only path that hits this today — IMAP's adapter can't
     // surface VANISHED responses through async-imap, so it falls
@@ -298,6 +244,156 @@ pub async fn sync_folder(
         "sync_folder cycle complete"
     );
     Ok(report)
+}
+
+/// Apply one fetch chunk's messages — find/insert/update + thread
+/// assembly + contacts upserts — inside a single transaction.
+///
+/// **Why batched.** Turso 0.5.3's experimental Tantivy-backed FTS
+/// rebuilds the `messages_fts_idx` directory on every implicit commit
+/// of the `messages` table. Per-row writes (the prior shape: one
+/// `messages::insert` + one `threads::attach_message` per header) had
+/// the indexer running ~14 commits + GC passes per second on a busy
+/// folder, which both wastes wall-clock and floods the log. One tx
+/// per chunk collapses that to one rebuild. See
+/// `docs/dependencies/turso.md` and `feedback_turso_quirks.md`.
+///
+/// **Two-phase shape.** Step 1 is read-only on `conn` and computes
+/// every thread resolution (with chunk-local visibility so an
+/// in-chunk back-reference still finds the thread its peer minted).
+/// Step 2 opens a tx, mints the new threads, INSERTs / UPDATEs every
+/// message with `thread_id` baked in, bumps thread message_count and
+/// last_date, and upserts contacts — all in one commit.
+async fn apply_chunk(
+    conn: &dyn DbConn,
+    headers: &[MessageHeaders],
+    report: &mut SyncReport,
+    new_headers: &mut Vec<MessageHeaders>,
+) -> Result<(), SyncError> {
+    if headers.is_empty() {
+        return Ok(());
+    }
+
+    // Phase 1: read-only pre-pass on `conn`. No FTS-triggering writes.
+    let existing = batch_find_existing(conn, headers).await?;
+
+    let mut chunk_local: HashMap<String, ThreadId> = HashMap::new();
+    let mut new_resolutions: HashMap<MessageId, threading::ThreadAttachment> = HashMap::new();
+    let mut heal_resolutions: HashMap<MessageId, threading::ThreadAttachment> = HashMap::new();
+
+    for h in headers {
+        match existing.get(&h.id) {
+            None => {
+                let res = threading::resolve_with_chunk_local(conn, h, &chunk_local).await?;
+                if let Some(rfc) = h.rfc822_message_id.as_deref() {
+                    chunk_local.insert(rfc.to_string(), res.thread_id.clone());
+                }
+                new_resolutions.insert(h.id.clone(), res);
+            }
+            Some(existing_thread) if existing_thread.is_none() => {
+                // Heal-on-update: existing row has no thread_id — resolve and
+                // attach it inside this chunk's tx. Same chunk-local
+                // visibility rules as the new-row path.
+                let res = threading::resolve_with_chunk_local(conn, h, &chunk_local).await?;
+                if let Some(rfc) = h.rfc822_message_id.as_deref() {
+                    chunk_local.insert(rfc.to_string(), res.thread_id.clone());
+                }
+                heal_resolutions.insert(h.id.clone(), res);
+            }
+            Some(_) => {
+                // Existing row already has a thread; chunk_local still gets
+                // it so back-refs from later headers in this chunk land on
+                // the right thread.
+                if let (Some(rfc), Some(t)) =
+                    (h.rfc822_message_id.as_deref(), existing.get(&h.id).unwrap())
+                {
+                    chunk_local.insert(rfc.to_string(), t.clone());
+                }
+            }
+        }
+    }
+
+    // Phase 2: one tx per chunk.
+    let mut tx = conn.begin().await?;
+
+    // Mint all new threads first so the FK constraint on
+    // messages.thread_id is satisfied when the message INSERTs land.
+    for r in new_resolutions.values().chain(heal_resolutions.values()) {
+        if let Some(mint) = &r.mint {
+            threads_repo::insert_in_tx(&mut *tx, mint).await?;
+        }
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    for h in headers {
+        if let Some(res) = new_resolutions.get(&h.id) {
+            // INSERT with thread_id baked in.
+            let mut h_with_thread = h.clone();
+            h_with_thread.thread_id = Some(res.thread_id.clone());
+            messages::insert_in_tx(&mut *tx, &h_with_thread, None).await?;
+            threads_repo::touch_for_message_in_tx(&mut *tx, &res.thread_id, h.date).await?;
+            for addr in &h.from {
+                contacts::upsert_seen_in_tx(
+                    &mut *tx,
+                    &addr.address,
+                    addr.display_name.as_deref(),
+                    contacts::Source::Inbound,
+                    now,
+                )
+                .await?;
+            }
+            report.added += 1;
+            new_headers.push(h.clone());
+        } else if let Some(res) = heal_resolutions.get(&h.id) {
+            // UPDATE the row, then attach thread_id + bump the thread.
+            messages::update_in_tx(&mut *tx, h, None).await?;
+            threads_repo::set_message_thread_id_in_tx(&mut *tx, &h.id, &res.thread_id).await?;
+            threads_repo::touch_for_message_in_tx(&mut *tx, &res.thread_id, h.date).await?;
+            report.updated += 1;
+        } else {
+            // Plain UPDATE — existing row already has a thread.
+            messages::update_in_tx(&mut *tx, h, None).await?;
+            report.updated += 1;
+        }
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Probe storage for which message ids in `headers` already exist,
+/// returning a map from id → existing `thread_id` (which may be
+/// `None` if the row was inserted before threading or orphaned by an
+/// older bug). Single batched SELECT — the loop's per-row `find`
+/// previously made N round-trips per chunk.
+async fn batch_find_existing(
+    conn: &dyn DbConn,
+    headers: &[MessageHeaders],
+) -> Result<HashMap<MessageId, Option<ThreadId>>, StorageError> {
+    if headers.is_empty() {
+        return Ok(HashMap::new());
+    }
+    use qsl_storage::{Params as StorageParams, Value as StorageValue};
+    let placeholders: String = (1..=headers.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!("SELECT id, thread_id FROM messages WHERE id IN ({placeholders})");
+    let storage_params: Vec<StorageValue> = headers
+        .iter()
+        .map(|h| StorageValue::Text(&h.id.0))
+        .collect();
+    let rows = conn.query(&sql, StorageParams(storage_params)).await?;
+
+    let mut out: HashMap<MessageId, Option<ThreadId>> = HashMap::with_capacity(rows.len());
+    for r in &rows {
+        let id = MessageId(r.get_str("id")?.to_string());
+        let thread_id = r
+            .get_optional_str("thread_id")?
+            .map(|s| ThreadId(s.to_string()));
+        out.insert(id, thread_id);
+    }
+    Ok(out)
 }
 
 /// One folder's slice of a [`sync_account`] cycle.

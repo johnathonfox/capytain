@@ -13,7 +13,7 @@ use qsl_core::{
 };
 
 use super::json;
-use crate::conn::{DbConn, Params, Row, Value};
+use crate::conn::{DbConn, Params, Row, Tx, Value};
 
 const INSERT: &str = "
     INSERT INTO messages
@@ -84,6 +84,37 @@ pub async fn update(
     body_path: Option<&str>,
 ) -> Result<(), StorageError> {
     let affected = conn.execute(UPDATE, to_params(headers, body_path)?).await?;
+    if affected == 0 {
+        Err(StorageError::NotFound)
+    } else {
+        Ok(())
+    }
+}
+
+/// Tx-bound counterpart to [`insert`]. Used by `sync_folder`'s
+/// per-chunk batch path (`qsl-sync::lib::sync_folder`) so every row
+/// in a sync cycle commits together — collapses the N-Tantivy-commit
+/// storm Turso 0.5.3's experimental FTS produces on per-row writes
+/// down to one rebuild per chunk. See `docs/dependencies/turso.md`.
+pub async fn insert_in_tx(
+    tx: &mut dyn Tx,
+    headers: &MessageHeaders,
+    body_path: Option<&str>,
+) -> Result<(), StorageError> {
+    tx.execute(INSERT, to_params(headers, body_path)?)
+        .await
+        .map(|_| ())
+}
+
+/// Tx-bound counterpart to [`update`]. Returns `Err(NotFound)` if the
+/// row isn't there so the caller can decide whether to fall back to
+/// `insert_in_tx` instead.
+pub async fn update_in_tx(
+    tx: &mut dyn Tx,
+    headers: &MessageHeaders,
+    body_path: Option<&str>,
+) -> Result<(), StorageError> {
+    let affected = tx.execute(UPDATE, to_params(headers, body_path)?).await?;
     if affected == 0 {
         Err(StorageError::NotFound)
     } else {
