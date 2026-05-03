@@ -183,15 +183,29 @@ pub async fn sync_folder(
                 use std::collections::HashSet;
                 let live: HashSet<&str> = live_ids.iter().map(|id| id.0.as_str()).collect();
                 let local = messages::list_ids_by_folder(conn, &folder.id).await?;
+                let local_count = local.len();
+                let mut pruned = 0u32;
                 for id in local {
                     if live.contains(id.0.as_str()) {
                         continue;
                     }
                     match messages::delete(conn, &id).await {
-                        Ok(()) => report.removed += 1,
+                        Ok(()) => {
+                            report.removed += 1;
+                            pruned += 1;
+                        }
                         Err(StorageError::NotFound) => {}
                         Err(e) => return Err(e.into()),
                     }
+                }
+                if pruned > 0 {
+                    tracing::info!(
+                        folder = %folder.id.0,
+                        live = live.len(),
+                        local = local_count,
+                        pruned = pruned,
+                        "sync_folder reconcile pruned server-deleted messages"
+                    );
                 }
             }
             Err(e) => {
@@ -446,10 +460,21 @@ async fn fetch_and_store_body(
     blobs: &BlobStore,
     header: &MessageHeaders,
 ) -> Result<(), SyncError> {
-    let raw = backend.fetch_raw_message(&header.id).await?;
-    let path = blobs
-        .put(&header.account_id, &header.folder_id, &header.id, &raw)
-        .await?;
+    let raw = qsl_telemetry::time_op!(
+        target: "qsl::slow::imap",
+        limit_ms: qsl_telemetry::slow::limits::IMAP_CMD_MS,
+        op: "fetch_raw_message",
+        fields: { account = %header.account_id.0, folder = %header.folder_id.0, message = %header.id.0 },
+        backend.fetch_raw_message(&header.id)
+    )?;
+    let bytes = raw.len() as u64;
+    let path = qsl_telemetry::time_op!(
+        target: "qsl::slow::db",
+        limit_ms: qsl_telemetry::slow::limits::DB_QUERY_MS,
+        op: "blob_put",
+        fields: { account = %header.account_id.0, folder = %header.folder_id.0, bytes = bytes },
+        blobs.put(&header.account_id, &header.folder_id, &header.id, &raw)
+    )?;
     messages::set_body_path(conn, &header.id, Some(&path.to_string_lossy())).await?;
     Ok(())
 }

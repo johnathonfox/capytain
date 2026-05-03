@@ -72,7 +72,11 @@ pub async fn app_settings_set<R: tauri::Runtime>(
         let db = state.db.lock().await;
         app_settings_repo::set(&*db, &input.key, &input.value).await?;
     }
-    tracing::info!(key = %input.key, "app_settings_set");
+    tracing::info!(
+        key = %input.key,
+        value = %input.value,
+        "app_settings_set"
+    );
     let payload = AppSettingsChangedPayload {
         key: input.key,
         value: input.value,

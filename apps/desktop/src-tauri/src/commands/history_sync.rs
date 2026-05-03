@@ -66,6 +66,7 @@ pub async fn history_sync_start(
     input: HistorySyncStartInput,
 ) -> IpcResult<()> {
     let HistorySyncStartInput { account, folder } = input;
+    tracing::debug!(account = %account.0, folder = %folder.0, "ipc: history_sync_start");
 
     // Reject double-start. We can't usefully run two concurrent
     // pullers against the same folder — they'd race on anchor
@@ -167,6 +168,7 @@ pub async fn history_sync_cancel(
     input: HistorySyncCancelInput,
 ) -> IpcResult<()> {
     let HistorySyncCancelInput { account, folder } = input;
+    tracing::debug!(account = %account.0, folder = %folder.0, "ipc: history_sync_cancel");
     let token_present = {
         let mut cancellers = state.history_cancellers.lock().await;
         match cancellers.get(&(account.clone(), folder.clone())) {

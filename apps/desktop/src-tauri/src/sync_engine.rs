@@ -751,6 +751,13 @@ fn fire_new_mail_notification(
         ),
     };
 
+    info!(
+        account = %account.0,
+        folder = %folder.0,
+        count = count,
+        title = %title,
+        "notification: firing new-mail notification"
+    );
     if let Err(e) = app
         .notification()
         .builder()

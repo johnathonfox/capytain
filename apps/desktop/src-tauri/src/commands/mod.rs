@@ -37,8 +37,21 @@ use crate::state::AppState;
 /// `notify_one` side-effect.
 #[tauri::command]
 pub async fn ui_ready(state: State<'_, AppState>) -> IpcResult<()> {
+    use std::sync::atomic::Ordering;
     state.ui_ready.notify_one();
-    tracing::info!("ui_ready: signalled sync engine");
+    if state
+        .first_paint_logged
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .is_ok()
+    {
+        let elapsed_ms = state.boot_at.elapsed().as_millis() as u64;
+        tracing::info!(
+            elapsed_ms,
+            "ui_ready: first paint (process start → wasm mounted)"
+        );
+    } else {
+        tracing::info!("ui_ready: signalled sync engine");
+    }
     Ok(())
 }
 

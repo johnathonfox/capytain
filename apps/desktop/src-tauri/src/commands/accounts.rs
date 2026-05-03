@@ -315,6 +315,7 @@ pub async fn accounts_remove(
     state: State<'_, AppState>,
     input: AccountsRemoveInput,
 ) -> IpcResult<()> {
+    tracing::debug!(id = %input.id.0, "ipc: accounts_remove");
     {
         let mut cancellers = state.history_cancellers.lock().await;
         let to_drop: Vec<_> = cancellers

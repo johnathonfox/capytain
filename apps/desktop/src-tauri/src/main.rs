@@ -30,6 +30,7 @@ mod sync_engine;
 mod tray;
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use directories::ProjectDirs;
 use qsl_storage::{run_migrations, TursoConn};
@@ -38,6 +39,7 @@ use tauri::Manager;
 use crate::state::AppState;
 
 fn main() {
+    let boot_at = Instant::now();
     // Linux webview workaround. webkit2gtk's DMA-BUF renderer asks
     // libgbm for framebuffers; on hybrid AMD/NVIDIA boxes (or any rig
     // where libgbm lands on the NVIDIA proprietary stack) the GBM
@@ -137,7 +139,7 @@ fn main() {
                 )
                 .build(),
         )
-        .setup(|app| {
+        .setup(move |app| {
             // Resolve data dir + open DB on the Tauri async runtime so
             // we don't block the UI thread. `block_on` here is fine: we
             // only do it once at startup, before any window is shown.
@@ -145,7 +147,7 @@ fn main() {
             // while `bootstrap_state` produces the Send+Sync variant so
             // it stays usable in other async contexts — unsize the error
             // explicitly to bridge the two.
-            let state = tauri::async_runtime::block_on(bootstrap_state())
+            let state = tauri::async_runtime::block_on(bootstrap_state(boot_at))
                 .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             app.manage(state);
 
@@ -258,7 +260,9 @@ fn main() {
 ///
 /// Kept as a free function so the bootstrap logic is testable and so
 /// `setup` stays a one-liner.
-async fn bootstrap_state() -> Result<AppState, Box<dyn std::error::Error + Send + Sync>> {
+async fn bootstrap_state(
+    boot_at: Instant,
+) -> Result<AppState, Box<dyn std::error::Error + Send + Sync>> {
     let data_dir = resolve_data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
     tracing::info!(data_dir = %data_dir.display(), "qsl desktop: data dir ready");
@@ -287,7 +291,7 @@ async fn bootstrap_state() -> Result<AppState, Box<dyn std::error::Error + Send 
         "qsl desktop ready"
     );
 
-    Ok(AppState::new(db, sync_db, data_dir))
+    Ok(AppState::new(db, sync_db, data_dir, boot_at))
 }
 
 /// Mirror of mailcli's data-dir resolution so both binaries read and
