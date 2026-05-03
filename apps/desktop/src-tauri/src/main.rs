@@ -260,18 +260,24 @@ fn main() {
 async fn bootstrap_state() -> Result<AppState, Box<dyn std::error::Error + Send + Sync>> {
     let data_dir = resolve_data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
+    tracing::info!(data_dir = %data_dir.display(), "qsl desktop: data dir ready");
 
     let db_path = data_dir.join("qsl.db");
+    tracing::info!(db = %db_path.display(), "qsl desktop: opening IPC database");
     let db = TursoConn::open(&db_path).await?;
+
     // Run migrations on the IPC connection only — they're idempotent
     // at the SQLite layer regardless, but doing it once before the
     // sync connection opens means schema is in place by the time the
     // sync engine touches the file.
+    tracing::info!("qsl desktop: running migrations");
     run_migrations(&db).await?;
+
     // Second connection to the same file for the sync engine. WAL
     // mode is enabled by `TursoConn::open`, so reads on `db` won't
     // block while `sync_db` is mid-transaction. See `AppState::sync_db`
     // for the full rationale.
+    tracing::info!("qsl desktop: opening sync database");
     let sync_db = TursoConn::open(&db_path).await?;
 
     tracing::info!(

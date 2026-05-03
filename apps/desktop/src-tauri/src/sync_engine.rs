@@ -105,8 +105,9 @@ async fn run(app: &AppHandle) -> Result<(), String> {
         let state: tauri::State<'_, AppState> = app.state();
         state.ui_ready.clone()
     };
+    info!("sync engine: waiting for ui_ready signal");
     match tokio::time::timeout(UI_READY_TIMEOUT, notify.notified()).await {
-        Ok(()) => debug!("sync engine: ui_ready received, starting bootstrap"),
+        Ok(()) => info!("sync engine: ui_ready received, starting bootstrap"),
         Err(_) => warn!(
             timeout_ms = UI_READY_TIMEOUT.as_millis() as u64,
             "sync engine: ui_ready timeout — starting bootstrap anyway"
@@ -448,15 +449,22 @@ async fn list_accounts(app: &AppHandle) -> Result<Vec<Account>, String> {
 /// for downstream prioritization. The per-folder sync is otherwise
 /// identical to what `sync_account` would do.
 async fn bootstrap_account(app: &AppHandle, account: &Account) -> Result<Vec<Folder>, String> {
+    info!(account = %account.id.0, kind = ?account.kind, "bootstrap account: opening backend");
     let state: tauri::State<'_, AppState> = app.state();
     let backend = backend_factory::get_or_open(&state, &account.id)
         .await
         .map_err(|e| format!("open backend: {e}"))?;
 
+    info!(account = %account.id.0, "bootstrap account: listing folders");
     let folders = backend
         .list_folders()
         .await
         .map_err(|e| format!("list_folders: {e}"))?;
+    info!(
+        account = %account.id.0,
+        count = folders.len(),
+        "bootstrap account: syncing folders"
+    );
 
     let blobs = BlobStore::new(state.data_dir.join("blobs"));
 
@@ -480,6 +488,7 @@ async fn bootstrap_account(app: &AppHandle, account: &Account) -> Result<Vec<Fol
     };
 
     let mut succeeded = Vec::with_capacity(outcomes.len());
+    let mut failed = 0usize;
     for (folder, result) in outcomes {
         emit_folder_outcome(
             app,
@@ -491,8 +500,16 @@ async fn bootstrap_account(app: &AppHandle, account: &Account) -> Result<Vec<Fol
         .await;
         if result.is_ok() {
             succeeded.push(folder);
+        } else {
+            failed += 1;
         }
     }
+    info!(
+        account = %account.id.0,
+        ok = succeeded.len(),
+        failed,
+        "bootstrap account: done"
+    );
     Ok(succeeded)
 }
 
