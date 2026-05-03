@@ -29,13 +29,23 @@ use crate::SyncError;
 
 /// How many headers to ask the backend for per chunk.
 ///
-/// 500 balances throughput against responsiveness — large enough to
-/// amortize the per-FETCH SELECT + round-trip overhead, small enough
-/// that the user sees a progress tick within ~10s of clicking Start
-/// and Cancel takes effect within one chunk. Going higher (we tried
-/// 1000) made the first chunk take 30+ seconds on a fresh Gmail
-/// account, which reads to the user as "it's not pulling at all".
-pub const HISTORY_CHUNK_SIZE: u32 = 500;
+/// 1500 maximizes per-chunk throughput on the post-multi-row-INSERT
+/// hot path (`messages::batch_insert_skip_existing` collapses 1500
+/// rows into one SQL statement, the largest size that still fits
+/// SQLite's 32766-placeholder limit at 20 cols/row). At chunk index
+/// ≥ 2 the per-chunk wall-clock is dominated by Gmail's UID FETCH
+/// — so amortizing more rows per FETCH cuts total backfill time
+/// roughly proportionally.
+///
+/// Trade-off: the first chunk's wall-clock scales with chunk size
+/// (Gmail returns a single big UID FETCH response). At 500 the user
+/// saw a progress tick within ~10s; at 1500 that becomes ~30-45s
+/// before the bar moves. Acceptable for full-history backfills (the
+/// total saving more than offsets the start delay) but the
+/// responsiveness hit was the reason 1000 was rolled back earlier
+/// — revisit if users complain that "Pulling history" looks frozen
+/// at the start.
+pub const HISTORY_CHUNK_SIZE: u32 = 1500;
 
 /// Sleep between chunks. Kept small so the network connection stays
 /// hot; Gmail's "Too many simultaneous connections" gate trips on

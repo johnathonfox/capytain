@@ -4,8 +4,6 @@
 //! this repo persists only the `MessageHeaders` view plus a `body_path`
 //! pointer.
 
-use std::collections::HashSet;
-
 use chrono::{TimeZone, Utc};
 
 use qsl_core::{
@@ -403,15 +401,19 @@ pub async fn delete(conn: &dyn DbConn, id: &MessageId) -> Result<(), StorageErro
 /// Bulk-insert a slice of headers, skipping rows whose `id` already
 /// exists. Returns the count of newly-inserted rows.
 ///
-/// All inserts run inside a single transaction. This matters on the
-/// history-pull hot path: Turso 0.5.3's experimental FTS rebuilds the
-/// `messages_fts_idx` index at every implicit commit, which on a 500-row
-/// chunk drags throughput from milliseconds to multiple minutes per
-/// chunk (see `docs/dependencies/turso.md`). One commit per chunk
-/// instead of one per row collapses that overhead.
+/// All inserts run inside a single transaction.
 ///
-/// Existence is probed with one batched `WHERE id IN (?, ?, …)` so a
-/// 500-row chunk costs one SELECT + one tx, not 500 of each.
+/// Dedup happens at the engine via `INSERT OR IGNORE` against the
+/// `messages` PK. The previous SELECT-IN-then-filter pre-check was
+/// the dominant cost (4–5s/chunk on a 1500-element IN list once the
+/// table grew past ~25k rows); pushing it into the INSERT lets the
+/// engine reject duplicates at the index lookup it was going to do
+/// anyway.
+///
+/// **Multi-row VALUES.** Rows are flushed via
+/// `INSERT OR IGNORE INTO messages (cols) VALUES (...), (...), ...`
+/// — one statement per group of up to 1500 rows (SQLite's 32766-
+/// placeholder limit divided by 20 columns, with headroom).
 ///
 /// `body_path` is always `None` here — history-pull persists headers
 /// only and lets the on-demand fetch path populate bodies later.
@@ -423,29 +425,71 @@ pub async fn batch_insert_skip_existing(
         return Ok(0);
     }
 
-    let placeholders: String = (1..=headers.len())
-        .map(|i| format!("?{i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let select_sql = format!("SELECT id FROM messages WHERE id IN ({placeholders})");
-    let select_params: Vec<Value> = headers.iter().map(|h| Value::Text(&h.id.0)).collect();
-    let rows = conn.query(&select_sql, Params(select_params)).await?;
-    let mut existing: HashSet<String> = HashSet::with_capacity(rows.len());
-    for r in &rows {
-        existing.insert(r.get_str("id")?.to_string());
+    // Build all groups (SQL string + flattened param vec) BEFORE
+    // opening the transaction. JSON encoding (with empty-vec fast
+    // paths in `to_params`) and SQL string assembly run with no DB
+    // lock held; the transaction window narrows to just the syscall
+    // path inside Turso.
+    let mut groups: Vec<(String, Vec<Value>)> =
+        Vec::with_capacity(headers.len().div_ceil(BATCH_INSERT_GROUP_SIZE));
+    for group in headers.chunks(BATCH_INSERT_GROUP_SIZE) {
+        let mut params: Vec<Value> = Vec::with_capacity(group.len() * COLS_PER_ROW);
+        for h in group {
+            let mut p = to_params(h, None)?;
+            params.append(&mut p.0);
+        }
+        let sql = build_multi_insert_sql(group.len());
+        groups.push((sql, params));
     }
 
     let mut tx = conn.begin().await?;
-    let mut inserted: u32 = 0;
-    for h in headers {
-        if existing.contains(&h.id.0) {
-            continue;
-        }
-        tx.execute(INSERT, to_params(h, None)?).await?;
-        inserted = inserted.saturating_add(1);
+    let mut inserted: u64 = 0;
+    for (sql, params) in groups.drain(..) {
+        inserted += tx.execute(&sql, Params(params)).await?;
     }
     tx.commit().await?;
-    Ok(inserted)
+    Ok(inserted as u32)
+}
+
+/// 20 placeholders per row — `INSERT` template above. Used to size
+/// the placeholder budget for the multi-row INSERT path.
+const COLS_PER_ROW: usize = 20;
+
+/// Max rows per multi-row INSERT statement. SQLite's compile-time
+/// `SQLITE_MAX_VARIABLE_NUMBER` is 32766; at 20 placeholders per row
+/// that allows 1638. We round down to 1500 to leave headroom in case
+/// a future migration grows the column count.
+const BATCH_INSERT_GROUP_SIZE: usize = 1500;
+
+/// Build the multi-row INSERT statement for `n` rows: one VALUES
+/// tuple per row, with sequential `?N` placeholders.
+fn build_multi_insert_sql(n: usize) -> String {
+    debug_assert!(n > 0, "build_multi_insert_sql called with zero rows");
+    let mut sql = String::with_capacity(256 + n * 80);
+    sql.push_str(
+        "INSERT OR IGNORE INTO messages \
+         (id, account_id, folder_id, thread_id, rfc822_message_id, \
+          subject, from_json, reply_to_json, to_json, cc_json, bcc_json, \
+          date, flags_json, labels_json, snippet, size, has_attachments, \
+          body_path, in_reply_to, references_json) \
+         VALUES ",
+    );
+    for row in 0..n {
+        if row > 0 {
+            sql.push_str(", ");
+        }
+        sql.push('(');
+        for col in 0..COLS_PER_ROW {
+            if col > 0 {
+                sql.push_str(", ");
+            }
+            let idx = row * COLS_PER_ROW + col + 1;
+            sql.push('?');
+            sql.push_str(&idx.to_string());
+        }
+        sql.push(')');
+    }
+    sql
 }
 
 fn to_params<'a>(
@@ -465,14 +509,14 @@ fn to_params<'a>(
             .map(Value::Text)
             .unwrap_or(Value::Null),
         Value::Text(&h.subject),
-        Value::OwnedText(json::encode(&h.from)?),
-        Value::OwnedText(json::encode(&h.reply_to)?),
-        Value::OwnedText(json::encode(&h.to)?),
-        Value::OwnedText(json::encode(&h.cc)?),
-        Value::OwnedText(json::encode(&h.bcc)?),
+        encode_addr_vec(&h.from)?,
+        encode_addr_vec(&h.reply_to)?,
+        encode_addr_vec(&h.to)?,
+        encode_addr_vec(&h.cc)?,
+        encode_addr_vec(&h.bcc)?,
         Value::Integer(h.date.timestamp()),
         Value::OwnedText(json::encode(&h.flags)?),
-        Value::OwnedText(json::encode(&h.labels)?),
+        encode_str_vec(&h.labels)?,
         Value::Text(&h.snippet),
         Value::Integer(h.size.into()),
         Value::Integer(h.has_attachments.into()),
@@ -481,8 +525,30 @@ fn to_params<'a>(
             .as_deref()
             .map(Value::Text)
             .unwrap_or(Value::Null),
-        Value::OwnedText(json::encode(&h.references)?),
+        encode_str_vec(&h.references)?,
     ]))
+}
+
+/// JSON-encode a vec of email addresses, fast-pathing the empty case
+/// to a borrowed `"[]"`. Most history-pull rows have empty
+/// reply_to/cc/bcc; serde was responsible for ~7 string allocs per row
+/// per chunk — now zero for empty, one allocation for non-empty.
+fn encode_addr_vec(v: &[qsl_core::EmailAddress]) -> Result<Value<'static>, StorageError> {
+    if v.is_empty() {
+        Ok(Value::Text("[]"))
+    } else {
+        Ok(Value::OwnedText(json::encode(v)?))
+    }
+}
+
+/// Same fast path for `Vec<String>` (labels, references). Most rows
+/// have empty `references`; many have empty `labels`.
+fn encode_str_vec(v: &[String]) -> Result<Value<'static>, StorageError> {
+    if v.is_empty() {
+        Ok(Value::Text("[]"))
+    } else {
+        Ok(Value::OwnedText(json::encode(v)?))
+    }
 }
 
 fn row_to_headers(row: &Row) -> Result<MessageHeaders, StorageError> {

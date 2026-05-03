@@ -5,7 +5,7 @@
 use qsl_core::StorageError;
 use serde::{de::DeserializeOwned, Serialize};
 
-pub(super) fn encode<T: Serialize>(value: &T) -> Result<String, StorageError> {
+pub(super) fn encode<T: Serialize + ?Sized>(value: &T) -> Result<String, StorageError> {
     serde_json::to_string(value).map_err(|e| StorageError::Serde(e.to_string()))
 }
 

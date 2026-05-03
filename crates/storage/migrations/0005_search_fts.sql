@@ -37,5 +37,10 @@
 --     contract). DDL is safe; the table is either empty (fresh DB)
 --     or already populated (upgrade), and Turso builds the index
 --     over existing rows when `CREATE INDEX` runs.
-CREATE INDEX IF NOT EXISTS messages_fts_idx ON messages
-USING fts (subject, from_json, to_json, snippet);
+-- 2026-05-03: temporarily disabled while we measure whether Turso's
+-- experimental FTS is the source of the slow per-INSERT cost on
+-- `messages`. Search will return zero hits until this is restored.
+-- Re-enable by un-commenting the CREATE INDEX below; existing DBs
+-- can pick it up via `mailcli doctor --rebuild-fts`.
+-- CREATE INDEX IF NOT EXISTS messages_fts_idx ON messages
+-- USING fts (subject, from_json, to_json, snippet);
