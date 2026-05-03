@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -122,6 +122,19 @@ pub struct AppState {
     /// sessions and progress in parallel.
     pub history_account_locks: Mutex<HashMap<AccountId, Arc<Mutex<()>>>>,
 
+    /// Refcount of in-flight bulk history pulls across all accounts.
+    /// Bumped on entry to `pull_history` and decremented on exit
+    /// (success, cancel, or error) via the `PullGuard` RAII type
+    /// in `commands/history_sync.rs`. While > 0 the
+    /// `messages_fts_idx` is dropped (rebuilt by `pull_history` on
+    /// the way out), so any `fts_match()` query against `messages`
+    /// either errors or full-scans. `messages_search` checks this
+    /// and returns an empty page with `indexing_in_progress=true`
+    /// instead of trying to query the missing index, so the UI can
+    /// render a "search paused" banner instead of hanging on a
+    /// doomed query.
+    pub pull_in_progress: Arc<AtomicU32>,
+
     /// Fired by the `ui_ready` IPC command once the Dioxus app has
     /// mounted in the webview. The sync engine awaits this (with a
     /// short safety timeout) before its bootstrap pass so the
@@ -143,6 +156,7 @@ impl AppState {
             data_dir,
             history_cancellers: Mutex::new(HashMap::new()),
             history_account_locks: Mutex::new(HashMap::new()),
+            pull_in_progress: Arc::new(AtomicU32::new(0)),
             last_rendered: Mutex::new(None),
             ui_ready: Arc::new(Notify::new()),
         }

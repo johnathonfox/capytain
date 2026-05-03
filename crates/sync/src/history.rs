@@ -47,11 +47,21 @@ use crate::SyncError;
 /// at the start.
 pub const HISTORY_CHUNK_SIZE: u32 = 1500;
 
-/// Sleep between chunks. Kept small so the network connection stays
-/// hot; Gmail's "Too many simultaneous connections" gate trips on
-/// concurrent IMAP sessions, not on a single session's request rate.
+/// Sleep between chunks in the consumer. Two competing pressures:
+///   - Network connection should stay hot (Gmail's "Too many
+///     simultaneous connections" gate trips on concurrent IMAP
+///     sessions, not on a single session's request rate).
+///   - The bulk insert path holds the SQLite WAL writer for
+///     ~500ms-1s per chunk. With the pipeline (depth-1) producer
+///     fetching ahead, chunks land every ~1.5s — without this
+///     pause the writer is held nearly continuously and concurrent
+///     IPC reads (Settings, message-list refresh, message-get)
+///     stall. 250ms gives readers a predictable acquire window
+///     every chunk while costing only ~15% throughput on the
+///     dominant Gmail-fetch wall-clock.
+///
 /// Errors-with-backoff still use the longer [`THROTTLE_RECOVERY_MS`].
-pub const INTER_CHUNK_DELAY_MS: u64 = 50;
+pub const INTER_CHUNK_DELAY_MS: u64 = 250;
 
 /// Wait this long after a chunk fails before retrying. Compounds with
 /// the [`MAX_CHUNK_RETRIES`] cap below.

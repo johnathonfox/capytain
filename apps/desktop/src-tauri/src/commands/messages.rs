@@ -117,6 +117,7 @@ pub async fn messages_list(
         total_count,
         unread_count,
         thread_counts,
+        indexing_in_progress: false,
     })
 }
 
@@ -176,6 +177,7 @@ pub async fn messages_list_unified(
         total_count,
         unread_count,
         thread_counts,
+        indexing_in_progress: false,
     })
 }
 
@@ -215,6 +217,26 @@ pub async fn messages_search(
     } = input;
     let limit = limit.min(MAX_PAGE_LIMIT);
 
+    // While a bulk history pull is running, the FTS index is dropped
+    // (rebuilt at the end of the pull). Don't run `fts_match()`
+    // against the missing index — it'll either error or full-scan.
+    // Instead, return an empty page tagged with `indexing_in_progress`
+    // so the UI renders a "search paused while syncing" banner
+    // instead of hanging on a doomed query and freezing the UI thread.
+    if state
+        .pull_in_progress
+        .load(std::sync::atomic::Ordering::Relaxed)
+        > 0
+    {
+        return Ok(MessagePage {
+            messages: Vec::new(),
+            total_count: 0,
+            unread_count: 0,
+            thread_counts: std::collections::HashMap::new(),
+            indexing_in_progress: true,
+        });
+    }
+
     let parsed = qsl_search::parse(&query);
     if parsed.is_empty() {
         return Ok(MessagePage {
@@ -222,6 +244,7 @@ pub async fn messages_search(
             total_count: 0,
             unread_count: 0,
             thread_counts: std::collections::HashMap::new(),
+            indexing_in_progress: false,
         });
     }
 
@@ -262,6 +285,7 @@ pub async fn messages_search(
         total_count,
         unread_count,
         thread_counts,
+        indexing_in_progress: false,
     })
 }
 
