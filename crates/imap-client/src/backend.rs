@@ -131,11 +131,18 @@ impl ImapBackend {
     /// `self.session.lock().await` somewhere would skip the probe
     /// and resurrect the post-sleep wedge.
     async fn lock_session_alive(&self) -> Result<MutexGuard<'_, Session<StreamT>>, MailError> {
+        let total_started = Instant::now();
+        let stale_check_started = Instant::now();
         let stale = {
             let activity = self.last_activity.lock().await;
             activity.elapsed() >= STALE_THRESHOLD
         };
+        let stale_check_us = stale_check_started.elapsed().as_micros() as u64;
+        let mutex_started = Instant::now();
         let mut guard = self.session.lock().await;
+        let mutex_wait_us = mutex_started.elapsed().as_micros() as u64;
+        let noop_started = Instant::now();
+        let mut noop_us: u64 = 0;
         if stale {
             match guard.noop().await {
                 Ok(()) => {
@@ -151,8 +158,19 @@ impl ImapBackend {
                     *guard = fresh;
                 }
             }
+            noop_us = noop_started.elapsed().as_micros() as u64;
         }
         *self.last_activity.lock().await = Instant::now();
+        debug!(
+            phase = "imap.lock",
+            host = %self.host,
+            stale,
+            stale_check_us,
+            mutex_wait_us,
+            noop_us,
+            elapsed_us = total_started.elapsed().as_micros() as u64,
+            "session acquired"
+        );
         Ok(guard)
     }
 
@@ -211,15 +229,28 @@ impl ImapBackend {
             (false, true) => "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE X-GM-LABELS)",
             (false, false) => "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE)",
         };
+        let issue_started = Instant::now();
         let mut fetches = session
             .uid_fetch(&uid_set, query)
             .await
             .map_err(|e| MailError::Protocol(format!("UID FETCH {uid_set} {query}: {e}")))?;
+        let issue_us = issue_started.elapsed().as_micros() as u64;
 
         let mut messages = Vec::new();
-        while let Some(item) = fetches.next().await {
+        let mut drain_us: u64 = 0;
+        let mut parse_us: u64 = 0;
+        let mut bytes: u64 = 0;
+        loop {
+            let drain_start = Instant::now();
+            let next = fetches.next().await;
+            drain_us = drain_us.saturating_add(drain_start.elapsed().as_micros() as u64);
+            let Some(item) = next else { break };
             let fetch = item.map_err(|e| MailError::Protocol(format!("FETCH entry: {e}")))?;
-            match fetch_to_headers(&fetch, folder, uidvalidity, &self.account) {
+            bytes = bytes.saturating_add(u64::from(fetch.size.unwrap_or(0)));
+            let parse_start = Instant::now();
+            let translated = fetch_to_headers(&fetch, folder, uidvalidity, &self.account);
+            parse_us = parse_us.saturating_add(parse_start.elapsed().as_micros() as u64);
+            match translated {
                 Ok(Some(h)) => messages.push(h),
                 Ok(None) => {
                     debug!(message = ?fetch.message, "older FETCH missing UID — skipping");
@@ -230,10 +261,15 @@ impl ImapBackend {
             }
         }
         debug!(
+            phase = "imap.fetch_uid_range_headers",
             folder = %folder.0,
             range = %uid_set,
             count = messages.len(),
             with_thread_headers,
+            bytes,
+            issue_us,
+            drain_us,
+            parse_us,
             "IMAP fetch_uid_range_headers"
         );
         Ok(messages)
@@ -403,8 +439,10 @@ impl MailBackend for ImapBackend {
         since: Option<&SyncState>,
         limit: Option<u32>,
     ) -> Result<MessageList, MailError> {
+        let total_started = Instant::now();
         let mut session = self.lock_session_alive().await?;
 
+        let select_started = Instant::now();
         let mbox = session
             .select(&folder.0)
             .await
@@ -419,6 +457,7 @@ impl MailBackend for ImapBackend {
         // against Gmail; default to 0 defensively so a server that
         // omits it just falls back to no-flag-delta mode.
         let highest_modseq = mbox.highest_modseq.unwrap_or(0);
+        let select_us = select_started.elapsed().as_micros() as u64;
 
         // Build the new backend state from what SELECT told us. Any
         // call to list_messages ends with this persisted regardless of
@@ -482,15 +521,28 @@ impl MailBackend for ImapBackend {
         } else {
             "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE BODY.PEEK[HEADER])"
         };
+        let issue_started = Instant::now();
         let mut fetches = session
             .uid_fetch(&uid_set, query)
             .await
             .map_err(|e| MailError::Protocol(format!("UID FETCH {uid_set} {query}: {e}")))?;
+        let issue_us = issue_started.elapsed().as_micros() as u64;
 
         let mut messages = Vec::new();
-        while let Some(item) = fetches.next().await {
+        let mut drain_us: u64 = 0;
+        let mut parse_us: u64 = 0;
+        let mut bytes: u64 = 0;
+        loop {
+            let drain_start = Instant::now();
+            let next = fetches.next().await;
+            drain_us = drain_us.saturating_add(drain_start.elapsed().as_micros() as u64);
+            let Some(item) = next else { break };
             let fetch = item.map_err(|e| MailError::Protocol(format!("FETCH entry: {e}")))?;
-            match fetch_to_headers(&fetch, folder, uidvalidity, &self.account) {
+            bytes = bytes.saturating_add(u64::from(fetch.size.unwrap_or(0)));
+            let parse_start = Instant::now();
+            let translated = fetch_to_headers(&fetch, folder, uidvalidity, &self.account);
+            parse_us = parse_us.saturating_add(parse_start.elapsed().as_micros() as u64);
+            match translated {
                 Ok(Some(h)) => messages.push(h),
                 Ok(None) => {
                     debug!(message = ?fetch.message, "FETCH response missing UID — skipping");
@@ -501,6 +553,18 @@ impl MailBackend for ImapBackend {
             }
         }
         drop(fetches);
+        debug!(
+            phase = "imap.list_messages_fetch",
+            folder = %folder.0,
+            range = %uid_set,
+            count = messages.len(),
+            bytes,
+            select_us,
+            issue_us,
+            drain_us,
+            parse_us,
+            "list_messages fetch breakdown"
+        );
 
         // CONDSTORE flag-delta pass — only when we have a usable
         // prior modseq AND there's at least one already-known UID
@@ -510,6 +574,7 @@ impl MailBackend for ImapBackend {
         // their modseq advanced when they were appended; that's fine
         // — applying an update after an insert is a no-op since the
         // values match.
+        let flag_pass_started = Instant::now();
         let flag_updates = match since {
             Some(state) => {
                 let cached = BackendState::from_sync(state)?;
@@ -533,11 +598,15 @@ impl MailBackend for ImapBackend {
             }
             None => Vec::new(),
         };
+        let flag_pass_us = flag_pass_started.elapsed().as_micros() as u64;
 
         debug!(
+            phase = "imap.list_messages",
             folder = %folder.0,
             count = messages.len(),
             flag_updates = flag_updates.len(),
+            flag_pass_us,
+            elapsed_us = total_started.elapsed().as_micros() as u64,
             "IMAP list_messages"
         );
 
@@ -590,6 +659,7 @@ impl MailBackend for ImapBackend {
         before_anchor: u64,
         limit: u32,
     ) -> Result<qsl_core::HistoryChunk, MailError> {
+        let total_started = Instant::now();
         if before_anchor <= 1 || limit == 0 {
             return Ok(qsl_core::HistoryChunk {
                 headers: Vec::new(),
@@ -643,10 +713,21 @@ impl MailBackend for ImapBackend {
                     u64::from(before.saturating_sub(limit).max(1))
                 })
         };
-        Ok(qsl_core::HistoryChunk {
+        let result = qsl_core::HistoryChunk {
             headers,
             next_anchor,
-        })
+        };
+        debug!(
+            phase = "imap.pull_history_chunk",
+            folder = %folder.0,
+            before_anchor,
+            limit,
+            count = result.headers.len(),
+            next_anchor = result.next_anchor,
+            elapsed_us = total_started.elapsed().as_micros() as u64,
+            "pull_history_chunk"
+        );
+        Ok(result)
     }
 
     async fn list_known_ids(&self, folder: &FolderId) -> Result<Vec<MessageId>, MailError> {
@@ -689,9 +770,11 @@ impl MailBackend for ImapBackend {
     }
 
     async fn fetch_raw_message(&self, id: &MessageId) -> Result<Vec<u8>, MailError> {
+        let total_started = Instant::now();
         let r = MessageRef::decode(id)?;
         let mut session = self.lock_session_alive().await?;
 
+        let select_started = Instant::now();
         let mbox = session
             .select(&r.folder)
             .await
@@ -699,6 +782,7 @@ impl MailBackend for ImapBackend {
         let current_uv = mbox
             .uid_validity
             .ok_or_else(|| MailError::Protocol("SELECT missing UIDVALIDITY".into()))?;
+        let select_us = select_started.elapsed().as_micros() as u64;
         if current_uv != r.uidvalidity {
             return Err(MailError::UidValidityChanged {
                 folder: r.folder.clone(),
@@ -708,11 +792,14 @@ impl MailBackend for ImapBackend {
         }
 
         let query = "(UID RFC822)";
+        let issue_started = Instant::now();
         let mut fetches = session
             .uid_fetch(&r.uid.to_string(), query)
             .await
             .map_err(|e| MailError::Protocol(format!("UID FETCH {} {query}: {e}", r.uid)))?;
+        let issue_us = issue_started.elapsed().as_micros() as u64;
 
+        let drain_started = Instant::now();
         let fetch = fetches
             .next()
             .await
@@ -721,12 +808,29 @@ impl MailBackend for ImapBackend {
                 r.uid, r.folder
             )))?
             .map_err(|e| MailError::Protocol(format!("FETCH entry: {e}")))?;
+        let drain_us = drain_started.elapsed().as_micros() as u64;
         drop(fetches);
 
-        Ok(fetch
+        let parse_started = Instant::now();
+        let body = fetch
             .body()
             .ok_or_else(|| MailError::Protocol("FETCH returned no RFC822 body".into()))?
-            .to_vec())
+            .to_vec();
+        let parse_us = parse_started.elapsed().as_micros() as u64;
+        let bytes = body.len() as u64;
+        debug!(
+            phase = "imap.fetch_raw_message",
+            folder = %r.folder,
+            uid = r.uid,
+            bytes,
+            select_us,
+            issue_us,
+            drain_us,
+            parse_us,
+            elapsed_us = total_started.elapsed().as_micros() as u64,
+            "fetch_raw_message"
+        );
+        Ok(body)
     }
 
     async fn fetch_message(&self, id: &MessageId) -> Result<MessageBody, MailError> {
@@ -1573,15 +1677,25 @@ async fn fetch_flag_changes(
 ) -> Result<Vec<(MessageId, MessageFlags)>, MailError> {
     let uid_set = format!("1:{upper}");
     let query = format!("(UID FLAGS) (CHANGEDSINCE {modseq})");
+    let issue_started = Instant::now();
     let mut fetches = session
         .uid_fetch(&uid_set, &query)
         .await
         .map_err(|e| MailError::Protocol(format!("UID FETCH {uid_set} {query}: {e}")))?;
+    let issue_us = issue_started.elapsed().as_micros() as u64;
 
     let mut updates = Vec::new();
-    while let Some(item) = fetches.next().await {
+    let mut drain_us: u64 = 0;
+    let mut parse_us: u64 = 0;
+    loop {
+        let drain_start = Instant::now();
+        let next = fetches.next().await;
+        drain_us = drain_us.saturating_add(drain_start.elapsed().as_micros() as u64);
+        let Some(item) = next else { break };
         let fetch = item.map_err(|e| MailError::Protocol(format!("FETCH entry: {e}")))?;
+        let parse_start = Instant::now();
         let Some(uid) = fetch.uid else {
+            parse_us = parse_us.saturating_add(parse_start.elapsed().as_micros() as u64);
             debug!(message = ?fetch.message, "CHANGEDSINCE FETCH missing UID — skipping");
             continue;
         };
@@ -1592,7 +1706,19 @@ async fn fetch_flag_changes(
         }
         .encode();
         updates.push((id, extract_flags(&fetch)));
+        parse_us = parse_us.saturating_add(parse_start.elapsed().as_micros() as u64);
     }
+    debug!(
+        phase = "imap.fetch_flag_changes",
+        folder = %folder.0,
+        upper,
+        modseq,
+        count = updates.len(),
+        issue_us,
+        drain_us,
+        parse_us,
+        "flag-delta pass"
+    );
     Ok(updates)
 }
 

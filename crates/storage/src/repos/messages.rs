@@ -5,8 +5,10 @@
 //! pointer.
 
 use std::collections::HashSet;
+use std::time::Instant;
 
 use chrono::{TimeZone, Utc};
+use tracing::Level;
 
 use qsl_core::{
     AccountId, FolderId, MessageFlags, MessageHeaders, MessageId, StorageError, ThreadId,
@@ -73,9 +75,22 @@ pub async fn insert(
     headers: &MessageHeaders,
     body_path: Option<&str>,
 ) -> Result<(), StorageError> {
-    conn.execute(INSERT, to_params(headers, body_path)?)
-        .await
-        .map(|_| ())
+    let started = Instant::now();
+    let bind_started = Instant::now();
+    let params = to_params(headers, body_path)?;
+    let bind_us = bind_started.elapsed().as_micros() as u64;
+    let exec_started = Instant::now();
+    let r = conn.execute(INSERT, params).await.map(|_| ());
+    let exec_us = exec_started.elapsed().as_micros() as u64;
+    tracing::debug!(
+        phase = "storage.insert",
+        message = %headers.id.0,
+        bind_us,
+        exec_us,
+        elapsed_us = started.elapsed().as_micros() as u64,
+        "single-row write"
+    );
+    r
 }
 
 pub async fn update(
@@ -83,7 +98,21 @@ pub async fn update(
     headers: &MessageHeaders,
     body_path: Option<&str>,
 ) -> Result<(), StorageError> {
-    let affected = conn.execute(UPDATE, to_params(headers, body_path)?).await?;
+    let started = Instant::now();
+    let bind_started = Instant::now();
+    let params = to_params(headers, body_path)?;
+    let bind_us = bind_started.elapsed().as_micros() as u64;
+    let exec_started = Instant::now();
+    let affected = conn.execute(UPDATE, params).await?;
+    let exec_us = exec_started.elapsed().as_micros() as u64;
+    tracing::debug!(
+        phase = "storage.update",
+        message = %headers.id.0,
+        bind_us,
+        exec_us,
+        elapsed_us = started.elapsed().as_micros() as u64,
+        "single-row write"
+    );
     if affected == 0 {
         Err(StorageError::NotFound)
     } else {
@@ -92,22 +121,51 @@ pub async fn update(
 }
 
 pub async fn get(conn: &dyn DbConn, id: &MessageId) -> Result<MessageHeaders, StorageError> {
+    let started = if tracing::enabled!(Level::TRACE) {
+        Some(Instant::now())
+    } else {
+        None
+    };
     let sql = format!("SELECT {COLS} FROM messages WHERE id = ?1");
     let row = conn
         .query_one(&sql, Params(vec![Value::Text(&id.0)]))
         .await?;
-    row_to_headers(&row)
+    let r = row_to_headers(&row);
+    if let Some(s) = started {
+        tracing::trace!(
+            phase = "storage.get",
+            message = %id.0,
+            elapsed_us = s.elapsed().as_micros() as u64,
+            "single-row read"
+        );
+    }
+    r
 }
 
 pub async fn find(
     conn: &dyn DbConn,
     id: &MessageId,
 ) -> Result<Option<MessageHeaders>, StorageError> {
+    let started = if tracing::enabled!(Level::TRACE) {
+        Some(Instant::now())
+    } else {
+        None
+    };
     let sql = format!("SELECT {COLS} FROM messages WHERE id = ?1");
-    conn.query_opt(&sql, Params(vec![Value::Text(&id.0)]))
+    let r = conn
+        .query_opt(&sql, Params(vec![Value::Text(&id.0)]))
         .await?
         .map(|r| row_to_headers(&r))
-        .transpose()
+        .transpose();
+    if let Some(s) = started {
+        tracing::trace!(
+            phase = "storage.find",
+            message = %id.0,
+            elapsed_us = s.elapsed().as_micros() as u64,
+            "single-row read"
+        );
+    }
+    r
 }
 
 /// Look up a message by its RFC 5322 `Message-ID` header within a
@@ -121,21 +179,35 @@ pub async fn find_by_rfc822_id(
     account: &AccountId,
     rfc822_message_id: &str,
 ) -> Result<Option<MessageHeaders>, StorageError> {
+    let started = if tracing::enabled!(Level::TRACE) {
+        Some(Instant::now())
+    } else {
+        None
+    };
     let sql = format!(
         "SELECT {COLS} FROM messages \
          WHERE account_id = ?1 AND rfc822_message_id = ?2 \
          ORDER BY date DESC LIMIT 1"
     );
-    conn.query_opt(
-        &sql,
-        Params(vec![
-            Value::Text(&account.0),
-            Value::OwnedText(rfc822_message_id.to_string()),
-        ]),
-    )
-    .await?
-    .map(|r| row_to_headers(&r))
-    .transpose()
+    let r = conn
+        .query_opt(
+            &sql,
+            Params(vec![
+                Value::Text(&account.0),
+                Value::OwnedText(rfc822_message_id.to_string()),
+            ]),
+        )
+        .await?
+        .map(|r| row_to_headers(&r))
+        .transpose();
+    if let Some(s) = started {
+        tracing::trace!(
+            phase = "storage.find_by_rfc822_id",
+            elapsed_us = s.elapsed().as_micros() as u64,
+            "single-row read"
+        );
+    }
+    r
 }
 
 pub async fn list_by_folder(
@@ -144,6 +216,11 @@ pub async fn list_by_folder(
     limit: u32,
     offset: u32,
 ) -> Result<Vec<MessageHeaders>, StorageError> {
+    let started = if tracing::enabled!(Level::TRACE) {
+        Some(Instant::now())
+    } else {
+        None
+    };
     let sql = format!(
         "SELECT {COLS} FROM messages \
          WHERE folder_id = ?1 \
@@ -159,7 +236,17 @@ pub async fn list_by_folder(
             ]),
         )
         .await?;
-    rows.iter().map(row_to_headers).collect()
+    let r: Result<Vec<_>, _> = rows.iter().map(row_to_headers).collect();
+    if let Some(s) = started {
+        tracing::trace!(
+            phase = "storage.list_by_folder",
+            folder = %folder.0,
+            count = rows.len(),
+            elapsed_us = s.elapsed().as_micros() as u64,
+            "bulk read"
+        );
+    }
+    r
 }
 
 /// Cross-folder version of [`list_by_folder`]: all messages in any
@@ -310,15 +397,31 @@ pub async fn list_ids_by_folder(
     conn: &dyn DbConn,
     folder: &FolderId,
 ) -> Result<Vec<MessageId>, StorageError> {
+    let started = if tracing::enabled!(Level::TRACE) {
+        Some(Instant::now())
+    } else {
+        None
+    };
     let rows = conn
         .query(
             "SELECT id FROM messages WHERE folder_id = ?1",
             Params(vec![Value::Text(&folder.0)]),
         )
         .await?;
-    rows.iter()
+    let r: Result<Vec<_>, _> = rows
+        .iter()
         .map(|r| Ok(MessageId(r.get_str("id")?.to_string())))
-        .collect()
+        .collect();
+    if let Some(s) = started {
+        tracing::trace!(
+            phase = "storage.list_ids_by_folder",
+            folder = %folder.0,
+            count = rows.len(),
+            elapsed_us = s.elapsed().as_micros() as u64,
+            "bulk read"
+        );
+    }
+    r
 }
 
 pub async fn update_flags(
@@ -326,6 +429,7 @@ pub async fn update_flags(
     id: &MessageId,
     flags: &MessageFlags,
 ) -> Result<(), StorageError> {
+    let started = Instant::now();
     let affected = conn
         .execute(
             "UPDATE messages SET flags_json = ?2 WHERE id = ?1",
@@ -335,6 +439,12 @@ pub async fn update_flags(
             ]),
         )
         .await?;
+    tracing::debug!(
+        phase = "storage.update_flags",
+        message = %id.0,
+        elapsed_us = started.elapsed().as_micros() as u64,
+        "single-row write"
+    );
     if affected == 0 {
         Err(StorageError::NotFound)
     } else {
@@ -343,13 +453,27 @@ pub async fn update_flags(
 }
 
 pub async fn body_path(conn: &dyn DbConn, id: &MessageId) -> Result<Option<String>, StorageError> {
+    let started = if tracing::enabled!(Level::TRACE) {
+        Some(Instant::now())
+    } else {
+        None
+    };
     let row = conn
         .query_one(
             "SELECT body_path FROM messages WHERE id = ?1",
             Params(vec![Value::Text(&id.0)]),
         )
         .await?;
-    Ok(row.get_optional_str("body_path")?.map(str::to_string))
+    let r = row.get_optional_str("body_path")?.map(str::to_string);
+    if let Some(s) = started {
+        tracing::trace!(
+            phase = "storage.body_path",
+            message = %id.0,
+            elapsed_us = s.elapsed().as_micros() as u64,
+            "single-row read"
+        );
+    }
+    Ok(r)
 }
 
 /// Move a message between folders by patching its `folder_id` in
@@ -360,12 +484,19 @@ pub async fn set_folder(
     id: &MessageId,
     folder: &FolderId,
 ) -> Result<(), StorageError> {
+    let started = Instant::now();
     let affected = conn
         .execute(
             "UPDATE messages SET folder_id = ?2 WHERE id = ?1",
             Params(vec![Value::Text(&id.0), Value::Text(&folder.0)]),
         )
         .await?;
+    tracing::debug!(
+        phase = "storage.set_folder",
+        message = %id.0,
+        elapsed_us = started.elapsed().as_micros() as u64,
+        "single-row write"
+    );
     if affected == 0 {
         Err(StorageError::NotFound)
     } else {
@@ -378,6 +509,7 @@ pub async fn set_body_path(
     id: &MessageId,
     path: Option<&str>,
 ) -> Result<(), StorageError> {
+    let started = Instant::now();
     let affected = conn
         .execute(
             "UPDATE messages SET body_path = ?2 WHERE id = ?1",
@@ -387,6 +519,12 @@ pub async fn set_body_path(
             ]),
         )
         .await?;
+    tracing::debug!(
+        phase = "storage.set_body_path",
+        message = %id.0,
+        elapsed_us = started.elapsed().as_micros() as u64,
+        "single-row write"
+    );
     if affected == 0 {
         Err(StorageError::NotFound)
     } else {
@@ -395,9 +533,18 @@ pub async fn set_body_path(
 }
 
 pub async fn delete(conn: &dyn DbConn, id: &MessageId) -> Result<(), StorageError> {
-    conn.execute(DELETE_BY_ID, Params(vec![Value::Text(&id.0)]))
+    let started = Instant::now();
+    let r = conn
+        .execute(DELETE_BY_ID, Params(vec![Value::Text(&id.0)]))
         .await
-        .map(|_| ())
+        .map(|_| ());
+    tracing::debug!(
+        phase = "storage.delete",
+        message = %id.0,
+        elapsed_us = started.elapsed().as_micros() as u64,
+        "single-row write"
+    );
+    r
 }
 
 /// Bulk-insert a slice of headers, skipping rows whose `id` already
@@ -423,6 +570,8 @@ pub async fn batch_insert_skip_existing(
         return Ok(0);
     }
 
+    let total_started = Instant::now();
+    let preflight_started = Instant::now();
     let placeholders: String = (1..=headers.len())
         .map(|i| format!("?{i}"))
         .collect::<Vec<_>>()
@@ -434,18 +583,101 @@ pub async fn batch_insert_skip_existing(
     for r in &rows {
         existing.insert(r.get_str("id")?.to_string());
     }
+    let preflight_us = preflight_started.elapsed().as_micros() as u64;
 
+    let begin_started = Instant::now();
     let mut tx = conn.begin().await?;
+    let begin_us = begin_started.elapsed().as_micros() as u64;
+
     let mut inserted: u32 = 0;
+    let mut bind_us_total: u64 = 0;
+    let mut exec_us_total: u64 = 0;
     for h in headers {
         if existing.contains(&h.id.0) {
             continue;
         }
-        tx.execute(INSERT, to_params(h, None)?).await?;
+        let bind_started = Instant::now();
+        let params = to_params(h, None)?;
+        bind_us_total = bind_us_total.saturating_add(bind_started.elapsed().as_micros() as u64);
+        let exec_started = Instant::now();
+        tx.execute(INSERT, params).await?;
+        exec_us_total = exec_us_total.saturating_add(exec_started.elapsed().as_micros() as u64);
         inserted = inserted.saturating_add(1);
     }
+    let commit_started = Instant::now();
     tx.commit().await?;
+    let commit_us = commit_started.elapsed().as_micros() as u64;
+
+    tracing::debug!(
+        phase = "storage.batch_insert_skip_existing",
+        count = headers.len(),
+        inserted,
+        existing = existing.len(),
+        preflight_us,
+        begin_us,
+        bind_us = bind_us_total,
+        exec_us = exec_us_total,
+        commit_us,
+        elapsed_us = total_started.elapsed().as_micros() as u64,
+        "batch write breakdown"
+    );
     Ok(inserted)
+}
+
+/// Bulk-update a slice of headers inside a single transaction.
+///
+/// Mirrors [`batch_insert_skip_existing`] for the update path: all
+/// rows are updated in one explicit transaction so Turso's
+/// experimental FTS index (`messages_fts_idx`) rebuilds once rather
+/// than once per row.
+///
+/// Unlike the insert path there is no dedup probe — the caller
+/// already knows these rows exist (they came from the backend's
+/// `list_messages` response).
+pub async fn batch_update(
+    conn: &dyn DbConn,
+    headers: &[MessageHeaders],
+) -> Result<u32, StorageError> {
+    if headers.is_empty() {
+        return Ok(0);
+    }
+
+    let total_started = Instant::now();
+    let begin_started = Instant::now();
+    let mut tx = conn.begin().await?;
+    let begin_us = begin_started.elapsed().as_micros() as u64;
+
+    let mut updated: u32 = 0;
+    let mut bind_us_total: u64 = 0;
+    let mut exec_us_total: u64 = 0;
+    for h in headers {
+        let bind_started = Instant::now();
+        let params = to_params(h, None)?;
+        bind_us_total = bind_us_total.saturating_add(bind_started.elapsed().as_micros() as u64);
+        let exec_started = Instant::now();
+        let affected = tx.execute(UPDATE, params).await?;
+        exec_us_total = exec_us_total.saturating_add(exec_started.elapsed().as_micros() as u64);
+        if affected == 0 {
+            continue;
+        }
+        updated = updated.saturating_add(1);
+    }
+    let commit_started = Instant::now();
+    tx.commit().await?;
+    let commit_us = commit_started.elapsed().as_micros() as u64;
+
+    tracing::debug!(
+        phase = "storage.batch_update",
+        count = headers.len(),
+        updated,
+        begin_us,
+        bind_us = bind_us_total,
+        exec_us = exec_us_total,
+        commit_us,
+        elapsed_us = total_started.elapsed().as_micros() as u64,
+        "batch write breakdown"
+    );
+    Ok(updated)
 }
 
 fn to_params<'a>(

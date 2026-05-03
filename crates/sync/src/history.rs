@@ -12,10 +12,10 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use qsl_core::{AccountId, FolderId, HistoryChunk, MailBackend, MessageHeaders};
 use qsl_storage::{
@@ -128,6 +128,20 @@ where
         finished: false,
     });
 
+    let sync_run_id = crate::next_history_sync_run_id();
+    let history_wall = Instant::now();
+    let mut total_fetch_ms: u64 = 0;
+    let mut total_persist_ms: u64 = 0;
+    let mut chunks_seen: u32 = 0;
+    debug!(
+        phase = "history.start",
+        sync_run_id,
+        account = %account.0,
+        folder = %folder.0,
+        start_anchor,
+        "history sync starting"
+    );
+
     let mut anchor = start_anchor;
     let mut fetched_total: u32 = 0;
     let mut consecutive_failures: u32 = 0;
@@ -149,6 +163,22 @@ where
                 total_estimate: total_estimate.map(|v| v as i64),
                 finished: true,
             });
+            debug!(
+                target: "SYNC_SUMMARY",
+                sync_run_id,
+                kind = "history",
+                outcome = "canceled",
+                account = %account.0,
+                folder = %folder.0,
+                fetched_total,
+                chunks = chunks_seen,
+                wall_ms = history_wall.elapsed().as_millis() as u64,
+                fetch_ms = total_fetch_ms,
+                persist_ms = total_persist_ms,
+                "SYNC_SUMMARY kind=history outcome=canceled sync_run_id={} fetched_total={} chunks={} wall_ms={} fetch_ms={} persist_ms={}",
+                sync_run_id, fetched_total, chunks_seen,
+                history_wall.elapsed().as_millis() as u64, total_fetch_ms, total_persist_ms,
+            );
             return Ok(());
         }
 
@@ -168,11 +198,28 @@ where
                 total_estimate: total_estimate.map(|v| v as i64),
                 finished: true,
             });
+            debug!(
+                target: "SYNC_SUMMARY",
+                sync_run_id,
+                kind = "history",
+                outcome = "exhausted",
+                account = %account.0,
+                folder = %folder.0,
+                fetched_total,
+                chunks = chunks_seen,
+                wall_ms = history_wall.elapsed().as_millis() as u64,
+                fetch_ms = total_fetch_ms,
+                persist_ms = total_persist_ms,
+                "SYNC_SUMMARY kind=history outcome=exhausted sync_run_id={} fetched_total={} chunks={} wall_ms={} fetch_ms={} persist_ms={}",
+                sync_run_id, fetched_total, chunks_seen,
+                history_wall.elapsed().as_millis() as u64, total_fetch_ms, total_persist_ms,
+            );
             return Ok(());
         }
 
         // Network fetch — explicitly NOT holding the DB lock. This
         // is where the wall-clock seconds go on a big mailbox.
+        let fetch_started = Instant::now();
         let chunk = match backend
             .pull_history_chunk(folder, anchor, HISTORY_CHUNK_SIZE)
             .await
@@ -215,19 +262,54 @@ where
             }
         };
 
+        let fetch_elapsed = fetch_started.elapsed();
+        total_fetch_ms = total_fetch_ms.saturating_add(fetch_elapsed.as_millis() as u64);
+        chunks_seen = chunks_seen.saturating_add(1);
+
         let HistoryChunk {
             headers,
             next_anchor,
         } = chunk;
 
+        debug!(
+            phase = "history.fetch_chunk",
+            sync_run_id,
+            account = %account.0,
+            folder = %folder.0,
+            anchor,
+            count = headers.len(),
+            elapsed_ms = fetch_elapsed.as_millis() as u64,
+            "phase timing"
+        );
+
         // Persist + update progress in a single locked window.
+        let persist_started = Instant::now();
+        let lock_started = Instant::now();
         let inserted = {
             let conn = db.lock().await;
+            let lock_wait_ms = lock_started.elapsed().as_millis() as u64;
+            let inner_started = Instant::now();
             let inserted = persist_chunk(&*conn, &headers).await?;
+            let persist_inner_ms = inner_started.elapsed().as_millis() as u64;
+            let progress_started = Instant::now();
             history_repo::update_progress(&*conn, account, folder, next_anchor as i64, inserted)
                 .await?;
+            let progress_ms = progress_started.elapsed().as_millis() as u64;
+            debug!(
+                phase = "history.persist_breakdown",
+                sync_run_id,
+                folder = %folder.0,
+                count = headers.len(),
+                inserted,
+                db_lock_wait_ms = lock_wait_ms,
+                persist_chunk_ms = persist_inner_ms,
+                update_progress_ms = progress_ms,
+                "phase timing"
+            );
             inserted
         };
+        let persist_elapsed = persist_started.elapsed();
+        total_persist_ms = total_persist_ms.saturating_add(persist_elapsed.as_millis() as u64);
         fetched_total = fetched_total.saturating_add(inserted);
 
         let advanced = next_anchor < anchor;
@@ -265,6 +347,27 @@ where
                 total_estimate: total_estimate.map(|v| v as i64),
                 finished: true,
             });
+            debug!(
+                target: "SYNC_SUMMARY",
+                sync_run_id,
+                kind = "history",
+                account = %account.0,
+                folder = %folder.0,
+                fetched_total,
+                chunks = chunks_seen,
+                wall_ms = history_wall.elapsed().as_millis() as u64,
+                fetch_ms = total_fetch_ms,
+                persist_ms = total_persist_ms,
+                "SYNC_SUMMARY kind=history sync_run_id={} account={} folder={} fetched_total={} chunks={} wall_ms={} fetch_ms={} persist_ms={}",
+                sync_run_id,
+                account.0,
+                folder.0,
+                fetched_total,
+                chunks_seen,
+                history_wall.elapsed().as_millis() as u64,
+                total_fetch_ms,
+                total_persist_ms,
+            );
             return Ok(());
         }
 
