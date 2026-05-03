@@ -92,6 +92,34 @@ enum Command {
     /// Sync an account. Phase 0 stub.
     Sync { email: String },
 
+    /// Pull historical mail (everything older than what live-sync has)
+    /// for one folder or every folder on an account.
+    ///
+    /// Mirrors the desktop's per-folder history-sync surface but
+    /// drives `qsl_sync::history::pull_history` directly with no UI
+    /// in the loop — the goal is to test backfill perf (chunk size,
+    /// batch_insert_skip_existing throughput) on real mailboxes
+    /// without the Settings panel.
+    ///
+    /// Requires that `mailcli sync <email>` has run at least once so
+    /// each folder has a local UID floor to anchor the backfill at.
+    /// Runs folders sequentially so the per-account IMAP session
+    /// isn't multiplexed (matches the desktop's per-account lock).
+    HistorySync {
+        /// Email of the previously-added account.
+        email: String,
+
+        /// Restrict to one folder (e.g. `INBOX`,
+        /// `[Gmail]/All Mail`). Mutually exclusive with `--all`.
+        #[arg(long, value_name = "NAME", conflicts_with = "all")]
+        folder: Option<String>,
+
+        /// Pull every folder on the account, sequentially. Skips
+        /// folders with no local messages (no anchor available).
+        #[arg(long)]
+        all: bool,
+    },
+
     /// Wipe local state. Removes the Turso database file
     /// (`qsl.db`, `-wal`, `-shm`), the cached message-body blob
     /// store, and every keychain refresh-token for accounts known
@@ -260,6 +288,9 @@ async fn run(cli: Cli) -> Result<(), MailcliError> {
         } => list_messages(&email, &folder, limit, &paths).await,
         Command::ShowMessage { id } => show_message(&id, &paths).await,
         Command::Sync { email } => sync_account(&email, &paths).await,
+        Command::HistorySync { email, folder, all } => {
+            history_sync_account(&email, folder.as_deref(), all, &paths).await
+        }
         Command::Reset { yes } => reset_local_state(yes, &paths).await,
         Command::Doctor {
             fix,
@@ -1220,6 +1251,157 @@ async fn sync_account(email: &str, paths: &DataPaths) -> Result<(), MailcliError
         total.bodies_failed,
         outcomes.len(),
         duration.as_millis()
+    );
+    Ok(())
+}
+
+/// Drive `qsl_sync::history::pull_history` from the CLI without the
+/// desktop's UI in the loop. Used to test backfill perf (chunk size,
+/// `batch_insert_skip_existing` throughput) on real Gmail/Fastmail
+/// accounts.
+///
+/// Resolves the anchor from each folder's lowest local UID — same
+/// rule the desktop's `compute_start_metrics` follows. Folders with
+/// no local rows are skipped (run `mailcli sync <email>` first to
+/// seed them). Folders run sequentially: history-sync uses the
+/// per-account IMAP session and parallelizing them just thrashes.
+async fn history_sync_account(
+    email: &str,
+    only_folder: Option<&str>,
+    all: bool,
+    paths: &DataPaths,
+) -> Result<(), MailcliError> {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use std::time::Instant;
+    use tokio::sync::Mutex;
+
+    if only_folder.is_none() && !all {
+        return Err(MailcliError::Usage(
+            "history-sync: pass --folder <name> or --all".into(),
+        ));
+    }
+
+    let conn = paths.open_db().await?;
+    let account = resolve_account(&conn, email).await?;
+    let backend = open_backend(&account).await?;
+
+    // Snapshot the locally-known folder rows; pull_history needs a
+    // local FolderId (the row already lives in the folders table from
+    // the bootstrap sync). We don't open the IMAP session ourselves
+    // for folder enumeration — the bootstrap should already have
+    // populated them via `mailcli sync`.
+    let folders = repos::folders::list_by_account(&conn, &account.id).await?;
+    let targets: Vec<_> = if let Some(name) = only_folder {
+        folders
+            .into_iter()
+            .filter(|f| f.name == name || f.id.0 == name)
+            .collect()
+    } else {
+        folders
+    };
+
+    if targets.is_empty() {
+        return Err(MailcliError::Usage(format!(
+            "history-sync: no matching folder rows. \
+             Run `mailcli sync {email}` first so the folder list is populated."
+        )));
+    }
+
+    // Wrap the conn for `pull_history` (it requires shared access
+    // since the driver locks per-chunk).
+    let conn = Arc::new(Mutex::new(conn));
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    let total_start = Instant::now();
+    let mut completed = 0u32;
+    let mut skipped = 0u32;
+    let mut errored = 0u32;
+
+    for folder in targets {
+        // Anchor = lowest local UID. Skip folders the bootstrap
+        // hasn't touched yet — the desktop refuses these too.
+        let anchor = {
+            let db = conn.lock().await;
+            let ids = repos::messages::list_ids_by_folder(&*db, &folder.id).await?;
+            ids.iter()
+                .filter_map(|m| qsl_imap_client::MessageRef::decode(m).ok())
+                .map(|r| u64::from(r.uid))
+                .min()
+        };
+        let Some(anchor) = anchor else {
+            println!(
+                "  {}: skipped (no local messages — run `sync` first)",
+                folder.name
+            );
+            skipped += 1;
+            continue;
+        };
+        if anchor <= 1 {
+            println!("  {}: nothing to backfill (anchor at UID 1)", folder.name);
+            completed += 1;
+            continue;
+        }
+        let estimate = anchor.saturating_sub(1);
+
+        println!(
+            "  {}: starting (anchor uid={}, estimate ~{} messages)…",
+            folder.name, anchor, estimate
+        );
+        let folder_start = Instant::now();
+        let folder_label = folder.name.clone();
+        let progress_cb = move |p: qsl_sync::history::HistoryProgress| {
+            // Single-line progress with carriage-return so the
+            // terminal updates in place. Emit on every chunk;
+            // `pull_history` already coalesces to chunk granularity.
+            let pct = match p.total_estimate {
+                Some(total) if total > 0 => format!(
+                    "{:.0}%",
+                    (p.fetched_total as f64 / total as f64 * 100.0).clamp(0.0, 100.0)
+                ),
+                _ => "?".to_string(),
+            };
+            print!(
+                "\r    {} fetched (anchor {}, {})         ",
+                p.fetched_total, p.anchor_uid, pct
+            );
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+        };
+
+        match qsl_sync::history::pull_history(
+            conn.clone(),
+            backend.as_ref(),
+            &account.id,
+            &folder.id,
+            anchor,
+            Some(estimate),
+            cancel.clone(),
+            progress_cb,
+        )
+        .await
+        {
+            Ok(()) => {
+                println!(
+                    "\n  {}: complete in {} ms",
+                    folder_label,
+                    folder_start.elapsed().as_millis()
+                );
+                completed += 1;
+            }
+            Err(e) => {
+                println!("\n  {}: FAILED — {}", folder_label, e);
+                errored += 1;
+            }
+        }
+    }
+
+    println!(
+        "Total: {} folder(s) complete, {} skipped (no anchor), {} errored — {} ms",
+        completed,
+        skipped,
+        errored,
+        total_start.elapsed().as_millis()
     );
     Ok(())
 }
