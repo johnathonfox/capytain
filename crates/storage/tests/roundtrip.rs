@@ -1283,6 +1283,92 @@ fn account_delete_cascades_to_children() {
     });
 }
 
+/// `batch_insert_skip_existing` honors its name: persists novel rows,
+/// silently skips duplicates by `id`, and returns the count of new
+/// rows. Locks down the history-pull hot-path entry point that
+/// replaces the per-message find+insert loop in `qsl-sync`.
+#[test]
+fn batch_insert_skip_existing_dedups_by_id() {
+    let rt = rt();
+    rt.block_on(async move {
+        let conn = fresh_conn().await;
+        let acct = Account {
+            id: AccountId("batch-acct".into()),
+            kind: BackendKind::ImapSmtp,
+            display_name: "x".into(),
+            email_address: "x@example.com".into(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            signature: None,
+            notify_enabled: true,
+        };
+        repos::accounts::insert(&conn, &acct).await.expect("acct");
+        let folder = Folder {
+            id: FolderId("batch-folder".into()),
+            account_id: acct.id.clone(),
+            name: "INBOX".into(),
+            path: "INBOX".into(),
+            role: Some(FolderRole::Inbox),
+            unread_count: 0,
+            total_count: 0,
+            parent: None,
+        };
+        repos::folders::insert(&conn, &folder)
+            .await
+            .expect("folder");
+
+        let mk = |i: u32| MessageHeaders {
+            id: MessageId(format!("batch-m-{i}")),
+            account_id: acct.id.clone(),
+            folder_id: folder.id.clone(),
+            thread_id: None,
+            rfc822_message_id: None,
+            subject: format!("subj-{i}"),
+            from: vec![],
+            reply_to: vec![],
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            date: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            flags: MessageFlags::default(),
+            labels: vec![],
+            snippet: "".into(),
+            size: 0,
+            has_attachments: false,
+            in_reply_to: None,
+            references: vec![],
+        };
+
+        // Seed with #2 so the second batch hits the dedup path.
+        repos::messages::insert(&conn, &mk(2), None)
+            .await
+            .expect("seed");
+
+        // Empty input is a no-op.
+        let zero = repos::messages::batch_insert_skip_existing(&conn, &[])
+            .await
+            .expect("empty batch");
+        assert_eq!(zero, 0);
+
+        // Mixed batch: 0, 1, 2 (existing), 3, 4 → expect 4 inserts.
+        let batch: Vec<MessageHeaders> = (0..5).map(mk).collect();
+        let n = repos::messages::batch_insert_skip_existing(&conn, &batch)
+            .await
+            .expect("batch insert");
+        assert_eq!(n, 4, "should skip the seeded id and insert the other four");
+
+        let total = repos::messages::count_by_folder(&conn, &folder.id)
+            .await
+            .expect("count");
+        assert_eq!(total, 5, "all five ids landed exactly once");
+
+        // Replaying the same batch is a no-op now.
+        let n2 = repos::messages::batch_insert_skip_existing(&conn, &batch)
+            .await
+            .expect("replay");
+        assert_eq!(n2, 0);
+    });
+}
+
 /// Empty / whitespace addresses are silently ignored — protects the
 /// caller (sync engine, messages_send) from having to filter them
 /// out before passing to the upsert.

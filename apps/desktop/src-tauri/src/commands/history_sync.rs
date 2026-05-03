@@ -13,7 +13,8 @@
 //!   pane.
 //!
 //! Resumption across app restarts is handled by `sync_engine` which
-//! re-spawns any row left in `running` at boot.
+//! re-spawns any row left in a non-terminal state (`running`,
+//! `pending`, or `error`) at boot. See [`resume_running_jobs`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -578,10 +579,17 @@ async fn compute_start_metrics(
     Ok((anchor, Some(estimate)))
 }
 
-/// Re-spawn every `running` history-sync row at app boot. Called
-/// from `sync_engine` after the bootstrap pass so any pull that was
-/// in flight when the previous app process exited resumes from its
-/// last persisted anchor.
+/// Re-spawn every history-sync row left in a non-terminal state at
+/// app boot. Called from `sync_engine` after the bootstrap pass so any
+/// pull that was in flight when the previous app process exited resumes
+/// from its last persisted anchor.
+///
+/// Picks up `running` (clean shutdown mid-pull), `pending` (app exited
+/// after the row was created but before the driver started fetching),
+/// and `error` (prior fatal failure that the user may want auto-retried;
+/// they can cancel from the UI if they don't). `canceled` rows are
+/// deleted at cancel time so they never reach this path; `completed`
+/// rows are no-ops.
 ///
 /// Errors fetching the row list or re-opening backends are logged
 /// but never propagated — partial resume is better than no resume.
@@ -589,13 +597,19 @@ pub async fn resume_running_jobs(app: &AppHandle) {
     let state = app.state::<AppState>();
     let rows = {
         let db = state.sync_db.lock().await;
-        match history_repo::list_by_status(&*db, RepoStatus::Running).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("history sync resume: list_by_status: {e}");
-                return;
+        let mut acc: Vec<HistorySyncRow> = Vec::new();
+        for status in [RepoStatus::Running, RepoStatus::Pending, RepoStatus::Error] {
+            match history_repo::list_by_status(&*db, status).await {
+                Ok(rs) => acc.extend(rs),
+                Err(e) => {
+                    tracing::warn!(
+                        status = status.as_str(),
+                        "history sync resume: list_by_status: {e}"
+                    );
+                }
             }
         }
+        acc
     };
     if rows.is_empty() {
         return;
