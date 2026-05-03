@@ -205,6 +205,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::ui_ready,
+            commands::ui_log,
             commands::accounts::accounts_list,
             commands::folders::folders_list,
             commands::messages::messages_list,

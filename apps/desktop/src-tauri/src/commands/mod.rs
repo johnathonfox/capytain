@@ -41,3 +41,53 @@ pub async fn ui_ready(state: State<'_, AppState>) -> IpcResult<()> {
     tracing::info!("ui_ready: signalled sync engine");
     Ok(())
 }
+
+/// `ui_log` — bridge for `qsl-ui`'s wasm `tracing::*!` events to the
+/// host's stderr stream. The UI side runs `host_log::install()` to
+/// register a custom subscriber Layer that posts each event here so
+/// operators can read host + UI narration in one place rather than
+/// the webview's DevTools console. Capped at INFO on the wasm side
+/// before we ever cross the IPC boundary.
+#[derive(serde::Deserialize)]
+pub struct UiLogInput {
+    pub level: String,
+    pub target: String,
+    pub message: String,
+}
+
+#[tauri::command]
+pub async fn ui_log(input: UiLogInput) -> IpcResult<()> {
+    // Single static target on the host side so operators can filter
+    // with `RUST_LOG=qsl_ui::bridge=info`. The original UI module
+    // path is preserved as a `ui_target` field.
+    match input.level.as_str() {
+        "error" => tracing::error!(
+            target: "qsl_ui::bridge",
+            ui_target = %input.target,
+            "{}",
+            input.message
+        ),
+        "warn" => tracing::warn!(
+            target: "qsl_ui::bridge",
+            ui_target = %input.target,
+            "{}",
+            input.message
+        ),
+        "info" => tracing::info!(
+            target: "qsl_ui::bridge",
+            ui_target = %input.target,
+            "{}",
+            input.message
+        ),
+        // The bridge layer caps wasm-side events at INFO so debug /
+        // trace shouldn't reach here. Treat them as info if they do.
+        _ => tracing::info!(
+            target: "qsl_ui::bridge",
+            ui_target = %input.target,
+            level = %input.level,
+            "{}",
+            input.message
+        ),
+    }
+    Ok(())
+}
