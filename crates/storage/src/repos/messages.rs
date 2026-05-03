@@ -4,6 +4,8 @@
 //! this repo persists only the `MessageHeaders` view plus a `body_path`
 //! pointer.
 
+use std::collections::HashSet;
+
 use chrono::{TimeZone, Utc};
 
 use qsl_core::{
@@ -396,6 +398,54 @@ pub async fn delete(conn: &dyn DbConn, id: &MessageId) -> Result<(), StorageErro
     conn.execute(DELETE_BY_ID, Params(vec![Value::Text(&id.0)]))
         .await
         .map(|_| ())
+}
+
+/// Bulk-insert a slice of headers, skipping rows whose `id` already
+/// exists. Returns the count of newly-inserted rows.
+///
+/// All inserts run inside a single transaction. This matters on the
+/// history-pull hot path: Turso 0.5.3's experimental FTS rebuilds the
+/// `messages_fts_idx` index at every implicit commit, which on a 500-row
+/// chunk drags throughput from milliseconds to multiple minutes per
+/// chunk (see `docs/dependencies/turso.md`). One commit per chunk
+/// instead of one per row collapses that overhead.
+///
+/// Existence is probed with one batched `WHERE id IN (?, ?, …)` so a
+/// 500-row chunk costs one SELECT + one tx, not 500 of each.
+///
+/// `body_path` is always `None` here — history-pull persists headers
+/// only and lets the on-demand fetch path populate bodies later.
+pub async fn batch_insert_skip_existing(
+    conn: &dyn DbConn,
+    headers: &[MessageHeaders],
+) -> Result<u32, StorageError> {
+    if headers.is_empty() {
+        return Ok(0);
+    }
+
+    let placeholders: String = (1..=headers.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let select_sql = format!("SELECT id FROM messages WHERE id IN ({placeholders})");
+    let select_params: Vec<Value> = headers.iter().map(|h| Value::Text(&h.id.0)).collect();
+    let rows = conn.query(&select_sql, Params(select_params)).await?;
+    let mut existing: HashSet<String> = HashSet::with_capacity(rows.len());
+    for r in &rows {
+        existing.insert(r.get_str("id")?.to_string());
+    }
+
+    let mut tx = conn.begin().await?;
+    let mut inserted: u32 = 0;
+    for h in headers {
+        if existing.contains(&h.id.0) {
+            continue;
+        }
+        tx.execute(INSERT, to_params(h, None)?).await?;
+        inserted = inserted.saturating_add(1);
+    }
+    tx.commit().await?;
+    Ok(inserted)
 }
 
 fn to_params<'a>(

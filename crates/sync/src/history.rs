@@ -275,6 +275,14 @@ where
 /// Persist one chunk of headers — insert if new, skip silently if
 /// already known. Returns the count of newly-inserted rows.
 ///
+/// Wraps every chunk's inserts in a single transaction via
+/// [`messages::batch_insert_skip_existing`]. Without that, Turso's
+/// experimental FTS index (`messages_fts_idx`) rebuilds at every
+/// implicit commit, which made a 500-row chunk take 3-6 minutes
+/// against a real Gmail account during v0.1 history pulls. Batched
+/// commits drop that to seconds, matching what the IMAP-side fetch
+/// budget actually deserves.
+///
 /// Threading and contacts upserts are deliberately skipped on the
 /// history-pull hot path: each `attach_to_thread` runs ~3 SQL
 /// queries per message, which makes a 100k-message pull spend most
@@ -286,15 +294,5 @@ where
 /// folder triggers `sync_folder`'s heal-on-update path, or a
 /// future "rethread historical mail" action runs.
 async fn persist_chunk(conn: &dyn DbConn, headers: &[MessageHeaders]) -> Result<u32, SyncError> {
-    let mut inserted: u32 = 0;
-    for h in headers {
-        match messages::find(conn, &h.id).await? {
-            Some(_) => continue,
-            None => {
-                messages::insert(conn, h, None).await?;
-                inserted = inserted.saturating_add(1);
-            }
-        }
-    }
-    Ok(inserted)
+    Ok(messages::batch_insert_skip_existing(conn, headers).await?)
 }
