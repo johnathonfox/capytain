@@ -211,6 +211,7 @@ impl ImapBackend {
             (false, true) => "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE X-GM-LABELS)",
             (false, false) => "(UID FLAGS RFC822.SIZE INTERNALDATE ENVELOPE)",
         };
+        let fetch_start = std::time::Instant::now();
         let mut fetches = session
             .uid_fetch(&uid_set, query)
             .await
@@ -229,13 +230,29 @@ impl ImapBackend {
                 }
             }
         }
-        debug!(
-            folder = %folder.0,
-            range = %uid_set,
-            count = messages.len(),
-            with_thread_headers,
-            "IMAP fetch_uid_range_headers"
-        );
+        let elapsed_ms = fetch_start.elapsed().as_millis() as u64;
+        if elapsed_ms >= qsl_telemetry::slow::limits::IMAP_CMD_MS {
+            warn!(
+                target: "qsl::slow::imap",
+                op = "uid_fetch_headers",
+                folder = %folder.0,
+                range = %uid_set,
+                count = messages.len(),
+                with_thread_headers,
+                elapsed_ms,
+                limit_ms = qsl_telemetry::slow::limits::IMAP_CMD_MS,
+                "slow UID FETCH headers"
+            );
+        } else {
+            debug!(
+                folder = %folder.0,
+                range = %uid_set,
+                count = messages.len(),
+                with_thread_headers,
+                elapsed_ms,
+                "IMAP fetch_uid_range_headers"
+            );
+        }
         Ok(messages)
     }
 
@@ -249,8 +266,13 @@ impl ImapBackend {
         access_token: &str,
         account: AccountId,
     ) -> Result<Self, MailError> {
-        let DialedSession { session, gmail_ext } =
-            dial_session(host, port, email, access_token).await?;
+        let DialedSession { session, gmail_ext } = qsl_telemetry::time_op!(
+            target: "qsl::slow::imap",
+            limit_ms: qsl_telemetry::slow::limits::OAUTH_TOKEN_MS,
+            op: "connect_tls",
+            fields: { host = %host, port = port, email = %email },
+            dial_session(host, port, email, access_token)
+        )?;
         info!(host, email, gmail_ext, "IMAP connected and authenticated");
         Ok(Self::from_session(
             session,
@@ -328,7 +350,13 @@ pub async fn dial_session(
         })
         .collect();
     tracing::debug!(capabilities = ?cap_strings, "IMAP server capabilities");
-    require_caps(&cap_strings)?;
+    if let Err(e) = require_caps(&cap_strings) {
+        tracing::warn!(
+            advertised = ?cap_strings,
+            "IMAP capability check failed: {e}"
+        );
+        return Err(e);
+    }
 
     let gmail_ext = cap_strings
         .iter()

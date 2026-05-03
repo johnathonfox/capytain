@@ -120,11 +120,16 @@ async fn resolve_identity_id(client: &Client, email: &str) -> Result<String, Mai
 /// connect logic — bearer credentials, session resolution — lives
 /// in one place. Mirrors `qsl_imap_client::dial_session`.
 pub async fn dial_client(session_url: &str, access_token: &str) -> Result<Client, MailError> {
-    Client::new()
-        .credentials(jmap_client::client::Credentials::bearer(access_token))
-        .connect(session_url)
-        .await
-        .map_err(|e| MailError::Network(format!("JMAP connect {session_url}: {e}")))
+    qsl_telemetry::time_op!(
+        target: "qsl::slow::jmap",
+        limit_ms: qsl_telemetry::slow::limits::HTTP_JMAP_MS,
+        op: "jmap_session_connect",
+        fields: { session_url = %session_url },
+        Client::new()
+            .credentials(jmap_client::client::Credentials::bearer(access_token))
+            .connect(session_url)
+    )
+    .map_err(|e| MailError::Network(format!("JMAP connect {session_url}: {e}")))
 }
 
 // ---------- MailBackend impl ----------

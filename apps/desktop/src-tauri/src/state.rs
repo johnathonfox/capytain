@@ -130,12 +130,20 @@ pub struct AppState {
     /// single permit, so the call ordering between the UI signal
     /// and the engine's wait is irrelevant.
     pub ui_ready: Arc<Notify>,
+
+    /// Captured at the very top of `main()` and read once on the
+    /// first `ui_ready` IPC so we can log a single "first-paint"
+    /// number (process start → wasm-mounted). `OnceCell` ensures the
+    /// log fires exactly once even if `ui_ready` is called from
+    /// multiple windows during a session.
+    pub boot_at: Instant,
+    pub first_paint_logged: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {
     /// Build an `AppState` given an already-opened database and the
     /// resolved data directory.
-    pub fn new(db: TursoConn, sync_db: TursoConn, data_dir: PathBuf) -> Self {
+    pub fn new(db: TursoConn, sync_db: TursoConn, data_dir: PathBuf, boot_at: Instant) -> Self {
         Self {
             db: Arc::new(Mutex::new(db)),
             sync_db: Arc::new(Mutex::new(sync_db)),
@@ -145,6 +153,8 @@ impl AppState {
             history_account_locks: Mutex::new(HashMap::new()),
             last_rendered: Mutex::new(None),
             ui_ready: Arc::new(Notify::new()),
+            boot_at,
+            first_paint_logged: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }

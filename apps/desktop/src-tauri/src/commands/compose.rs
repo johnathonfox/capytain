@@ -41,6 +41,7 @@ pub struct ComposePickAttachmentsInput {
 pub async fn compose_pick_attachments(
     input: ComposePickAttachmentsInput,
 ) -> IpcResult<Vec<DraftAttachment>> {
+    tracing::debug!("ipc: compose_pick_attachments");
     let title = input.title.unwrap_or_else(|| "Attach files".to_string());
 
     let paths: Vec<PathBuf> = rfd::AsyncFileDialog::new()

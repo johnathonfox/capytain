@@ -254,6 +254,7 @@ fn set_tooltip(_app: &AppHandle, total: u32) {
             return;
         }
     };
+    debug!(unread = total, tooltip = %tooltip, "tray: refreshing tooltip");
     if let Err(e) = guard.set_tooltip(Some(&tooltip)) {
         debug!("tray: set_tooltip failed: {e}");
     }

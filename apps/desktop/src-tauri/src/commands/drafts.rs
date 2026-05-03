@@ -65,6 +65,10 @@ pub struct DraftsSaveInput {
 #[tauri::command]
 pub async fn drafts_save(state: State<'_, AppState>, input: DraftsSaveInput) -> IpcResult<DraftId> {
     let DraftsSaveInput { draft } = input;
+    tracing::debug!(
+        existing_id = draft.id.as_ref().map(|id| id.0.as_str()).unwrap_or("(new)"),
+        "ipc: drafts_save"
+    );
     let now = Utc::now();
 
     let db = state.db.lock().await;
@@ -196,6 +200,7 @@ pub struct DraftsDeleteInput {
 /// non-existent id returns `Ok(())`.
 #[tauri::command]
 pub async fn drafts_delete(state: State<'_, AppState>, input: DraftsDeleteInput) -> IpcResult<()> {
+    tracing::debug!(id = %input.id.0, "ipc: drafts_delete");
     let db = state.db.lock().await;
     drafts_repo::delete(&*db, &input.id).await?;
     Ok(())

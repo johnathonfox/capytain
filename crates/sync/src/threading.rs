@@ -28,10 +28,12 @@
 //! threads with the same subject ("Re: lunch?" appears every
 //! Wednesday).
 
+use std::collections::HashMap;
+
 use chrono::{Duration, Utc};
 use tracing::{debug, instrument};
 
-use qsl_core::{MessageHeaders, StorageError};
+use qsl_core::{MessageHeaders, StorageError, ThreadId};
 use qsl_storage::{
     repos::{messages as messages_repo, threads as threads_repo},
     DbConn,
@@ -76,6 +78,102 @@ pub async fn attach_to_thread(
     debug!(thread = %new_id.0, "minted fresh thread");
     threads_repo::attach_message(conn, &new_id, &headers.id, headers.date).await?;
     Ok(())
+}
+
+/// Resolution decision for one header on the batched-tx path.
+///
+/// `sync_folder` runs the resolver in a read-only pre-pass on the
+/// shared `&dyn DbConn`, then bakes the chosen `thread_id` into a
+/// single transaction's INSERTs / UPDATEs. This enum carries enough
+/// info for the tx pass to know whether a fresh `threads` row also
+/// needs minting. See [`resolve_with_chunk_local`].
+#[derive(Debug, Clone)]
+pub struct ThreadAttachment {
+    pub thread_id: ThreadId,
+    /// `Some(thread_record_to_insert)` if the resolver minted a fresh
+    /// thread for this header. The caller's tx pass must INSERT this
+    /// row before any message INSERT that references it.
+    pub mint: Option<threads_repo::Thread>,
+}
+
+/// Read-only resolve with chunk-local visibility.
+///
+/// Mirrors [`resolve_existing_thread`] but consults `chunk_local`
+/// first so a header in the same fetch chunk that references a
+/// just-resolved peer (in-chunk back-reference) finds the correct
+/// thread without needing the prior message to be committed first.
+/// Without this, a tx-batched chunk would lose the within-chunk
+/// chaining that the original per-row commit pattern got "for free"
+/// by virtue of each insert flushing.
+///
+/// `mint_for` is invoked when the resolution chain misses; it
+/// produces the fresh `Thread` record to insert in the tx pass.
+/// Caller threads in the headers it has so the resolver can read
+/// them; caller is responsible for keeping `chunk_local` updated as
+/// it walks the chunk.
+pub async fn resolve_with_chunk_local(
+    conn: &dyn DbConn,
+    headers: &MessageHeaders,
+    chunk_local: &HashMap<String, ThreadId>,
+) -> Result<ThreadAttachment, StorageError> {
+    // Step 1 (chunk-local then storage): In-Reply-To.
+    if let Some(in_reply_to) = headers.in_reply_to.as_deref() {
+        if let Some(t) = chunk_local.get(in_reply_to).cloned() {
+            return Ok(ThreadAttachment {
+                thread_id: t,
+                mint: None,
+            });
+        }
+        if let Some(t) = thread_of_message(conn, headers, in_reply_to).await? {
+            return Ok(ThreadAttachment {
+                thread_id: t,
+                mint: None,
+            });
+        }
+    }
+    // Step 2: References, walked newest-first.
+    for r in headers.references.iter().rev() {
+        if let Some(t) = chunk_local.get(r).cloned() {
+            return Ok(ThreadAttachment {
+                thread_id: t,
+                mint: None,
+            });
+        }
+        if let Some(t) = thread_of_message(conn, headers, r).await? {
+            return Ok(ThreadAttachment {
+                thread_id: t,
+                mint: None,
+            });
+        }
+    }
+    // Step 3: Subject + recency.
+    let normalized = normalize_subject(&headers.subject);
+    if !normalized.is_empty() {
+        let since = Utc::now() - Duration::days(SUBJECT_RECENCY_DAYS);
+        if let Some(thread) =
+            threads_repo::find_recent_by_subject(conn, &headers.account_id, &normalized, since)
+                .await?
+        {
+            return Ok(ThreadAttachment {
+                thread_id: thread.id,
+                mint: None,
+            });
+        }
+    }
+    // Step 4: mint a fresh thread.
+    let new_id = threads_repo::new_id();
+    let mint = threads_repo::Thread {
+        id: new_id.clone(),
+        account_id: headers.account_id.clone(),
+        root_message_id: Some(headers.id.clone()),
+        subject_normalized: normalize_subject(&headers.subject),
+        last_date: headers.date,
+        message_count: 0,
+    };
+    Ok(ThreadAttachment {
+        thread_id: new_id,
+        mint: Some(mint),
+    })
 }
 
 /// Run the resolution chain for an existing thread. Returns

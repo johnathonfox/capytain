@@ -193,6 +193,7 @@ pub async fn accounts_add_oauth(
         }
     }
 
+    tracing::info!(account = %account_id.0, "accounts_add_oauth: persisting refresh token to OS keychain");
     let vault = TokenVault::new();
     vault.put(&account_id, &refresh).await.map_err(|e| {
         qsl_ipc::IpcError::new(
@@ -200,6 +201,7 @@ pub async fn accounts_add_oauth(
             format!("persist refresh token: {e}"),
         )
     })?;
+    tracing::info!(account = %account_id.0, "accounts_add_oauth: keychain entry written");
 
     // Kick a bootstrap sync. `sync_one_account` walks list_folders →
     // sync_folder per folder and emits a `sync_event` for each, which
@@ -215,11 +217,13 @@ pub async fn accounts_add_oauth(
     // is "only some of my folders showed up after add until I
     // reloaded." The `accounts_changed` arrives strictly AFTER the
     // full sync_account commit, breaking the race.
+    tracing::info!(account = %account_id.0, "accounts_add_oauth: kicking off bootstrap sync (background)");
     let blobs = BlobStore::new(state.data_dir.join("blobs"));
     let app_for_sync = app.clone();
     let account_id_for_sync = account_id.clone();
     tauri::async_runtime::spawn(async move {
         sync_engine::sync_one_account(&app_for_sync, &blobs, &account_id_for_sync).await;
+        tracing::info!(account = %account_id_for_sync.0, "accounts_add_oauth: bootstrap sync finished");
         if let Err(e) = app_for_sync.emit(ACCOUNTS_EVENT, ()) {
             tracing::warn!(
                 account = %account_id_for_sync.0,
@@ -311,6 +315,7 @@ pub async fn accounts_remove(
     state: State<'_, AppState>,
     input: AccountsRemoveInput,
 ) -> IpcResult<()> {
+    tracing::debug!(id = %input.id.0, "ipc: accounts_remove");
     {
         let mut cancellers = state.history_cancellers.lock().await;
         let to_drop: Vec<_> = cancellers

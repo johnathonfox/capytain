@@ -60,16 +60,21 @@ pub async fn revoke_refresh_token(
     // helps providers route to the right revocation path. Google
     // accepts both `token=` and a query-string variant; the body
     // form is the standards-compliant shape.
-    let resp = client
-        .post(profile.revocation_url)
-        .header("Accept", "application/json")
-        .form(&[
-            ("token", refresh.expose()),
-            ("token_type_hint", "refresh_token"),
-        ])
-        .send()
-        .await
-        .map_err(|e| AuthError::Other(format!("revoke HTTP: {e}")))?;
+    let resp = qsl_telemetry::time_op!(
+        target: "qsl::slow::auth",
+        limit_ms: qsl_telemetry::slow::limits::OAUTH_TOKEN_MS,
+        op: "token_revoke",
+        fields: { provider = %profile.slug },
+        client
+            .post(profile.revocation_url)
+            .header("Accept", "application/json")
+            .form(&[
+                ("token", refresh.expose()),
+                ("token_type_hint", "refresh_token"),
+            ])
+            .send()
+    )
+    .map_err(|e| AuthError::Other(format!("revoke HTTP: {e}")))?;
 
     let status = resp.status();
     if status.is_success() {
@@ -107,13 +112,18 @@ pub async fn refresh_access_token(
 
     debug!(account = %account.0, provider = profile.slug, "refreshing access token");
 
-    let tokens = post_refresh(
-        profile.token_url,
-        client_id,
-        profile.client_secret,
-        &refresh,
-    )
-    .await?;
+    let tokens = qsl_telemetry::time_op!(
+        target: "qsl::slow::auth",
+        limit_ms: qsl_telemetry::slow::limits::OAUTH_TOKEN_MS,
+        op: "token_refresh",
+        fields: { provider = %profile.slug, account = %account.0 },
+        post_refresh(
+            profile.token_url,
+            client_id,
+            profile.client_secret,
+            &refresh,
+        )
+    )?;
 
     // If the provider rotated the refresh token, store the new one.
     if let Some(new_refresh) = &tokens.refresh {
@@ -153,7 +163,14 @@ pub async fn access_token_for(
 
 #[derive(Debug, Deserialize)]
 struct RefreshResponse {
-    access_token: String,
+    /// `access_token` is documented as required on success, but is
+    /// absent on RFC 6749 §5.2 error responses (which carry `error` +
+    /// `error_description` instead). Optional here so a 400/401 body
+    /// parses cleanly and the error path below can surface the
+    /// provider's own error code rather than a confusing "missing
+    /// field access_token" deserialization error.
+    #[serde(default)]
+    access_token: Option<String>,
     #[serde(default)]
     refresh_token: Option<String>,
     #[serde(default)]
@@ -162,6 +179,23 @@ struct RefreshResponse {
     error: Option<String>,
     #[serde(default)]
     error_description: Option<String>,
+}
+
+/// Take up to `max` chars from `s` for inclusion in a log / error
+/// message. OAuth error bodies are documented as JSON (RFC 6749), but
+/// in practice providers occasionally return HTML on infrastructure
+/// errors (Google's edge proxies, Fastmail's Cloudflare layer); this
+/// keeps the snippet bounded so a 502 HTML page doesn't drown the log.
+fn snippet(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
+    }
 }
 
 async fn post_refresh(
@@ -193,27 +227,63 @@ async fn post_refresh(
         .map_err(|e| AuthError::TokenExchange(format!("HTTP error: {e}")))?;
 
     let status = resp.status();
-    let body: RefreshResponse = resp
-        .json()
+    let raw = resp
+        .text()
         .await
-        .map_err(|e| AuthError::TokenExchange(format!("JSON parse: {e}")))?;
+        .map_err(|e| AuthError::TokenExchange(format!("read body (HTTP {status}): {e}")))?;
+
+    // Try to parse as the documented OAuth response shape. If parse
+    // fails, surface the raw body so the caller — and the operator
+    // reading logs — can see what the provider actually returned.
+    // Refresh responses don't echo any caller-supplied secret, so the
+    // body is safe to include in the error string (provider error
+    // codes / descriptions are the whole point of logging it).
+    let body: RefreshResponse = match serde_json::from_str(&raw) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(
+                %status,
+                body = %snippet(&raw, 300),
+                "token refresh: response did not parse as OAuth JSON"
+            );
+            return Err(AuthError::TokenExchange(format!(
+                "HTTP {status}: response not OAuth-shaped JSON: {e}; body starts with {:?}",
+                snippet(&raw, 120)
+            )));
+        }
+    };
 
     if !status.is_success() || body.error.is_some() {
         // Classify 4xx from the token endpoint as an auth failure — the
         // caller will typically surface this as "re-authenticate".
-        let msg = body
+        let detail = body
             .error_description
-            .or(body.error)
-            .unwrap_or_else(|| format!("HTTP {status}"));
-        return Err(AuthError::TokenExchange(msg));
+            .as_deref()
+            .or(body.error.as_deref())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("HTTP {status}: {}", snippet(&raw, 120)));
+        warn!(
+            %status,
+            error = ?body.error,
+            description = ?body.error_description,
+            "token refresh failed at provider"
+        );
+        return Err(AuthError::TokenExchange(detail));
     }
+
+    let access_token = body.access_token.ok_or_else(|| {
+        AuthError::TokenExchange(format!(
+            "HTTP {status} success but response missing access_token; body starts with {:?}",
+            snippet(&raw, 120)
+        ))
+    })?;
 
     let expires_at = body
         .expires_in
         .map(|n| Utc::now() + ChronoDuration::seconds(n));
 
     Ok(TokenSet {
-        access: AccessToken(body.access_token),
+        access: AccessToken(access_token),
         refresh: body.refresh_token.map(RefreshToken),
         expires_at,
     })

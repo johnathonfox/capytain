@@ -109,6 +109,13 @@ async fn watch_one_session(
 ) -> Result<(), qsl_core::MailError> {
     let state: tauri::State<'_, AppState> = app.state();
     let params = backend_factory::fresh_imap_params(&state, account_id).await?;
+    info!(
+        account = %account_id.0,
+        folder = %folder.0,
+        host = %params.host,
+        port = params.port,
+        "IMAP IDLE: dialing session"
+    );
     let session = dial_session(
         &params.host,
         params.port,
@@ -117,5 +124,10 @@ async fn watch_one_session(
     )
     .await?
     .session;
+    info!(
+        account = %account_id.0,
+        folder = %folder.0,
+        "IMAP IDLE: session established, entering watch loop"
+    );
     watch_folder(session, folder.clone(), account_id.clone(), tx.clone()).await
 }

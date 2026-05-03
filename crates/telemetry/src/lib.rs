@@ -26,6 +26,8 @@ use std::error::Error;
 
 use tracing_subscriber::{fmt, EnvFilter};
 
+pub mod slow;
+
 /// Error returned by [`init`] when subscriber installation fails.
 ///
 /// Opaque by design — this is a startup-only failure mode, and callers
@@ -43,16 +45,30 @@ pub const DEFAULT_FILTER: &str = "warn,qsl_core=info,qsl_storage=info,\
     qsl_ipc=info,qsl_telemetry=info,qsl_desktop=info,qsl_ui=info,\
     mailcli=info";
 
-/// Servo modules that are loud-by-design when the desktop reader pane
-/// renders HTML. We always force these to `error`, regardless of
-/// whether the user set an explicit filter or `RUST_LOG`, because
-/// they're a property of how we embed Servo (data: URL navigation,
-/// per-frame style and module diagnostics) rather than a logging
-/// preference. `script::dom::window` in particular dumps the full
-/// data: URL the reader navigates to at INFO level on every render —
-/// a single gmail thread blew a launch log past 700 MB before this
-/// override existed.
-const SERVO_SUPPRESSIONS: &str = ",script::dom=error,style=error,script::script_module=error";
+/// Third-party modules that are loud-by-design and would drown out
+/// our own info logs when an operator sets `RUST_LOG=info` to debug
+/// startup or sync. Forced regardless of explicit filter / `RUST_LOG`
+/// because the noise comes from *how* we use these libraries, not
+/// from a logging preference:
+///
+/// - `script::dom`, `style`, `script::script_module`: legacy Servo
+///   reader-pane modules (kept so older binaries with the
+///   data: URL renderer don't spam 700 MB launch logs — see
+///   `docs/servo-tombstone.md`).
+/// - `tantivy::indexer::*` + `tantivy::directory::managed_directory`:
+///   Turso's experimental FTS index emits per-commit + per-GC INFO
+///   log lines that fire 14×/sec during a `sync_folder` write burst
+///   (every implicit `messages` write triggers a Tantivy commit; the
+///   batched-tx fix is a separate work item). The information is
+///   uninteresting at the application level — operators care about
+///   "messages synced", not "tantivy commit 547".
+/// - `turso_core` / `turso_sync_engine`: the libSQL engine and sync
+///   SDK emit per-statement breadcrumbs that duplicate what our own
+///   `qsl::slow::db` watchdog already covers.
+const NOISY_THIRD_PARTY_SUPPRESSIONS: &str = ",script::dom=error,style=error,\
+    script::script_module=error,\
+    tantivy=warn,turso_core=warn,turso_sync_engine=warn,\
+    turso_sync_sdk_kit=warn,turso_sdk_kit=warn";
 
 /// Initialize the global tracing subscriber.
 ///
@@ -76,7 +92,7 @@ fn resolve_filter(explicit: Option<&str>) -> EnvFilter {
     } else {
         DEFAULT_FILTER.to_string()
     };
-    let combined = format!("{base}{SERVO_SUPPRESSIONS}");
+    let combined = format!("{base}{NOISY_THIRD_PARTY_SUPPRESSIONS}");
     EnvFilter::try_new(&combined).unwrap_or_else(|_| EnvFilter::new("warn"))
 }
 

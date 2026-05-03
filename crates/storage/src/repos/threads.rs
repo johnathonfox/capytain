@@ -16,7 +16,7 @@ use chrono::{DateTime, TimeZone, Utc};
 
 use qsl_core::{AccountId, MessageId, StorageError, ThreadId};
 
-use crate::conn::{DbConn, Params, Row, Value};
+use crate::conn::{DbConn, Params, Row, Tx, Value};
 
 /// One thread row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +207,62 @@ pub async fn attach_message(
     )
     .await?;
     Ok(())
+}
+
+/// Tx-bound counterpart to [`insert`].
+pub async fn insert_in_tx(tx: &mut dyn Tx, t: &Thread) -> Result<(), StorageError> {
+    tx.execute(
+        INSERT,
+        Params(vec![
+            Value::Text(&t.id.0),
+            Value::Text(&t.account_id.0),
+            t.root_message_id
+                .as_ref()
+                .map(|m| Value::Text(&m.0))
+                .unwrap_or(Value::Null),
+            Value::Text(&t.subject_normalized),
+            Value::Integer(t.last_date.timestamp()),
+            Value::Integer(t.message_count.into()),
+        ]),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Tx-bound counterpart to the touch step inside [`attach_message`].
+/// The `UPDATE messages SET thread_id` step is not included here —
+/// `sync_folder`'s batched path bakes `thread_id` into the message
+/// INSERT directly, so the redundant attach UPDATE is dropped.
+pub async fn touch_for_message_in_tx(
+    tx: &mut dyn Tx,
+    thread: &ThreadId,
+    message_date: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    tx.execute(
+        TOUCH_FOR_MESSAGE,
+        Params(vec![
+            Value::Text(&thread.0),
+            Value::Integer(message_date.timestamp()),
+        ]),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Tx-bound counterpart to the second statement of [`attach_message`].
+/// Used by the heal-on-update path where an existing row had no
+/// thread_id and we need to assign one inside the same chunk tx.
+pub async fn set_message_thread_id_in_tx(
+    tx: &mut dyn Tx,
+    message: &MessageId,
+    thread: &ThreadId,
+) -> Result<(), StorageError> {
+    tx.execute(
+        ATTACH_MESSAGE,
+        Params(vec![Value::Text(&message.0), Value::Text(&thread.0)]),
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Mint a new opaque thread id. Format `t-<8 hex chars>` keeps it

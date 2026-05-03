@@ -33,6 +33,14 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 serde-wasm-bindgen = "0.6"
+# Bridge `tracing` events from the wasm bundle back to the Tauri host
+# (via a `ui_log` invoke) so UI lifecycle narration lands on the same
+# stderr stream as the rest of the app. We register a custom
+# `tracing-subscriber` `Layer` in `host_log.rs` rather than
+# `tracing-wasm` so operators don't have to open the webview's
+# DevTools to read what the UI is doing.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 # Document-level keydown listener (PR-T2 keyboard shortcuts) + the
 # `is_typing_in_field()` active-element check both go through web_sys.
 # Only the four features we actually call into are enabled — the

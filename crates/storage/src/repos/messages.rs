@@ -13,7 +13,7 @@ use qsl_core::{
 };
 
 use super::json;
-use crate::conn::{DbConn, Params, Row, Value};
+use crate::conn::{DbConn, Params, Row, Tx, Value};
 
 const INSERT: &str = "
     INSERT INTO messages
@@ -84,6 +84,37 @@ pub async fn update(
     body_path: Option<&str>,
 ) -> Result<(), StorageError> {
     let affected = conn.execute(UPDATE, to_params(headers, body_path)?).await?;
+    if affected == 0 {
+        Err(StorageError::NotFound)
+    } else {
+        Ok(())
+    }
+}
+
+/// Tx-bound counterpart to [`insert`]. Used by `sync_folder`'s
+/// per-chunk batch path (`qsl-sync::lib::sync_folder`) so every row
+/// in a sync cycle commits together — collapses the N-Tantivy-commit
+/// storm Turso 0.5.3's experimental FTS produces on per-row writes
+/// down to one rebuild per chunk. See `docs/dependencies/turso.md`.
+pub async fn insert_in_tx(
+    tx: &mut dyn Tx,
+    headers: &MessageHeaders,
+    body_path: Option<&str>,
+) -> Result<(), StorageError> {
+    tx.execute(INSERT, to_params(headers, body_path)?)
+        .await
+        .map(|_| ())
+}
+
+/// Tx-bound counterpart to [`update`]. Returns `Err(NotFound)` if the
+/// row isn't there so the caller can decide whether to fall back to
+/// `insert_in_tx` instead.
+pub async fn update_in_tx(
+    tx: &mut dyn Tx,
+    headers: &MessageHeaders,
+    body_path: Option<&str>,
+) -> Result<(), StorageError> {
+    let affected = tx.execute(UPDATE, to_params(headers, body_path)?).await?;
     if affected == 0 {
         Err(StorageError::NotFound)
     } else {
@@ -422,30 +453,41 @@ pub async fn batch_insert_skip_existing(
     if headers.is_empty() {
         return Ok(0);
     }
+    let total = headers.len();
 
-    let placeholders: String = (1..=headers.len())
-        .map(|i| format!("?{i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let select_sql = format!("SELECT id FROM messages WHERE id IN ({placeholders})");
-    let select_params: Vec<Value> = headers.iter().map(|h| Value::Text(&h.id.0)).collect();
-    let rows = conn.query(&select_sql, Params(select_params)).await?;
-    let mut existing: HashSet<String> = HashSet::with_capacity(rows.len());
-    for r in &rows {
-        existing.insert(r.get_str("id")?.to_string());
-    }
+    qsl_telemetry::time_op!(
+        target: "qsl::slow::db",
+        limit_ms: qsl_telemetry::slow::limits::TX_COMMIT_MS,
+        op: "messages::batch_insert_skip_existing",
+        fields: { count = total as u64 },
+        async {
+            let placeholders: String = (1..=headers.len())
+                .map(|i| format!("?{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let select_sql =
+                format!("SELECT id FROM messages WHERE id IN ({placeholders})");
+            let select_params: Vec<Value> =
+                headers.iter().map(|h| Value::Text(&h.id.0)).collect();
+            let rows = conn.query(&select_sql, Params(select_params)).await?;
+            let mut existing: HashSet<String> = HashSet::with_capacity(rows.len());
+            for r in &rows {
+                existing.insert(r.get_str("id")?.to_string());
+            }
 
-    let mut tx = conn.begin().await?;
-    let mut inserted: u32 = 0;
-    for h in headers {
-        if existing.contains(&h.id.0) {
-            continue;
+            let mut tx = conn.begin().await?;
+            let mut inserted: u32 = 0;
+            for h in headers {
+                if existing.contains(&h.id.0) {
+                    continue;
+                }
+                tx.execute(INSERT, to_params(h, None)?).await?;
+                inserted = inserted.saturating_add(1);
+            }
+            tx.commit().await?;
+            Ok::<u32, StorageError>(inserted)
         }
-        tx.execute(INSERT, to_params(h, None)?).await?;
-        inserted = inserted.saturating_add(1);
-    }
-    tx.commit().await?;
-    Ok(inserted)
+    )
 }
 
 fn to_params<'a>(
