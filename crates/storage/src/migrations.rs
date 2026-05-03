@@ -89,6 +89,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "account_cascade_repair",
         sql: include_str!("../migrations/0011_account_cascade_repair.sql"),
     },
+    Migration {
+        version: 12,
+        name: "restore_fts",
+        sql: include_str!("../migrations/0012_restore_fts.sql"),
+    },
 ];
 
 /// Bookkeeping table. Created lazily by [`run_migrations`] on first run.
