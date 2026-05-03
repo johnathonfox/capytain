@@ -33,6 +33,12 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 serde-wasm-bindgen = "0.6"
+# Bridge `tracing` events to the browser DevTools console so the UI's
+# lifecycle narration shows up alongside the Tauri shell's stderr
+# logs. `tracing-wasm` is small (a few kB after wasm-opt) and shares
+# the tracing field-syntax used elsewhere in the workspace.
+tracing = { workspace = true }
+tracing-wasm = "0.2"
 # Document-level keydown listener (PR-T2 keyboard shortcuts) + the
 # `is_typing_in_field()` active-element check both go through web_sys.
 # Only the four features we actually call into are enabled — the

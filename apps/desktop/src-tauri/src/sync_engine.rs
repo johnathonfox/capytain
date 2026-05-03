@@ -215,6 +215,7 @@ async fn run(app: &AppHandle) -> Result<(), String> {
         jmap_accounts = jmap_accounts.len(),
         "sync engine: live watchers spawned"
     );
+    info!("sync engine: entering reactive loop");
 
     // Spawn the outbox drain on a periodic timer. Decoupled from
     // the watcher reactive loop so a wedged STORE doesn't stall

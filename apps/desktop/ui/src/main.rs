@@ -33,6 +33,17 @@ mod threading;
 
 #[cfg(target_arch = "wasm32")]
 fn main() {
+    // Route `tracing::*!` calls into the browser's DevTools console.
+    // The shell side already initializes `qsl-telemetry`'s stderr
+    // subscriber; this is the UI-side counterpart so a single
+    // `RUST_LOG=info`-style filter (statically capped here at INFO)
+    // surfaces both halves of an operation.
+    let cfg = tracing_wasm::WASMLayerConfigBuilder::new()
+        .set_max_level(tracing::Level::INFO)
+        .build();
+    tracing_wasm::set_as_global_default_with_config(cfg);
+    tracing::info!("qsl ui: wasm bundle loaded");
+
     dioxus::launch(app::App);
 }
 
