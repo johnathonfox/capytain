@@ -21,6 +21,7 @@ dotenvy = "0.15"
 [dependencies]
 qsl-core = { workspace = true }
 qsl-ipc = { workspace = true }
+qsl-telemetry = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }

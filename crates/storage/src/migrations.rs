@@ -139,32 +139,43 @@ pub async fn run_migrations(conn: &dyn DbConn) -> Result<(), StorageError> {
 }
 
 async fn apply_one(conn: &dyn DbConn, m: &Migration) -> Result<(), StorageError> {
-    let mut tx = conn.begin().await?;
+    qsl_telemetry::time_op!(
+        target: "qsl::slow::db",
+        limit_ms: qsl_telemetry::slow::limits::TX_COMMIT_MS,
+        op: "migration::apply_one",
+        fields: { version = m.version, name = %m.name },
+        async {
+            let mut tx = conn.begin().await?;
 
-    // Turso 0.5.3 executes only the first statement of a multi-statement
-    // string when called inside a transaction (see
-    // docs/dependencies/turso.md). Split naively on `;` — our migration
-    // files never embed a `;` inside a string literal — and apply each
-    // statement separately. Every DDL in the shipped migrations uses
-    // `IF NOT EXISTS` so a retry after a partial failure is safe.
-    for statement in split_statements(m.sql) {
-        tx.execute(&statement, Params::empty()).await.map_err(|e| {
-            StorageError::Migration(format!("migration {:04} {}: {e}", m.version, m.name))
-        })?;
-    }
+            // Turso 0.5.3 executes only the first statement of a multi-statement
+            // string when called inside a transaction (see
+            // docs/dependencies/turso.md). Split naively on `;` — our migration
+            // files never embed a `;` inside a string literal — and apply each
+            // statement separately. Every DDL in the shipped migrations uses
+            // `IF NOT EXISTS` so a retry after a partial failure is safe.
+            for statement in split_statements(m.sql) {
+                tx.execute(&statement, Params::empty()).await.map_err(|e| {
+                    StorageError::Migration(format!(
+                        "migration {:04} {}: {e}",
+                        m.version, m.name
+                    ))
+                })?;
+            }
 
-    let applied_at = chrono::Utc::now().timestamp();
-    tx.execute(
-        "INSERT INTO _schema_version (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        Params(vec![
-            Value::Integer(m.version),
-            Value::OwnedText(m.name.to_string()),
-            Value::Integer(applied_at),
-        ]),
+            let applied_at = chrono::Utc::now().timestamp();
+            tx.execute(
+                "INSERT INTO _schema_version (version, name, applied_at) VALUES (?1, ?2, ?3)",
+                Params(vec![
+                    Value::Integer(m.version),
+                    Value::OwnedText(m.name.to_string()),
+                    Value::Integer(applied_at),
+                ]),
+            )
+            .await?;
+
+            tx.commit().await
+        }
     )
-    .await?;
-
-    tx.commit().await
 }
 
 /// Split a multi-statement SQL file into individual executable statements.

@@ -160,13 +160,28 @@ async fn process_one(
     resolver: &dyn BackendResolver,
     entry: &outbox_repo::OutboxEntry,
 ) -> DrainOutcome {
-    let result = dispatch(conn, resolver, entry).await;
+    let result = qsl_telemetry::time_op!(
+        target: "qsl::slow::sync",
+        limit_ms: qsl_telemetry::slow::limits::IMAP_CMD_MS,
+        op: "outbox_dispatch",
+        fields: { op_kind = %entry.op_kind, account = %entry.account_id.0, attempt = entry.attempts },
+        dispatch(conn, resolver, entry)
+    );
     match result {
         Ok(()) => match outbox_repo::delete(conn, &entry.id).await {
-            Ok(()) => DrainOutcome::Sent {
-                id: entry.id.clone(),
-                op_kind: entry.op_kind.clone(),
-            },
+            Ok(()) => {
+                tracing::info!(
+                    id = %entry.id,
+                    op_kind = %entry.op_kind,
+                    account = %entry.account_id.0,
+                    attempts = entry.attempts + 1,
+                    "outbox: sent"
+                );
+                DrainOutcome::Sent {
+                    id: entry.id.clone(),
+                    op_kind: entry.op_kind.clone(),
+                }
+            }
             Err(e) => {
                 // The send succeeded but we couldn't delete the
                 // row. Treat as a soft failure — next drain will
@@ -190,6 +205,13 @@ async fn process_one(
                 warn!(id = %entry.id, "outbox: failed to record failure: {record_err}");
             }
             if entry.attempts + 1 >= outbox_repo::MAX_ATTEMPTS {
+                tracing::error!(
+                    id = %entry.id,
+                    op_kind = %entry.op_kind,
+                    account = %entry.account_id.0,
+                    attempts = entry.attempts + 1,
+                    "outbox: dead-lettered after retries: {err_str}"
+                );
                 DrainOutcome::DeadLettered {
                     id: entry.id.clone(),
                     op_kind: entry.op_kind.clone(),

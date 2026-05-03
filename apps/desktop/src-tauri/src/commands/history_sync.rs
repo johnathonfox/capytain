@@ -20,6 +20,21 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
+use qsl_core::{AccountId, FolderId, MailBackend};
+use qsl_ipc::{HistorySyncStatus, IpcResult, SyncEvent};
+use qsl_storage::repos::{
+    folders as folders_repo, history_sync as history_repo,
+    history_sync::{HistorySyncRow, HistorySyncStatus as RepoStatus},
+    messages as messages_repo,
+};
+
+use serde::Deserialize;
+use tauri::{AppHandle, Emitter, Manager, State};
+
+use crate::backend_factory;
+use crate::state::AppState;
+use crate::sync_engine::SYNC_EVENT;
+
 /// RAII guard that bumps `AppState::pull_in_progress` on construct
 /// and decrements it on drop. Decrements on every exit path
 /// (success, `?` error, panic) so `messages_search` never wedges in
@@ -40,21 +55,6 @@ impl Drop for PullGuard {
         self.counter.fetch_sub(1, Ordering::Relaxed);
     }
 }
-
-use qsl_core::{AccountId, FolderId, MailBackend};
-use qsl_ipc::{HistorySyncStatus, IpcResult, SyncEvent};
-use qsl_storage::repos::{
-    folders as folders_repo, history_sync as history_repo,
-    history_sync::{HistorySyncRow, HistorySyncStatus as RepoStatus},
-    messages as messages_repo,
-};
-
-use serde::Deserialize;
-use tauri::{AppHandle, Emitter, Manager, State};
-
-use crate::backend_factory;
-use crate::state::AppState;
-use crate::sync_engine::SYNC_EVENT;
 
 #[derive(Debug, Deserialize)]
 pub struct HistorySyncStartInput {
@@ -87,6 +87,7 @@ pub async fn history_sync_start(
     input: HistorySyncStartInput,
 ) -> IpcResult<()> {
     let HistorySyncStartInput { account, folder } = input;
+    tracing::debug!(account = %account.0, folder = %folder.0, "ipc: history_sync_start");
 
     // Reject double-start. We can't usefully run two concurrent
     // pullers against the same folder — they'd race on anchor
@@ -188,6 +189,7 @@ pub async fn history_sync_cancel(
     input: HistorySyncCancelInput,
 ) -> IpcResult<()> {
     let HistorySyncCancelInput { account, folder } = input;
+    tracing::debug!(account = %account.0, folder = %folder.0, "ipc: history_sync_cancel");
     let token_present = {
         let mut cancellers = state.history_cancellers.lock().await;
         match cancellers.get(&(account.clone(), folder.clone())) {

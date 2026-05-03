@@ -436,6 +436,9 @@ pub fn App() -> Element {
 }
 
 fn full_app_shell() -> Element {
+    use_hook(|| {
+        tracing::info!("ui: main shell mounting");
+    });
     let selection = use_signal(Selection::default);
     let mut sync_tick: SyncTick = use_signal(|| 0u64);
     let mut folder_tokens: FolderTokens = use_signal(HashMap::new);
@@ -641,6 +644,15 @@ fn full_app_shell() -> Element {
         let cb = Closure::<dyn FnMut(JsValue)>::new(move |payload: JsValue| {
             sync_tick.with_mut(|t| *t = t.wrapping_add(1));
             if let Ok(evt) = serde_wasm_bindgen::from_value::<SyncEvent>(payload) {
+                match &evt {
+                    SyncEvent::FolderSynced { folder, .. } => {
+                        tracing::info!(folder = %folder.0, "ui: sync_event FolderSynced");
+                    }
+                    SyncEvent::FolderError { folder, .. } => {
+                        tracing::warn!(folder = %folder.0, "ui: sync_event FolderError");
+                    }
+                    SyncEvent::HistorySyncProgress { .. } => {}
+                }
                 let folder = match &evt {
                     SyncEvent::FolderSynced { folder, .. }
                     | SyncEvent::FolderError { folder, .. } => Some(folder.clone()),
@@ -720,11 +732,13 @@ fn full_app_shell() -> Element {
     let mut folder_tokens_for_listener = folder_tokens;
     use_hook(move || {
         let cb = Closure::<dyn FnMut(JsValue)>::new(move |_payload: JsValue| {
+            tracing::info!("ui: accounts_changed event received — refetching account list");
             sync_tick.with_mut(|t| *t = t.wrapping_add(1));
             wasm_bindgen_futures::spawn_local(async move {
                 let Ok(accounts) = invoke::<Vec<Account>>("accounts_list", ()).await else {
                     return;
                 };
+                tracing::info!(count = accounts.len(), "ui: account list refreshed");
                 let alive: HashSet<AccountId> = accounts.iter().map(|a| a.id.clone()).collect();
                 let selection_stale = selection_for_listener
                     .peek()
@@ -871,8 +885,12 @@ fn full_app_shell() -> Element {
     // the gate tight on a healthy launch. Fires once per app session.
     use_hook(|| {
         wasm_bindgen_futures::spawn_local(async {
+            tracing::info!("ui: signalling ui_ready to host");
             if let Err(e) = invoke::<()>("ui_ready", serde_json::json!({})).await {
+                tracing::warn!("ui_ready invoke failed: {e}");
                 web_sys_log(&format!("ui_ready: {e}"));
+            } else {
+                tracing::info!("ui: ui_ready handshake complete");
             }
         });
     });

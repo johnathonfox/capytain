@@ -15,6 +15,7 @@ publish.workspace = true
 qsl-core = { workspace = true }
 qsl-mime = { workspace = true }
 qsl-smtp-client = { workspace = true }
+qsl-telemetry = { workspace = true }
 async-imap = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }

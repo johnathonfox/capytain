@@ -158,10 +158,16 @@ pub async fn submit(s: Submission<'_>) -> Result<(), SmtpError> {
         .authentication(vec![Mechanism::Xoauth2])
         .build();
 
-    transport
-        .send_raw(&envelope, s.raw_bytes)
-        .await
-        .map_err(map_lettre_error)?;
+    let to_count = s.to.len() as u64;
+    let bytes = s.raw_bytes.len() as u64;
+    qsl_telemetry::time_op!(
+        target: "qsl::slow::smtp",
+        limit_ms: qsl_telemetry::slow::limits::SMTP_SUBMIT_MS,
+        op: "smtp_submit",
+        fields: { host = %s.host, to_count = to_count, bytes = bytes },
+        transport.send_raw(&envelope, s.raw_bytes)
+    )
+    .map_err(map_lettre_error)?;
     Ok(())
 }
 

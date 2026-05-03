@@ -249,7 +249,13 @@ pub async fn messages_search(
     }
 
     let db = state.db.lock().await;
-    let ids = qsl_storage::repos::search::search_with_query(&*db, &parsed, limit, offset).await?;
+    let ids = qsl_telemetry::time_op!(
+        target: "qsl::slow::db",
+        limit_ms: qsl_telemetry::slow::limits::DB_QUERY_MS,
+        op: "search_with_query",
+        fields: { limit = limit, offset = offset },
+        qsl_storage::repos::search::search_with_query(&*db, &parsed, limit, offset)
+    )?;
 
     let mut messages = Vec::with_capacity(ids.len());
     for id in &ids {
@@ -801,6 +807,7 @@ pub async fn messages_mark_read(
     input: MessagesMarkReadInput,
 ) -> IpcResult<()> {
     let MessagesMarkReadInput { ids, seen } = input;
+    tracing::debug!(count = ids.len(), seen, "ipc: messages_mark_read");
     if ids.is_empty() {
         return Ok(());
     }
@@ -871,6 +878,7 @@ pub struct MessagesFlagInput {
 #[tauri::command]
 pub async fn messages_flag(state: State<'_, AppState>, input: MessagesFlagInput) -> IpcResult<()> {
     let MessagesFlagInput { ids, flagged } = input;
+    tracing::debug!(count = ids.len(), flagged, "ipc: messages_flag");
     if ids.is_empty() {
         return Ok(());
     }
@@ -932,6 +940,7 @@ pub struct MessagesMoveInput {
 #[tauri::command]
 pub async fn messages_move(state: State<'_, AppState>, input: MessagesMoveInput) -> IpcResult<()> {
     let MessagesMoveInput { ids, target } = input;
+    tracing::debug!(count = ids.len(), target = %target.0, "ipc: messages_move");
     if ids.is_empty() {
         return Ok(());
     }
@@ -994,6 +1003,7 @@ pub async fn messages_archive(
     input: MessagesArchiveInput,
 ) -> IpcResult<()> {
     let MessagesArchiveInput { ids } = input;
+    tracing::debug!(count = ids.len(), "ipc: messages_archive");
     if ids.is_empty() {
         return Ok(());
     }
@@ -1092,6 +1102,7 @@ pub async fn messages_delete(
     input: MessagesDeleteInput,
 ) -> IpcResult<()> {
     let MessagesDeleteInput { ids } = input;
+    tracing::debug!(count = ids.len(), "ipc: messages_delete");
     if ids.is_empty() {
         return Ok(());
     }
@@ -1148,6 +1159,7 @@ pub struct MessagesSendInput {
 #[tauri::command]
 pub async fn messages_send(state: State<'_, AppState>, input: MessagesSendInput) -> IpcResult<()> {
     let MessagesSendInput { draft_id } = input;
+    tracing::debug!(draft_id = %draft_id.0, "ipc: messages_send");
 
     let db = state.db.lock().await;
     let draft = drafts_repo::get(&*db, &draft_id).await?;

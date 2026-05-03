@@ -12,7 +12,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
@@ -124,6 +124,15 @@ pub async fn pull_history<F>(
 where
     F: FnMut(HistoryProgress),
 {
+    let pull_started_at = Instant::now();
+    info!(
+        account = %account.0,
+        folder = %folder.0,
+        start_anchor,
+        total_estimate = ?total_estimate,
+        "history sync starting"
+    );
+
     // Persist the running row up front. Brief lock; release so the
     // sync engine can use the connection while we wait on IMAP.
     {
@@ -179,6 +188,7 @@ where
             cancel,
             rx,
             &mut progress,
+            pull_started_at,
         );
 
         let (_, consumer_outcome) = tokio::join!(producer, consumer);
@@ -302,12 +312,14 @@ async fn run_consumer<F>(
     cancel: Arc<AtomicBool>,
     mut rx: mpsc::Receiver<FetchOutcome>,
     progress: &mut F,
+    pull_started_at: Instant,
 ) -> Result<(), SyncError>
 where
     F: FnMut(HistoryProgress),
 {
     let mut fetched_total: u32 = 0;
     let mut last_anchor = start_anchor;
+    let mut chunks_processed: u32 = 0;
     // True once we hit a chunk that didn't advance the anchor and
     // had no headers — same exhaustion signal the pre-pipeline
     // version detected after persisting.
@@ -322,6 +334,7 @@ where
                 headers,
                 next_anchor,
             }) => {
+                let chunk_started_at = Instant::now();
                 let inserted = {
                     let conn = db.lock().await;
                     let inserted = persist_chunk(&*conn, &headers).await?;
@@ -338,6 +351,7 @@ where
                 fetched_total = fetched_total.saturating_add(inserted);
                 let advanced = next_anchor < last_anchor;
                 last_anchor = next_anchor;
+                chunks_processed = chunks_processed.saturating_add(1);
 
                 progress(HistoryProgress {
                     fetched_total,
@@ -346,14 +360,41 @@ where
                     finished: false,
                 });
 
-                info!(
-                    account = %account.0,
-                    folder = %folder.0,
-                    anchor = next_anchor,
-                    inserted,
-                    fetched_total,
-                    "history chunk persisted"
-                );
+                // Consumer-side wall-clock for this iteration: the
+                // persist + update_progress under the db lock.
+                // Producer-side fetch wall-clock is overlapped with
+                // the previous chunk's persist by the depth-1
+                // pipeline, so a slow consumer is what throttles
+                // throughput once steady-state. Threshold at
+                // IMAP_CMD_MS so the warn message stays in the same
+                // shape the pre-pipeline version emitted.
+                let chunk_ms = chunk_started_at.elapsed().as_millis() as u64;
+                if chunk_ms >= qsl_telemetry::slow::limits::IMAP_CMD_MS {
+                    warn!(
+                        target: "qsl::slow::sync",
+                        op = "history_chunk",
+                        account = %account.0,
+                        folder = %folder.0,
+                        anchor = next_anchor,
+                        inserted,
+                        fetched_total,
+                        chunk_index = chunks_processed,
+                        elapsed_ms = chunk_ms,
+                        limit_ms = qsl_telemetry::slow::limits::IMAP_CMD_MS,
+                        "slow history chunk"
+                    );
+                } else {
+                    info!(
+                        account = %account.0,
+                        folder = %folder.0,
+                        anchor = next_anchor,
+                        inserted,
+                        fetched_total,
+                        chunk_index = chunks_processed,
+                        chunk_ms,
+                        "history chunk persisted"
+                    );
+                }
 
                 if !advanced && headers.is_empty() {
                     stuck_and_empty = true;
@@ -364,6 +405,14 @@ where
             }
             FetchOutcome::Failed(e) => {
                 let msg = format!("{MAX_CHUNK_RETRIES} consecutive failures: {e}");
+                tracing::error!(
+                    account = %account.0,
+                    folder = %folder.0,
+                    anchor = last_anchor,
+                    chunks = chunks_processed,
+                    wall_clock_ms = pull_started_at.elapsed().as_millis() as u64,
+                    "history sync giving up: {msg}"
+                );
                 let conn = db.lock().await;
                 history_repo::set_status(&*conn, account, folder, RepoStatus::Error, Some(&msg))
                     .await?;
@@ -403,6 +452,8 @@ where
         account = %account.0,
         folder = %folder.0,
         fetched = fetched_total,
+        chunks = chunks_processed,
+        wall_clock_ms = pull_started_at.elapsed().as_millis() as u64,
         ?final_status,
         "history sync finished"
     );

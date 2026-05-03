@@ -11,7 +11,7 @@ use qsl_core::{
 };
 
 use super::json;
-use crate::conn::{DbConn, Params, Row, Value};
+use crate::conn::{DbConn, Params, Row, Tx, Value};
 
 const INSERT: &str = "
     INSERT INTO messages
@@ -82,6 +82,37 @@ pub async fn update(
     body_path: Option<&str>,
 ) -> Result<(), StorageError> {
     let affected = conn.execute(UPDATE, to_params(headers, body_path)?).await?;
+    if affected == 0 {
+        Err(StorageError::NotFound)
+    } else {
+        Ok(())
+    }
+}
+
+/// Tx-bound counterpart to [`insert`]. Used by `sync_folder`'s
+/// per-chunk batch path (`qsl-sync::lib::sync_folder`) so every row
+/// in a sync cycle commits together — collapses the N-Tantivy-commit
+/// storm Turso 0.5.3's experimental FTS produces on per-row writes
+/// down to one rebuild per chunk. See `docs/dependencies/turso.md`.
+pub async fn insert_in_tx(
+    tx: &mut dyn Tx,
+    headers: &MessageHeaders,
+    body_path: Option<&str>,
+) -> Result<(), StorageError> {
+    tx.execute(INSERT, to_params(headers, body_path)?)
+        .await
+        .map(|_| ())
+}
+
+/// Tx-bound counterpart to [`update`]. Returns `Err(NotFound)` if the
+/// row isn't there so the caller can decide whether to fall back to
+/// `insert_in_tx` instead.
+pub async fn update_in_tx(
+    tx: &mut dyn Tx,
+    headers: &MessageHeaders,
+    body_path: Option<&str>,
+) -> Result<(), StorageError> {
+    let affected = tx.execute(UPDATE, to_params(headers, body_path)?).await?;
     if affected == 0 {
         Err(StorageError::NotFound)
     } else {
@@ -424,31 +455,40 @@ pub async fn batch_insert_skip_existing(
     if headers.is_empty() {
         return Ok(0);
     }
+    let total = headers.len();
 
-    // Build all groups (SQL string + flattened param vec) BEFORE
-    // opening the transaction. JSON encoding (with empty-vec fast
-    // paths in `to_params`) and SQL string assembly run with no DB
-    // lock held; the transaction window narrows to just the syscall
-    // path inside Turso.
-    let mut groups: Vec<(String, Vec<Value>)> =
-        Vec::with_capacity(headers.len().div_ceil(BATCH_INSERT_GROUP_SIZE));
-    for group in headers.chunks(BATCH_INSERT_GROUP_SIZE) {
-        let mut params: Vec<Value> = Vec::with_capacity(group.len() * COLS_PER_ROW);
-        for h in group {
-            let mut p = to_params(h, None)?;
-            params.append(&mut p.0);
+    qsl_telemetry::time_op!(
+        target: "qsl::slow::db",
+        limit_ms: qsl_telemetry::slow::limits::TX_COMMIT_MS,
+        op: "messages::batch_insert_skip_existing",
+        fields: { count = total as u64 },
+        async {
+            // Build all groups (SQL string + flattened param vec) BEFORE
+            // opening the transaction. JSON encoding (with empty-vec
+            // fast paths in `to_params`) and SQL string assembly run
+            // with no DB lock held; the transaction window narrows to
+            // just the syscall path inside Turso.
+            let mut groups: Vec<(String, Vec<Value>)> =
+                Vec::with_capacity(total.div_ceil(BATCH_INSERT_GROUP_SIZE));
+            for group in headers.chunks(BATCH_INSERT_GROUP_SIZE) {
+                let mut params: Vec<Value> = Vec::with_capacity(group.len() * COLS_PER_ROW);
+                for h in group {
+                    let mut p = to_params(h, None)?;
+                    params.append(&mut p.0);
+                }
+                let sql = build_multi_insert_sql(group.len());
+                groups.push((sql, params));
+            }
+
+            let mut tx = conn.begin().await?;
+            let mut inserted: u64 = 0;
+            for (sql, params) in groups.drain(..) {
+                inserted += tx.execute(&sql, Params(params)).await?;
+            }
+            tx.commit().await?;
+            Ok::<u32, StorageError>(inserted as u32)
         }
-        let sql = build_multi_insert_sql(group.len());
-        groups.push((sql, params));
-    }
-
-    let mut tx = conn.begin().await?;
-    let mut inserted: u64 = 0;
-    for (sql, params) in groups.drain(..) {
-        inserted += tx.execute(&sql, Params(params)).await?;
-    }
-    tx.commit().await?;
-    Ok(inserted as u32)
+    )
 }
 
 /// 20 placeholders per row — `INSERT` template above. Used to size

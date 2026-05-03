@@ -88,6 +88,15 @@ async fn watch_one_session(
 ) -> Result<(), qsl_core::MailError> {
     let state: tauri::State<'_, AppState> = app.state();
     let params = backend_factory::fresh_jmap_params(&state, account_id).await?;
+    info!(
+        account = %account_id.0,
+        session_url = %params.session_url,
+        "JMAP push: dialing client"
+    );
     let client = dial_client(&params.session_url, &params.access_token).await?;
+    info!(
+        account = %account_id.0,
+        "JMAP push: client established, entering watch loop"
+    );
     watch_account(&client, account_id.clone(), tx.clone()).await
 }
