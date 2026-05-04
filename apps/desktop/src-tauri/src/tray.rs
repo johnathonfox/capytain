@@ -140,8 +140,19 @@ fn spawn_unread_updater(app: AppHandle) {
         // Subscribe to sync_event. The listener runs on Tauri's
         // per-event task pool; we hop back to an async task to do the
         // DB query so the listener stays cheap.
+        //
+        // Gate the recompute on the event actually carrying a change.
+        // Most IDLE polls produce a `FolderSynced` with all four of
+        // added/updated/flag_updates/removed at zero — re-running the
+        // multi-folder unread COUNT against an unchanged db is pure
+        // waste. We still recompute on `FolderError` (the failure
+        // could mean the previous count is now stale) and any payload
+        // we can't parse (defensive).
         let app_for_listener = app.clone();
-        let _ = app.listen(crate::sync_engine::SYNC_EVENT, move |_| {
+        let _ = app.listen(crate::sync_engine::SYNC_EVENT, move |event| {
+            if !sync_event_changed_state(event.payload()) {
+                return;
+            }
             let app = app_for_listener.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = recompute_unread(&app).await {
@@ -213,6 +224,35 @@ async fn read_tray_enabled(app: &AppHandle) -> Result<bool, qsl_core::StorageErr
     Ok(raw.as_deref() != Some("false"))
 }
 
+/// Returns `true` if the JSON payload of a `sync_event` represents a
+/// state-changing event the tray cares about. Used by the listener to
+/// short-circuit no-op `FolderSynced` cycles before they hit the DB.
+///
+/// Defensive defaults: any parse failure or unknown variant returns
+/// `true` so a future `SyncEvent` variant we don't recognize still
+/// triggers a recompute (correctness > perf for a one-time miss).
+fn sync_event_changed_state(payload: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return true;
+    };
+    let Some(kind) = value.get("kind").and_then(|k| k.as_str()) else {
+        return true;
+    };
+    match kind {
+        "folder_synced" => {
+            let n = |k: &str| value.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+            n("added") + n("updated") + n("flag_updates") + n("removed") > 0
+        }
+        "folder_error" => true,
+        // history_sync_progress: backfill chunks land via the regular
+        // sync path so they already trip a folder_synced event when
+        // they actually persist new rows. The progress event itself
+        // doesn't change unread counts on its own.
+        "history_sync_progress" => false,
+        _ => true,
+    }
+}
+
 async fn recompute_unread(app: &AppHandle) -> Result<(), String> {
     let total = total_inbox_unread(app).await.map_err(|e| format!("{e}"))?;
     set_tooltip(app, total);
@@ -257,5 +297,75 @@ fn set_tooltip(_app: &AppHandle, total: u32) {
     debug!(unread = total, tooltip = %tooltip, "tray: refreshing tooltip");
     if let Err(e) = guard.set_tooltip(Some(&tooltip)) {
         debug!("tray: set_tooltip failed: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sync_event_changed_state;
+
+    #[test]
+    fn folder_synced_with_zero_changes_is_quiet() {
+        let payload = r#"{
+            "kind":"folder_synced",
+            "account":{"0":"gmail:johnathon.fox@gmail.com"},
+            "folder":{"0":"INBOX"},
+            "added":0,"updated":0,"flag_updates":0,"removed":0,
+            "unread_count":12,"live":true
+        }"#;
+        assert!(!sync_event_changed_state(payload));
+    }
+
+    #[test]
+    fn folder_synced_with_one_added_triggers_recompute() {
+        let payload = r#"{
+            "kind":"folder_synced",
+            "account":{"0":"gmail:johnathon.fox@gmail.com"},
+            "folder":{"0":"INBOX"},
+            "added":1,"updated":0,"flag_updates":0,"removed":0,
+            "unread_count":13,"live":true
+        }"#;
+        assert!(sync_event_changed_state(payload));
+    }
+
+    #[test]
+    fn folder_synced_with_only_flag_updates_triggers_recompute() {
+        let payload = r#"{
+            "kind":"folder_synced",
+            "account":{"0":"gmail:johnathon.fox@gmail.com"},
+            "folder":{"0":"INBOX"},
+            "added":0,"updated":0,"flag_updates":3,"removed":0,
+            "unread_count":9,"live":true
+        }"#;
+        assert!(sync_event_changed_state(payload));
+    }
+
+    #[test]
+    fn folder_error_always_triggers_recompute() {
+        let payload = r#"{
+            "kind":"folder_error",
+            "account":{"0":"gmail:johnathon.fox@gmail.com"},
+            "folder":{"0":"INBOX"},
+            "error":"socket reset"
+        }"#;
+        assert!(sync_event_changed_state(payload));
+    }
+
+    #[test]
+    fn history_sync_progress_does_not_trigger_recompute() {
+        let payload = r#"{
+            "kind":"history_sync_progress",
+            "account":{"0":"gmail:johnathon.fox@gmail.com"},
+            "folder":{"0":"INBOX"},
+            "status":"running","fetched":1024,"total_estimate":null,"last_error":null
+        }"#;
+        assert!(!sync_event_changed_state(payload));
+    }
+
+    #[test]
+    fn unparseable_payload_defaults_to_recompute() {
+        assert!(sync_event_changed_state("not json at all"));
+        assert!(sync_event_changed_state("{}"));
+        assert!(sync_event_changed_state(r#"{"kind":"future_variant"}"#));
     }
 }

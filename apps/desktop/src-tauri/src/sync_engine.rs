@@ -627,12 +627,40 @@ async fn emit_folder_outcome(
 ) {
     let event = match result {
         Ok(report) => {
+            // Skip the unread COUNT on no-op syncs. The query scans
+            // every row in the folder (json_extract over flags_json
+            // can't use an index) — ~1.4s on a 30k-row Gmail folder
+            // — and most IDLE polls add zero rows / zero flag changes
+            // so the count is guaranteed unchanged. Reuse the value
+            // we cached the last time something *did* change. First
+            // sync per folder still pays the cost (cache miss).
+            let nothing_changed = report.added == 0
+                && report.updated == 0
+                && report.flag_updates == 0
+                && report.removed == 0;
             let unread = {
                 let state: tauri::State<'_, AppState> = app.state();
-                let db = state.sync_db.lock().await;
-                qsl_storage::repos::messages::count_unread_by_folder(&*db, folder)
-                    .await
-                    .unwrap_or(0)
+                if nothing_changed {
+                    if let Some(v) = state.unread_cache.lock().await.get(folder).copied() {
+                        v
+                    } else {
+                        let db = state.sync_db.lock().await;
+                        let v = qsl_storage::repos::messages::count_unread_by_folder(&*db, folder)
+                            .await
+                            .unwrap_or(0);
+                        drop(db);
+                        state.unread_cache.lock().await.insert(folder.clone(), v);
+                        v
+                    }
+                } else {
+                    let db = state.sync_db.lock().await;
+                    let v = qsl_storage::repos::messages::count_unread_by_folder(&*db, folder)
+                        .await
+                        .unwrap_or(0);
+                    drop(db);
+                    state.unread_cache.lock().await.insert(folder.clone(), v);
+                    v
+                }
             };
             if live && report.added > 0 && folder_is_inbox(app, folder).await {
                 // Notifications fire only for the canonical Inbox-role
