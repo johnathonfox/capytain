@@ -119,14 +119,15 @@ pub async fn search_with_query(
         next_param += 1;
     }
     if let Some(unread) = q.is_unread {
-        // `flags_json.seen` is the canonical "read" bit. unread =
-        // seen=false; read = seen=true. Match the COALESCE pattern
-        // count_unread_by_folder uses so a missing column is treated
-        // as not-seen rather than crashing.
-        let want_seen = if unread { "0" } else { "1" };
-        clauses.push(format!(
-            "COALESCE(json_extract(flags_json, '$.seen'), 0) = {want_seen}"
-        ));
+        // The `unread` column (migration 0013) is the indexable
+        // mirror of `flags.seen`: 1 = unread, 0 = read. Maintained
+        // in lockstep with `flags_json` by every INSERT/UPDATE on
+        // messages. Using the column directly lets the planner pick
+        // `messages_folder_unread` for unread filters, instead of
+        // scanning every row in the folder and re-evaluating
+        // `json_extract` per row.
+        let want = if unread { "1" } else { "0" };
+        clauses.push(format!("unread = {want}"));
     }
     if let Some(has_attach) = q.has_attachment {
         clauses.push(format!("has_attachments = {}", i64::from(has_attach)));

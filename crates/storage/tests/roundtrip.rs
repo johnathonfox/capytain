@@ -19,7 +19,7 @@ use qsl_core::{
     Account, AccountId, Attachment, AttachmentRef, BackendKind, EmailAddress, Folder, FolderId,
     FolderRole, MessageFlags, MessageHeaders, MessageId, SyncState, ThreadId,
 };
-use qsl_storage::{repos, run_migrations, DbConn, TursoConn};
+use qsl_storage::{repos, run_migrations, DbConn, Params, TursoConn, Value};
 
 // ---------- Generators ----------
 
@@ -627,6 +627,106 @@ fn count_unread_by_folder_matches_seen_flag_state() {
                 .await
                 .expect("count_unread multi");
         assert_eq!(multi, 2);
+    });
+}
+
+/// `EXPLAIN QUERY PLAN` for `count_unread_by_folder` should show the
+/// planner picking `messages_folder_unread` (added in migration
+/// 0013). If Turso ever changes its optimizer behavior such that
+/// this index gets ignored, we want a hard failure here rather than
+/// a silent regression to ~1.4s scans on populated mailboxes.
+///
+/// We don't pin the exact `EXPLAIN` row text — Turso has changed the
+/// `detail` formatting between minor releases — only that the index
+/// name appears somewhere in the plan output.
+#[test]
+fn count_unread_by_folder_uses_unread_index() {
+    let rt = rt();
+    rt.block_on(async move {
+        let conn = fresh_conn().await;
+        let acct = Account {
+            id: AccountId("partial-idx".into()),
+            kind: BackendKind::ImapSmtp,
+            display_name: "x".into(),
+            email_address: "me@example.com".into(),
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            signature: None,
+            notify_enabled: true,
+        };
+        repos::accounts::insert(&conn, &acct).await.expect("acct");
+        let folder = Folder {
+            id: FolderId("INBOX".into()),
+            account_id: acct.id.clone(),
+            name: "Inbox".into(),
+            path: "INBOX".into(),
+            role: Some(FolderRole::Inbox),
+            unread_count: 0,
+            total_count: 0,
+            parent: None,
+        };
+        repos::folders::insert(&conn, &folder)
+            .await
+            .expect("folder");
+
+        // Populate a handful of rows so the planner has something to
+        // work with. The actual choice is governed by which index
+        // can serve `WHERE folder_id=? AND unread=1` — a regular
+        // two-column equality lookup that the planner picks
+        // unambiguously regardless of statistics.
+        let make_headers = |i: u32, seen: bool| MessageHeaders {
+            id: MessageId(format!("m-{i}")),
+            account_id: acct.id.clone(),
+            folder_id: folder.id.clone(),
+            thread_id: None,
+            rfc822_message_id: None,
+            subject: format!("subj-{i}"),
+            from: vec![],
+            reply_to: vec![],
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            date: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            flags: MessageFlags {
+                seen,
+                ..Default::default()
+            },
+            labels: vec![],
+            snippet: "".into(),
+            size: 0,
+            has_attachments: false,
+            in_reply_to: None,
+            references: vec![],
+        };
+        for i in 0..20u32 {
+            let unread = i % 4 == 0;
+            repos::messages::insert(&conn, &make_headers(i, !unread), None)
+                .await
+                .expect("insert");
+        }
+
+        let plan_rows = conn
+            .query(
+                "EXPLAIN QUERY PLAN \
+                 SELECT COUNT(*) AS c FROM messages \
+                  WHERE folder_id = ?1 \
+                    AND unread = 1",
+                Params(vec![Value::Text("INBOX")]),
+            )
+            .await
+            .expect("explain query plan");
+
+        let combined: String = plan_rows
+            .iter()
+            .filter_map(|r| r.get_str("detail").ok())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            combined.contains("messages_folder_unread"),
+            "planner did not pick the unread index — \
+             count_unread_by_folder will fall back to a full scan. \
+             EXPLAIN output:\n{combined}"
+        );
     });
 }
 

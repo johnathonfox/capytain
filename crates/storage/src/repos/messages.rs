@@ -18,9 +18,9 @@ const INSERT: &str = "
         (id, account_id, folder_id, thread_id, rfc822_message_id,
          subject, from_json, reply_to_json, to_json, cc_json, bcc_json,
          date, flags_json, labels_json, snippet, size, has_attachments,
-         body_path, in_reply_to, references_json)
+         body_path, in_reply_to, references_json, unread)
     VALUES
-        (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+        (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
 ";
 
 // `thread_id` (?4) and `body_path` (?18) are intentionally NOT in the
@@ -55,7 +55,8 @@ const UPDATE: &str = "
            size = ?16,
            has_attachments = ?17,
            in_reply_to = ?19,
-           references_json = ?20
+           references_json = ?20,
+           unread = ?21
      WHERE id = ?1
 ";
 
@@ -317,11 +318,15 @@ pub async fn count_unread_by_folders(
         .map(|i| format!("?{i}"))
         .collect::<Vec<_>>()
         .join(", ");
+    // `unread` is a virtual generated column maintained by migration
+    // 0013. The two-column index `messages_folder_unread(folder_id,
+    // unread)` makes this an O(matching) btree range scan instead of
+    // a full-folder scan + per-row `json_extract`.
     let sql = format!(
         "SELECT COUNT(*) AS c \
            FROM messages \
           WHERE folder_id IN ({placeholders}) \
-            AND COALESCE(json_extract(flags_json, '$.seen'), 0) = 0"
+            AND unread = 1"
     );
     let params: Vec<Value> = folders.iter().map(|f| Value::Text(&f.0)).collect();
     let row = conn.query_one(&sql, Params(params)).await?;
@@ -354,12 +359,14 @@ pub async fn count_unread_by_folder(
     conn: &dyn DbConn,
     folder: &FolderId,
 ) -> Result<u32, StorageError> {
+    // See `count_unread_by_folders` for why this hits the generated
+    // column and not a `json_extract` predicate.
     let row = conn
         .query_one(
             "SELECT COUNT(*) AS c \
                FROM messages \
               WHERE folder_id = ?1 \
-                AND COALESCE(json_extract(flags_json, '$.seen'), 0) = 0",
+                AND unread = 1",
             Params(vec![Value::Text(&folder.0)]),
         )
         .await?;
@@ -415,10 +422,11 @@ pub async fn update_flags(
 ) -> Result<(), StorageError> {
     let affected = conn
         .execute(
-            "UPDATE messages SET flags_json = ?2 WHERE id = ?1",
+            "UPDATE messages SET flags_json = ?2, unread = ?3 WHERE id = ?1",
             Params(vec![
                 Value::Text(&id.0),
                 Value::OwnedText(json::encode(flags)?),
+                Value::Integer(if flags.seen { 0 } else { 1 }),
             ]),
         )
         .await?;
@@ -593,13 +601,13 @@ pub async fn batch_update(
     )
 }
 
-/// 20 placeholders per row — `INSERT` template above. Used to size
+/// 21 placeholders per row — `INSERT` template above. Used to size
 /// the placeholder budget for the multi-row INSERT path.
-const COLS_PER_ROW: usize = 20;
+const COLS_PER_ROW: usize = 21;
 
 /// Max rows per multi-row INSERT statement. SQLite's compile-time
-/// `SQLITE_MAX_VARIABLE_NUMBER` is 32766; at 20 placeholders per row
-/// that allows 1638. We round down to 1500 to leave headroom in case
+/// `SQLITE_MAX_VARIABLE_NUMBER` is 32766; at 21 placeholders per row
+/// that allows 1560. We round down to 1500 to leave headroom in case
 /// a future migration grows the column count.
 const BATCH_INSERT_GROUP_SIZE: usize = 1500;
 
@@ -613,7 +621,7 @@ fn build_multi_insert_sql(n: usize) -> String {
          (id, account_id, folder_id, thread_id, rfc822_message_id, \
           subject, from_json, reply_to_json, to_json, cc_json, bcc_json, \
           date, flags_json, labels_json, snippet, size, has_attachments, \
-          body_path, in_reply_to, references_json) \
+          body_path, in_reply_to, references_json, unread) \
          VALUES ",
     );
     for row in 0..n {
@@ -668,6 +676,10 @@ fn to_params<'a>(
             .map(Value::Text)
             .unwrap_or(Value::Null),
         encode_str_vec(&h.references)?,
+        // `unread` is the indexable mirror of `flags.seen`. Kept in
+        // lockstep with `flags_json` (?13) by every code path that
+        // writes flags. See `count_unread_by_folder`.
+        Value::Integer(if h.flags.seen { 0 } else { 1 }),
     ]))
 }
 
