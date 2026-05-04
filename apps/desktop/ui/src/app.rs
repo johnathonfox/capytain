@@ -642,8 +642,34 @@ fn full_app_shell() -> Element {
     // which deserializes straight into a `SyncEvent` enum.
     use_hook(move || {
         let cb = Closure::<dyn FnMut(JsValue)>::new(move |payload: JsValue| {
-            sync_tick.with_mut(|t| *t = t.wrapping_add(1));
-            if let Ok(evt) = serde_wasm_bindgen::from_value::<SyncEvent>(payload) {
+            let parsed = serde_wasm_bindgen::from_value::<SyncEvent>(payload);
+            // No-change `FolderSynced` cycles (idle IMAP polls of
+            // folders that didn't change) should not bump `sync_tick`
+            // or `folder_tokens` — that would trigger the sidebar
+            // `folders_list` refetch and the per-folder
+            // `messages_list` refetch, both of which fan out into
+            // expensive `count_unread_by_folder` queries. The status
+            // bar and history-activity pane still need to react to
+            // the event, so those updates run unconditionally below.
+            let triggers_refetch = match &parsed {
+                Ok(SyncEvent::FolderSynced {
+                    added,
+                    updated,
+                    flag_updates,
+                    removed,
+                    ..
+                }) => *added + *updated + *flag_updates + *removed > 0,
+                Ok(SyncEvent::FolderError { .. }) => true,
+                Ok(SyncEvent::HistorySyncProgress { .. }) => false,
+                // Unparseable payload: preserve previous defensive
+                // behaviour and trigger a refetch — better to repaint
+                // a few times than to drop a real change on the floor.
+                Err(_) => true,
+            };
+            if triggers_refetch {
+                sync_tick.with_mut(|t| *t = t.wrapping_add(1));
+            }
+            if let Ok(evt) = parsed {
                 match &evt {
                     SyncEvent::FolderSynced { folder, .. } => {
                         tracing::info!(folder = %folder.0, "ui: sync_event FolderSynced");
@@ -653,14 +679,18 @@ fn full_app_shell() -> Element {
                     }
                     SyncEvent::HistorySyncProgress { .. } => {}
                 }
-                let folder = match &evt {
-                    SyncEvent::FolderSynced { folder, .. }
-                    | SyncEvent::FolderError { folder, .. } => Some(folder.clone()),
-                    // History-sync progress doesn't invalidate any
-                    // folder's message list (the rows show up via
-                    // the normal sync path); the Settings panel
-                    // listens for these directly.
-                    SyncEvent::HistorySyncProgress { .. } => None,
+                let folder = if triggers_refetch {
+                    match &evt {
+                        SyncEvent::FolderSynced { folder, .. }
+                        | SyncEvent::FolderError { folder, .. } => Some(folder.clone()),
+                        // History-sync progress doesn't invalidate any
+                        // folder's message list (the rows show up via
+                        // the normal sync path); the Settings panel
+                        // listens for these directly.
+                        SyncEvent::HistorySyncProgress { .. } => None,
+                    }
+                } else {
+                    None
                 };
                 if let Some(folder) = folder {
                     folder_tokens.with_mut(|m| {
