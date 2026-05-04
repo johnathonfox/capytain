@@ -94,6 +94,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "restore_fts",
         sql: include_str!("../migrations/0012_restore_fts.sql"),
     },
+    Migration {
+        version: 13,
+        name: "unread_column",
+        sql: include_str!("../migrations/0013_unread_column.sql"),
+    },
 ];
 
 /// Bookkeeping table. Created lazily by [`run_migrations`] on first run.
