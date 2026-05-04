@@ -135,6 +135,19 @@ pub struct AppState {
     /// doomed query.
     pub pull_in_progress: Arc<AtomicU32>,
 
+    /// Per-folder cache of the most recent `count_unread_by_folder`
+    /// result. Populated by `sync_engine::emit_folder_outcome` whenever
+    /// a sync cycle reports a real change (added / updated /
+    /// flag_updates / removed > 0); reused (without re-querying) on
+    /// no-op cycles. The unread COUNT scans every row in the folder
+    /// because of the `json_extract(flags_json, '$.seen')` predicate
+    /// — on a 30k-row Gmail mailbox that's ~1.4s per call. Re-running
+    /// it on every IDLE poll of every folder, even when nothing
+    /// actually changed, was pegging a CPU and producing thousands of
+    /// `slow_query` warnings per hour. The cache turns the no-op case
+    /// into a `HashMap::get`.
+    pub unread_cache: Arc<Mutex<HashMap<FolderId, u32>>>,
+
     /// Fired by the `ui_ready` IPC command once the Dioxus app has
     /// mounted in the webview. The sync engine awaits this (with a
     /// short safety timeout) before its bootstrap pass so the
@@ -165,6 +178,7 @@ impl AppState {
             history_cancellers: Mutex::new(HashMap::new()),
             history_account_locks: Mutex::new(HashMap::new()),
             pull_in_progress: Arc::new(AtomicU32::new(0)),
+            unread_cache: Arc::new(Mutex::new(HashMap::new())),
             last_rendered: Mutex::new(None),
             ui_ready: Arc::new(Notify::new()),
             boot_at,
