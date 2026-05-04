@@ -1657,6 +1657,7 @@ fn CommandPalette(
                 total_count: 0,
                 unread_count: 0,
                 thread_counts: std::collections::HashMap::new(),
+                indexing_in_progress: false,
             });
         }
         invoke::<MessagePage>(

@@ -472,12 +472,20 @@ ul {
 
 .status-dot.ok      { background: var(--success-green); }
 .status-dot.working { background: var(--accent-amber);
-                      animation: status-pulse 1.2s ease-in-out infinite; }
+                      animation: status-pulse 1.2s steps(2) infinite alternate; }
 .status-dot.error   { background: var(--danger-red); }
 
+/* `steps(2) ... alternate` snaps between the two opacity stops once
+ * every 600ms instead of interpolating smoothly. The visual cue
+ * (pulsing dot) is preserved but webkit2gtk only repaints on the
+ * discrete transition (~2 paints/sec) instead of every vsync frame
+ * (~60 paints/sec). With WEBKIT_DISABLE_DMABUF_RENDERER=1 forced on
+ * for the NVIDIA-Wayland blank-webview workaround, smooth animations
+ * fall back to CPU compositing + per-frame SHM buffer alloc, which
+ * was burning ~25% CPU during long-running history syncs. */
 @keyframes status-pulse {
-  0%, 100% { opacity: 0.5; }
-  50%      { opacity: 1.0; }
+  0%   { opacity: 0.5; }
+  100% { opacity: 1.0; }
 }
 
 /* ---------- Sidebar Compose button ---------- */

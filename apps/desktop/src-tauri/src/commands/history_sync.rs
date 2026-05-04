@@ -17,7 +17,7 @@
 //! `pending`, or `error`) at boot. See [`resume_running_jobs`].
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use qsl_core::{AccountId, FolderId, MailBackend};
@@ -34,6 +34,27 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::backend_factory;
 use crate::state::AppState;
 use crate::sync_engine::SYNC_EVENT;
+
+/// RAII guard that bumps `AppState::pull_in_progress` on construct
+/// and decrements it on drop. Decrements on every exit path
+/// (success, `?` error, panic) so `messages_search` never wedges in
+/// the "indexing in progress" state if a pull task crashes.
+struct PullGuard {
+    counter: Arc<AtomicU32>,
+}
+
+impl PullGuard {
+    fn new(counter: Arc<AtomicU32>) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self { counter }
+    }
+}
+
+impl Drop for PullGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct HistorySyncStartInput {
@@ -424,6 +445,13 @@ async fn run_driver(
     // same connection while we wait on IMAP fetches (which dominate
     // the wall-clock time per chunk).
     let db_arc = state.sync_db.clone();
+
+    // Mark a pull as in-flight for the duration of this driver. The
+    // guard's `Drop` decrements on every exit path (Ok, Err, panic),
+    // which is what `messages_search` reads to short-circuit a
+    // doomed `fts_match()` against the dropped FTS index. The
+    // refcount supports concurrent pulls on different accounts.
+    let _pull_guard = PullGuard::new(state.pull_in_progress.clone());
     let app_for_progress = app.clone();
     let account_for_progress = account.clone();
     let folder_for_progress = folder.clone();

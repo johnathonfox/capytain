@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 
 use qsl_core::{AccountId, FolderId, HistoryChunk, MailBackend, MessageHeaders};
@@ -22,26 +22,46 @@ use qsl_storage::{
     repos::{
         history_sync as history_repo, history_sync::HistorySyncStatus as RepoStatus, messages,
     },
-    DbConn, TursoConn,
+    DbConn, Params, TursoConn,
 };
 
 use crate::SyncError;
 
 /// How many headers to ask the backend for per chunk.
 ///
-/// 500 balances throughput against responsiveness — large enough to
-/// amortize the per-FETCH SELECT + round-trip overhead, small enough
-/// that the user sees a progress tick within ~10s of clicking Start
-/// and Cancel takes effect within one chunk. Going higher (we tried
-/// 1000) made the first chunk take 30+ seconds on a fresh Gmail
-/// account, which reads to the user as "it's not pulling at all".
-pub const HISTORY_CHUNK_SIZE: u32 = 500;
+/// 1500 maximizes per-chunk throughput on the post-multi-row-INSERT
+/// hot path (`messages::batch_insert_skip_existing` collapses 1500
+/// rows into one SQL statement, the largest size that still fits
+/// SQLite's 32766-placeholder limit at 20 cols/row). At chunk index
+/// ≥ 2 the per-chunk wall-clock is dominated by Gmail's UID FETCH
+/// — so amortizing more rows per FETCH cuts total backfill time
+/// roughly proportionally.
+///
+/// Trade-off: the first chunk's wall-clock scales with chunk size
+/// (Gmail returns a single big UID FETCH response). At 500 the user
+/// saw a progress tick within ~10s; at 1500 that becomes ~30-45s
+/// before the bar moves. Acceptable for full-history backfills (the
+/// total saving more than offsets the start delay) but the
+/// responsiveness hit was the reason 1000 was rolled back earlier
+/// — revisit if users complain that "Pulling history" looks frozen
+/// at the start.
+pub const HISTORY_CHUNK_SIZE: u32 = 1500;
 
-/// Sleep between chunks. Kept small so the network connection stays
-/// hot; Gmail's "Too many simultaneous connections" gate trips on
-/// concurrent IMAP sessions, not on a single session's request rate.
+/// Sleep between chunks in the consumer. Two competing pressures:
+///   - Network connection should stay hot (Gmail's "Too many
+///     simultaneous connections" gate trips on concurrent IMAP
+///     sessions, not on a single session's request rate).
+///   - The bulk insert path holds the SQLite WAL writer for
+///     ~500ms-1s per chunk. With the pipeline (depth-1) producer
+///     fetching ahead, chunks land every ~1.5s — without this
+///     pause the writer is held nearly continuously and concurrent
+///     IPC reads (Settings, message-list refresh, message-get)
+///     stall. 250ms gives readers a predictable acquire window
+///     every chunk while costing only ~15% throughput on the
+///     dominant Gmail-fetch wall-clock.
+///
 /// Errors-with-backoff still use the longer [`THROTTLE_RECOVERY_MS`].
-pub const INTER_CHUNK_DELAY_MS: u64 = 50;
+pub const INTER_CHUNK_DELAY_MS: u64 = 250;
 
 /// Wait this long after a chunk fails before retrying. Compounds with
 /// the [`MAX_CHUNK_RETRIES`] cap below.
@@ -137,191 +157,318 @@ where
         finished: false,
     });
 
+    // FTS index lifecycle. Turso 0.5.3's experimental `USING fts`
+    // index commits Tantivy on every INSERT at ~250ms/row, which
+    // dominates the bulk insert cost. Drop the index for the
+    // duration of the pull and rebuild it once over the final
+    // table. Both calls are best-effort: if the drop fails (e.g.
+    // index never existed on this DB) we proceed; if the recreate
+    // fails the user can run `mailcli doctor --rebuild-fts`.
+    if let Err(e) = drop_fts_index(&db).await {
+        warn!("FTS drop failed (continuing without dropping): {e}");
+    }
+
+    // Pipeline: producer fetches chunks, consumer inserts them. With
+    // a depth-1 mpsc buffer the IMAP fetch for chunk N+1 overlaps
+    // with the SQL insert for chunk N — IMAP is network-bound, the
+    // insert is disk/CPU-bound, so the two costs were previously
+    // serialised end-to-end. Both halves run on the same task via
+    // `tokio::join!`, so the producer can borrow `&dyn MailBackend`
+    // without a `'static` bound.
+    let pipeline_outcome = {
+        let (tx, rx) = mpsc::channel::<FetchOutcome>(1);
+
+        let producer = run_producer(backend, folder, start_anchor, cancel.clone(), tx);
+        let consumer = run_consumer(
+            db.clone(),
+            account,
+            folder,
+            start_anchor,
+            total_estimate,
+            cancel,
+            rx,
+            &mut progress,
+            pull_started_at,
+        );
+
+        let (_, consumer_outcome) = tokio::join!(producer, consumer);
+        consumer_outcome
+    };
+
+    // Recreate the FTS index over the now-final table. Single
+    // build vs the per-INSERT commits we just avoided. Best-effort
+    // so a failure here doesn't mask a successful pull — the
+    // `pipeline_outcome` is what callers care about.
+    if let Err(e) = create_fts_index(&db).await {
+        warn!("FTS recreate failed (run `mailcli doctor --rebuild-fts`): {e}");
+    }
+
+    pipeline_outcome
+}
+
+/// Drop the messages full-text index. No-op if the index doesn't
+/// exist. See [`pull_history`] for the lifecycle rationale.
+async fn drop_fts_index(db: &Mutex<TursoConn>) -> Result<(), SyncError> {
+    let conn = db.lock().await;
+    conn.execute("DROP INDEX IF EXISTS messages_fts_idx", Params::empty())
+        .await?;
+    Ok(())
+}
+
+/// (Re)create the messages full-text index. No-op if it already
+/// exists. The build runs over the entire `messages` table so it
+/// scales with table size — the price for never paying the per-row
+/// commit cost during the pull.
+async fn create_fts_index(db: &Mutex<TursoConn>) -> Result<(), SyncError> {
+    let conn = db.lock().await;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS messages_fts_idx ON messages \
+         USING fts (subject, from_json, to_json, snippet)",
+        Params::empty(),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Internal pipeline message. Producer sends one of these per fetch
+/// attempt; consumer dispatches based on variant.
+enum FetchOutcome {
+    Chunk(HistoryChunk),
+    /// Producer exhausted its retry budget on this chunk. Consumer
+    /// flips the row to `Error` and returns.
+    Failed(SyncError),
+}
+
+/// Producer half of the pipeline. Loops fetching chunks from the
+/// backend and pushing them onto `tx`. Stops on cancel, on
+/// `anchor <= 1`, on a stuck-and-empty chunk, on retry budget
+/// exhaustion, or when the consumer drops the receiver.
+async fn run_producer(
+    backend: &dyn MailBackend,
+    folder: &FolderId,
+    start_anchor: u64,
+    cancel: Arc<AtomicBool>,
+    tx: mpsc::Sender<FetchOutcome>,
+) {
     let mut anchor = start_anchor;
-    let mut fetched_total: u32 = 0;
-    let mut chunks_processed: u32 = 0;
     let mut consecutive_failures: u32 = 0;
 
     loop {
         if cancel.load(Ordering::Relaxed) {
-            info!(
-                account = %account.0,
-                folder = %folder.0,
-                fetched = fetched_total,
-                chunks = chunks_processed,
-                wall_clock_ms = pull_started_at.elapsed().as_millis() as u64,
-                "history sync canceled"
-            );
-            let conn = db.lock().await;
-            history_repo::set_status(&*conn, account, folder, RepoStatus::Canceled, None).await?;
-            drop(conn);
-            progress(HistoryProgress {
-                fetched_total,
-                anchor_uid: anchor as i64,
-                total_estimate: total_estimate.map(|v| v as i64),
-                finished: true,
-            });
-            return Ok(());
+            return;
         }
-
         if anchor <= 1 {
-            info!(
-                account = %account.0,
-                folder = %folder.0,
-                fetched = fetched_total,
-                chunks = chunks_processed,
-                wall_clock_ms = pull_started_at.elapsed().as_millis() as u64,
-                "history sync exhausted tail"
-            );
-            let conn = db.lock().await;
-            history_repo::set_status(&*conn, account, folder, RepoStatus::Completed, None).await?;
-            drop(conn);
-            progress(HistoryProgress {
-                fetched_total,
-                anchor_uid: 0,
-                total_estimate: total_estimate.map(|v| v as i64),
-                finished: true,
-            });
-            return Ok(());
+            return;
         }
 
-        let chunk_started_at = Instant::now();
-
-        // Network fetch — explicitly NOT holding the DB lock. This
-        // is where the wall-clock seconds go on a big mailbox.
-        let chunk = match backend
+        match backend
             .pull_history_chunk(folder, anchor, HISTORY_CHUNK_SIZE)
             .await
         {
-            Ok(c) => {
+            Ok(chunk) => {
                 consecutive_failures = 0;
-                c
+                let stuck_and_empty = chunk.next_anchor >= anchor && chunk.headers.is_empty();
+                anchor = chunk.next_anchor;
+
+                // Bounded send. If the consumer has dropped the
+                // receiver (cancel or terminal error path), bail.
+                if tx.send(FetchOutcome::Chunk(chunk)).await.is_err() {
+                    return;
+                }
+
+                if stuck_and_empty {
+                    return;
+                }
             }
             Err(e) => {
                 consecutive_failures += 1;
                 warn!(
-                    account = %account.0,
                     folder = %folder.0,
                     anchor,
                     failures = consecutive_failures,
                     "history sync chunk failed: {e}"
                 );
                 if consecutive_failures >= MAX_CHUNK_RETRIES {
-                    let msg = format!("{consecutive_failures} consecutive failures: {e}");
-                    tracing::error!(
-                        account = %account.0,
-                        folder = %folder.0,
-                        anchor,
-                        chunks = chunks_processed,
-                        wall_clock_ms = pull_started_at.elapsed().as_millis() as u64,
-                        "history sync giving up: {msg}"
-                    );
+                    let _ = tx.send(FetchOutcome::Failed(e.into())).await;
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(THROTTLE_RECOVERY_MS)).await;
+            }
+        }
+    }
+}
+
+/// Consumer half of the pipeline. Pulls chunks off `rx`, inserts
+/// them, persists progress, and emits UI events. Sets the terminal
+/// `history_sync_state` status before returning regardless of
+/// which side closed the pipeline.
+#[allow(clippy::too_many_arguments)]
+async fn run_consumer<F>(
+    db: Arc<Mutex<TursoConn>>,
+    account: &AccountId,
+    folder: &FolderId,
+    start_anchor: u64,
+    total_estimate: Option<u64>,
+    cancel: Arc<AtomicBool>,
+    mut rx: mpsc::Receiver<FetchOutcome>,
+    progress: &mut F,
+    pull_started_at: Instant,
+) -> Result<(), SyncError>
+where
+    F: FnMut(HistoryProgress),
+{
+    let mut fetched_total: u32 = 0;
+    let mut last_anchor = start_anchor;
+    let mut chunks_processed: u32 = 0;
+    // True once we hit a chunk that didn't advance the anchor and
+    // had no headers — same exhaustion signal the pre-pipeline
+    // version detected after persisting.
+    let mut stuck_and_empty = false;
+
+    while let Some(outcome) = rx.recv().await {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        match outcome {
+            FetchOutcome::Chunk(HistoryChunk {
+                headers,
+                next_anchor,
+            }) => {
+                let chunk_started_at = Instant::now();
+                let inserted = {
                     let conn = db.lock().await;
-                    history_repo::set_status(
+                    let inserted = persist_chunk(&*conn, &headers).await?;
+                    history_repo::update_progress(
                         &*conn,
                         account,
                         folder,
-                        RepoStatus::Error,
-                        Some(&msg),
+                        next_anchor as i64,
+                        inserted,
                     )
                     .await?;
-                    drop(conn);
-                    progress(HistoryProgress {
+                    inserted
+                };
+                fetched_total = fetched_total.saturating_add(inserted);
+                let advanced = next_anchor < last_anchor;
+                last_anchor = next_anchor;
+                chunks_processed = chunks_processed.saturating_add(1);
+
+                progress(HistoryProgress {
+                    fetched_total,
+                    anchor_uid: next_anchor as i64,
+                    total_estimate: total_estimate.map(|v| v as i64),
+                    finished: false,
+                });
+
+                // Consumer-side wall-clock for this iteration: the
+                // persist + update_progress under the db lock.
+                // Producer-side fetch wall-clock is overlapped with
+                // the previous chunk's persist by the depth-1
+                // pipeline, so a slow consumer is what throttles
+                // throughput once steady-state. Threshold at
+                // IMAP_CMD_MS so the warn message stays in the same
+                // shape the pre-pipeline version emitted.
+                let chunk_ms = chunk_started_at.elapsed().as_millis() as u64;
+                if chunk_ms >= qsl_telemetry::slow::limits::IMAP_CMD_MS {
+                    warn!(
+                        target: "qsl::slow::sync",
+                        op = "history_chunk",
+                        account = %account.0,
+                        folder = %folder.0,
+                        anchor = next_anchor,
+                        inserted,
                         fetched_total,
-                        anchor_uid: anchor as i64,
-                        total_estimate: total_estimate.map(|v| v as i64),
-                        finished: true,
-                    });
-                    return Err(e.into());
+                        chunk_index = chunks_processed,
+                        elapsed_ms = chunk_ms,
+                        limit_ms = qsl_telemetry::slow::limits::IMAP_CMD_MS,
+                        "slow history chunk"
+                    );
+                } else {
+                    info!(
+                        account = %account.0,
+                        folder = %folder.0,
+                        anchor = next_anchor,
+                        inserted,
+                        fetched_total,
+                        chunk_index = chunks_processed,
+                        chunk_ms,
+                        "history chunk persisted"
+                    );
                 }
-                tokio::time::sleep(Duration::from_millis(THROTTLE_RECOVERY_MS)).await;
-                continue;
+
+                if !advanced && headers.is_empty() {
+                    stuck_and_empty = true;
+                    break;
+                }
+
+                tokio::time::sleep(Duration::from_millis(INTER_CHUNK_DELAY_MS)).await;
             }
-        };
-
-        let HistoryChunk {
-            headers,
-            next_anchor,
-        } = chunk;
-
-        // Persist + update progress in a single locked window.
-        let inserted = {
-            let conn = db.lock().await;
-            let inserted = persist_chunk(&*conn, &headers).await?;
-            history_repo::update_progress(&*conn, account, folder, next_anchor as i64, inserted)
-                .await?;
-            inserted
-        };
-        fetched_total = fetched_total.saturating_add(inserted);
-
-        let advanced = next_anchor < anchor;
-        anchor = next_anchor;
-        chunks_processed = chunks_processed.saturating_add(1);
-
-        progress(HistoryProgress {
-            fetched_total,
-            anchor_uid: anchor as i64,
-            total_estimate: total_estimate.map(|v| v as i64),
-            finished: false,
-        });
-
-        let chunk_ms = chunk_started_at.elapsed().as_millis() as u64;
-        if chunk_ms >= qsl_telemetry::slow::limits::IMAP_CMD_MS {
-            warn!(
-                target: "qsl::slow::sync",
-                op = "history_chunk",
-                account = %account.0,
-                folder = %folder.0,
-                anchor,
-                inserted,
-                fetched_total,
-                chunk_index = chunks_processed,
-                elapsed_ms = chunk_ms,
-                limit_ms = qsl_telemetry::slow::limits::IMAP_CMD_MS,
-                "slow history chunk"
-            );
-        } else {
-            info!(
-                account = %account.0,
-                folder = %folder.0,
-                anchor,
-                inserted,
-                fetched_total,
-                chunk_index = chunks_processed,
-                chunk_ms,
-                "history chunk persisted"
-            );
+            FetchOutcome::Failed(e) => {
+                let msg = format!("{MAX_CHUNK_RETRIES} consecutive failures: {e}");
+                tracing::error!(
+                    account = %account.0,
+                    folder = %folder.0,
+                    anchor = last_anchor,
+                    chunks = chunks_processed,
+                    wall_clock_ms = pull_started_at.elapsed().as_millis() as u64,
+                    "history sync giving up: {msg}"
+                );
+                let conn = db.lock().await;
+                history_repo::set_status(&*conn, account, folder, RepoStatus::Error, Some(&msg))
+                    .await?;
+                drop(conn);
+                progress(HistoryProgress {
+                    fetched_total,
+                    anchor_uid: last_anchor as i64,
+                    total_estimate: total_estimate.map(|v| v as i64),
+                    finished: true,
+                });
+                return Err(e);
+            }
         }
-
-        // If the backend returned an anchor that didn't move forward
-        // (towards 1) and the chunk was empty, we're stuck. Treat as
-        // exhausted to avoid an infinite loop. A non-empty chunk
-        // with a stuck anchor is also possible if the lowest UID in
-        // the chunk equals the previous anchor minus 1 — that's
-        // legitimate progress because subsequent loop reads anchor.
-        if !advanced && headers.is_empty() {
-            info!(
-                account = %account.0,
-                folder = %folder.0,
-                fetched = fetched_total,
-                chunks = chunks_processed,
-                wall_clock_ms = pull_started_at.elapsed().as_millis() as u64,
-                "history sync completed (anchor stuck, empty chunk)"
-            );
-            let conn = db.lock().await;
-            history_repo::set_status(&*conn, account, folder, RepoStatus::Completed, None).await?;
-            drop(conn);
-            progress(HistoryProgress {
-                fetched_total,
-                anchor_uid: 0,
-                total_estimate: total_estimate.map(|v| v as i64),
-                finished: true,
-            });
-            return Ok(());
-        }
-
-        tokio::time::sleep(Duration::from_millis(INTER_CHUNK_DELAY_MS)).await;
     }
+
+    // Channel closed without a Failed outcome. Pick the right
+    // terminal status from the cancel flag and the local
+    // progress: tail-exhausted if we either drained to anchor <= 1
+    // or hit a stuck-and-empty chunk.
+    let canceled = cancel.load(Ordering::Relaxed);
+    let exhausted = last_anchor <= 1 || stuck_and_empty;
+    let final_status = if canceled {
+        RepoStatus::Canceled
+    } else if exhausted {
+        RepoStatus::Completed
+    } else {
+        // Producer dropped without exhausting and without setting
+        // Failed — shouldn't happen in practice, but treat as a
+        // canceled-ish state so the UI doesn't lie about completion.
+        RepoStatus::Canceled
+    };
+    let conn = db.lock().await;
+    history_repo::set_status(&*conn, account, folder, final_status, None).await?;
+    drop(conn);
+
+    info!(
+        account = %account.0,
+        folder = %folder.0,
+        fetched = fetched_total,
+        chunks = chunks_processed,
+        wall_clock_ms = pull_started_at.elapsed().as_millis() as u64,
+        ?final_status,
+        "history sync finished"
+    );
+
+    progress(HistoryProgress {
+        fetched_total,
+        anchor_uid: if matches!(final_status, RepoStatus::Completed) {
+            0
+        } else {
+            last_anchor as i64
+        },
+        total_estimate: total_estimate.map(|v| v as i64),
+        finished: true,
+    });
+    Ok(())
 }
 
 /// Persist one chunk of headers — insert if new, skip silently if

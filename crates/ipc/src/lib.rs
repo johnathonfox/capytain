@@ -95,6 +95,15 @@ pub struct MessagePage {
     /// directly.
     #[serde(default)]
     pub thread_counts: std::collections::HashMap<String, u32>,
+    /// Set by `messages_search` only: `true` while a bulk history
+    /// pull is running, in which case the FTS index is dropped and
+    /// the search query was skipped to avoid a hung-or-doomed
+    /// `fts_match()`. The page in that case is empty; the UI should
+    /// render a "search paused while syncing" banner rather than a
+    /// "no results" empty state. Default `false` for every other
+    /// caller (folder list / unified inbox / etc.).
+    #[serde(default)]
+    pub indexing_in_progress: bool,
 }
 
 /// Events the sync engine emits to the UI as folders sync. The
