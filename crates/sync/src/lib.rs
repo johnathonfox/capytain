@@ -327,7 +327,35 @@ async fn apply_chunk(
         }
     }
 
-    // Phase 2: one tx per chunk.
+    // Phase 2: bucket headers into the three write paths so the
+    // batch helpers can run in tight per-shape loops. The cross-row
+    // chunk_local visibility is already settled by Phase 1 and lives
+    // in the `*_resolutions` maps; here we only need stable ordering
+    // (we walk `headers` so back-references inside one chunk land
+    // before their dependents).
+    let mut new_to_insert: Vec<MessageHeaders> = Vec::with_capacity(new_resolutions.len());
+    let mut to_update_plain: Vec<MessageHeaders> = Vec::new();
+    let mut to_update_heal: Vec<MessageHeaders> = Vec::with_capacity(heal_resolutions.len());
+    for h in headers {
+        if let Some(res) = new_resolutions.get(&h.id) {
+            let mut h_with_thread = h.clone();
+            h_with_thread.thread_id = Some(res.thread_id.clone());
+            new_to_insert.push(h_with_thread);
+        } else if heal_resolutions.contains_key(&h.id) {
+            to_update_heal.push(h.clone());
+        } else {
+            to_update_plain.push(h.clone());
+        }
+    }
+
+    // Phase 3: one tx per chunk wrapping every write — preserves
+    // the one-Tantivy-commit-per-chunk shape that was the whole
+    // point of the prior single-tx structure. Inside the tx we
+    // collapse the per-row INSERT loop into a single multi-row
+    // INSERT OR IGNORE (saves N-1 statement dispatches), and the
+    // per-row UPDATE loop into one batched call. Per-thread and
+    // per-address writes stay row-by-row because they reference
+    // cross-row state that the batch helpers don't carry.
     let mut tx = conn.begin().await?;
 
     // Mint all new threads first so the FK constraint on
@@ -338,14 +366,18 @@ async fn apply_chunk(
         }
     }
 
+    // Multi-row INSERT for new headers, then per-thread touch +
+    // per-address contact upsert. Each new chunk-local header has
+    // its `thread_id` baked in by the bucket loop above so the row
+    // lands fully attached.
     let now = chrono::Utc::now().timestamp();
-    for h in headers {
-        if let Some(res) = new_resolutions.get(&h.id) {
-            // INSERT with thread_id baked in.
-            let mut h_with_thread = h.clone();
-            h_with_thread.thread_id = Some(res.thread_id.clone());
-            messages::insert_in_tx(&mut *tx, &h_with_thread, None).await?;
-            threads_repo::touch_for_message_in_tx(&mut *tx, &res.thread_id, h.date).await?;
+    if !new_to_insert.is_empty() {
+        messages::batch_insert_skip_existing_in_tx(&mut *tx, &new_to_insert).await?;
+        for h in &new_to_insert {
+            // h.thread_id is Some(_) by construction — set in bucket.
+            if let Some(tid) = h.thread_id.as_ref() {
+                threads_repo::touch_for_message_in_tx(&mut *tx, tid, h.date).await?;
+            }
             for addr in &h.from {
                 contacts::upsert_seen_in_tx(
                     &mut *tx,
@@ -356,19 +388,35 @@ async fn apply_chunk(
                 )
                 .await?;
             }
-            report.added += 1;
-            new_headers.push(h.clone());
-        } else if let Some(res) = heal_resolutions.get(&h.id) {
-            // UPDATE the row, then attach thread_id + bump the thread.
-            messages::update_in_tx(&mut *tx, h, None).await?;
-            threads_repo::set_message_thread_id_in_tx(&mut *tx, &h.id, &res.thread_id).await?;
-            threads_repo::touch_for_message_in_tx(&mut *tx, &res.thread_id, h.date).await?;
-            report.updated += 1;
-        } else {
-            // Plain UPDATE — existing row already has a thread.
-            messages::update_in_tx(&mut *tx, h, None).await?;
-            report.updated += 1;
         }
+        report.added += new_to_insert.len();
+        // Strip the synthesised thread_id from the announce vec so
+        // downstream consumers see the original wire-shape header.
+        for h in &new_to_insert {
+            let mut announce = h.clone();
+            announce.thread_id = None;
+            new_headers.push(announce);
+        }
+    }
+
+    // Heal-on-update: batch UPDATE the messages (UPDATE clause
+    // intentionally excludes thread_id), then per-row attach the
+    // newly-resolved thread_id + touch the thread.
+    if !to_update_heal.is_empty() {
+        messages::batch_update_in_tx(&mut *tx, &to_update_heal).await?;
+        for h in &to_update_heal {
+            if let Some(res) = heal_resolutions.get(&h.id) {
+                threads_repo::set_message_thread_id_in_tx(&mut *tx, &h.id, &res.thread_id).await?;
+                threads_repo::touch_for_message_in_tx(&mut *tx, &res.thread_id, h.date).await?;
+            }
+        }
+        report.updated += to_update_heal.len();
+    }
+
+    // Plain UPDATE — existing rows that already had a thread_id.
+    if !to_update_plain.is_empty() {
+        messages::batch_update_in_tx(&mut *tx, &to_update_plain).await?;
+        report.updated += to_update_plain.len();
     }
 
     tx.commit().await?;

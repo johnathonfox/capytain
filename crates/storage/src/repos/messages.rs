@@ -104,6 +104,64 @@ pub async fn insert_in_tx(
         .map(|_| ())
 }
 
+/// Tx-bound multi-row INSERT OR IGNORE counterpart to
+/// [`batch_insert_skip_existing`] for callers that already own a
+/// transaction (e.g. `sync_folder`'s `apply_chunk` which mints
+/// threads + touches contacts in the same tx as the message
+/// insert). Returns the number of rows that actually landed
+/// (duplicates are silently skipped at the engine via the PK).
+///
+/// The function does NOT begin or commit the transaction — the
+/// caller controls those boundaries. Param building runs before
+/// the `tx.execute` so the lock-hold window is just the Turso
+/// dispatch path.
+pub async fn batch_insert_skip_existing_in_tx(
+    tx: &mut dyn Tx,
+    headers: &[MessageHeaders],
+) -> Result<u32, StorageError> {
+    if headers.is_empty() {
+        return Ok(0);
+    }
+    let mut inserted: u64 = 0;
+    for group in headers.chunks(BATCH_INSERT_GROUP_SIZE) {
+        let mut params: Vec<Value> = Vec::with_capacity(group.len() * COLS_PER_ROW);
+        for h in group {
+            let mut p = to_params(h, None)?;
+            params.append(&mut p.0);
+        }
+        let sql = build_multi_insert_sql(group.len());
+        inserted += tx.execute(&sql, Params(params)).await?;
+    }
+    Ok(inserted as u32)
+}
+
+/// Tx-bound counterpart to [`batch_update`]. Same per-row UPDATE
+/// shape (SQLite has no multi-row UPDATE syntax) but inside an
+/// existing transaction so `apply_chunk` can mint threads, batch
+/// updates, and touch threads without splitting into multiple
+/// commits — preserving the one-Tantivy-rebuild-per-chunk shape
+/// the unsharded transaction guarantees.
+///
+/// Rows whose `id` doesn't exist are silently skipped (matches the
+/// pre-existing per-row [`update_in_tx`] semantics for the sync
+/// hot path). Returns the count of rows that actually changed.
+pub async fn batch_update_in_tx(
+    tx: &mut dyn Tx,
+    headers: &[MessageHeaders],
+) -> Result<u32, StorageError> {
+    if headers.is_empty() {
+        return Ok(0);
+    }
+    let mut updated: u32 = 0;
+    for h in headers {
+        let affected = tx.execute(UPDATE, to_params(h, None)?).await?;
+        if affected > 0 {
+            updated = updated.saturating_add(1);
+        }
+    }
+    Ok(updated)
+}
+
 /// Tx-bound counterpart to [`update`]. Returns `Err(NotFound)` if the
 /// row isn't there so the caller can decide whether to fall back to
 /// `insert_in_tx` instead.
@@ -487,6 +545,50 @@ pub async fn batch_insert_skip_existing(
             }
             tx.commit().await?;
             Ok::<u32, StorageError>(inserted as u32)
+        }
+    )
+}
+
+/// Bulk-update a slice of headers — runs N per-row UPDATEs inside a
+/// single transaction. Returns the count of rows that actually
+/// changed (rows whose `id` doesn't exist in the table are silently
+/// skipped instead of erroring with `NotFound`, matching the
+/// existing per-row [`update_in_tx`] semantics for the sync hot
+/// path).
+///
+/// Why this exists: SQLite has no multi-row UPDATE syntax (no
+/// `UPDATE ... VALUES (...), (...)`). The win over the per-call
+/// [`update`] path is collapsing N commits into one — which on
+/// Turso 0.5.3 means one Tantivy index rebuild per chunk instead
+/// of N, the same shape problem [`batch_insert_skip_existing`]
+/// solves for the new-row path. Used by `sync_folder`'s phased
+/// classify->batch path so live IDLE flag/header refreshes don't
+/// trigger N per-row Tantivy commits.
+pub async fn batch_update(
+    conn: &dyn DbConn,
+    headers: &[MessageHeaders],
+) -> Result<u32, StorageError> {
+    if headers.is_empty() {
+        return Ok(0);
+    }
+    let total = headers.len();
+
+    qsl_telemetry::time_op!(
+        target: "qsl::slow::db",
+        limit_ms: qsl_telemetry::slow::limits::TX_COMMIT_MS,
+        op: "messages::batch_update",
+        fields: { count = total as u64 },
+        async {
+            let mut tx = conn.begin().await?;
+            let mut updated: u32 = 0;
+            for h in headers {
+                let affected = tx.execute(UPDATE, to_params(h, None)?).await?;
+                if affected > 0 {
+                    updated = updated.saturating_add(1);
+                }
+            }
+            tx.commit().await?;
+            Ok::<u32, StorageError>(updated)
         }
     )
 }
