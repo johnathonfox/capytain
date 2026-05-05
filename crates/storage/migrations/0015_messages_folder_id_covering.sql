@@ -1,0 +1,36 @@
+-- Covering index for the reconciliation prune SELECT.
+--
+-- The query in `crates/sync/src/lib.rs::sync_folder` reconciliation
+-- pass (called via `messages::list_ids_by_folder`):
+--
+--   SELECT id FROM messages WHERE folder_id = ?1
+--
+-- runs once per `sync_folder` cycle to enumerate every locally-known
+-- message in the folder so we can diff against the backend's live
+-- id set and prune anything that's gone server-side. With the
+-- existing `messages_folder_date(folder_id, date DESC)` index the
+-- planner finds matching rows fast but still has to row-fetch each
+-- to read the TEXT `id` column off the heap page (the indexed
+-- non-INTEGER PK doesn't get inlined into other indexes).
+--
+-- On `[Gmail]/All Mail` (~30k rows) that's 30k row fetches per
+-- sync cycle — measured at ~1.3s on the maintainer's NVIDIA + KWin
+-- Wayland box, 2026-05-05. The query fires once per IDLE poll for
+-- every folder; All Mail is the worst case but the same shape hits
+-- every populated folder.
+--
+-- Adds `messages_folder_id_covering(folder_id, id)` — a regular
+-- composite index, but covering. The planner serves the SELECT
+-- index-only: btree range scan over folder_id with `id` read
+-- straight out of the index leaves. No row fetches.
+--
+-- Why a separate index instead of replacing `messages_folder_date`:
+-- the existing index is keyed `(folder_id, date DESC)` to support
+-- the message-list pane's `ORDER BY date DESC` queries. Dropping
+-- the date column would slow those down. Adding `id` as a third
+-- column would grow the index (~24 bytes/row of TEXT id) for a
+-- benefit only this one query needs. A separate small index keeps
+-- the cost narrowly scoped to the call site that benefits.
+
+CREATE INDEX IF NOT EXISTS messages_folder_id_covering
+    ON messages(folder_id, id);

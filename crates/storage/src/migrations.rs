@@ -104,6 +104,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "messages_id_thread_index",
         sql: include_str!("../migrations/0014_messages_id_thread_index.sql"),
     },
+    Migration {
+        version: 15,
+        name: "messages_folder_id_covering",
+        sql: include_str!("../migrations/0015_messages_folder_id_covering.sql"),
+    },
 ];
 
 /// Bookkeeping table. Created lazily by [`run_migrations`] on first run.
