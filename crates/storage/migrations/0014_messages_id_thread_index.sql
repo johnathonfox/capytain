@@ -1,0 +1,33 @@
+-- Covering index for the apply_chunk reconciliation SELECT.
+--
+-- The query in `crates/sync/src/lib.rs::batch_find_existing`:
+--
+--   SELECT id, thread_id FROM messages WHERE id IN (?1, ?2, ..., ?N)
+--
+-- runs once per IDLE-poll-driven sync_folder pass to figure out
+-- which incoming-chunk message ids already live in storage and what
+-- thread_id they're attached to. With only the `id TEXT PRIMARY KEY`
+-- index, each lookup does:
+--
+--   1. PK btree → rowid
+--   2. row fetch → read thread_id column off the heap page
+--
+-- Even a single-id lookup was tripping the 250ms `slow_query`
+-- watchdog on `[Gmail]/All Mail` and other large folders, where
+-- the heap pages aren't hot in the page cache. Pair-firing with the
+-- apply_chunk INSERT/UPDATE tx that follows, this was the second
+-- biggest source of slow events after the unread COUNT (PR #145).
+--
+-- Covering the (id, thread_id) pair in one index lets the planner
+-- serve the SELECT index-only. id is the partial leading column so
+-- the index size is dominated by the PK btree we already pay for;
+-- adding thread_id stores at most ~24 bytes per row (TEXT thread
+-- ids are short hashes; NULL costs ~1 byte) — trivial against the
+-- whole-row size.
+--
+-- Also speeds the `messages_list_thread` ladder reads when they
+-- look up multiple messages by id at once for a thread render
+-- (post-#145 work, not yet shipped).
+
+CREATE INDEX IF NOT EXISTS messages_id_thread
+    ON messages(id, thread_id);

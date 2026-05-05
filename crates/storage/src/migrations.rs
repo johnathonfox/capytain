@@ -99,6 +99,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "unread_column",
         sql: include_str!("../migrations/0013_unread_column.sql"),
     },
+    Migration {
+        version: 14,
+        name: "messages_id_thread_index",
+        sql: include_str!("../migrations/0014_messages_id_thread_index.sql"),
+    },
 ];
 
 /// Bookkeeping table. Created lazily by [`run_migrations`] on first run.
