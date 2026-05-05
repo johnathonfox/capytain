@@ -304,7 +304,7 @@ async fn apply_chunk(
                 }
                 new_resolutions.insert(h.id.clone(), res);
             }
-            Some(existing_thread) if existing_thread.is_none() => {
+            Some(ex) if ex.thread_id.is_none() => {
                 // Heal-on-update: existing row has no thread_id — resolve and
                 // attach it inside this chunk's tx. Same chunk-local
                 // visibility rules as the new-row path.
@@ -314,12 +314,12 @@ async fn apply_chunk(
                 }
                 heal_resolutions.insert(h.id.clone(), res);
             }
-            Some(_) => {
+            Some(ex) => {
                 // Existing row already has a thread; chunk_local still gets
                 // it so back-refs from later headers in this chunk land on
                 // the right thread.
                 if let (Some(rfc), Some(t)) =
-                    (h.rfc822_message_id.as_deref(), existing.get(&h.id).unwrap())
+                    (h.rfc822_message_id.as_deref(), ex.thread_id.as_ref())
                 {
                     chunk_local.insert(rfc.to_string(), t.clone());
                 }
@@ -336,6 +336,7 @@ async fn apply_chunk(
     let mut new_to_insert: Vec<MessageHeaders> = Vec::with_capacity(new_resolutions.len());
     let mut to_update_plain: Vec<MessageHeaders> = Vec::new();
     let mut to_update_heal: Vec<MessageHeaders> = Vec::with_capacity(heal_resolutions.len());
+    let mut skipped_unchanged: usize = 0;
     for h in headers {
         if let Some(res) = new_resolutions.get(&h.id) {
             let mut h_with_thread = h.clone();
@@ -343,9 +344,51 @@ async fn apply_chunk(
             new_to_insert.push(h_with_thread);
         } else if heal_resolutions.contains_key(&h.id) {
             to_update_heal.push(h.clone());
+        } else if let Some(ex) = existing.get(&h.id) {
+            // Plain-update bucket — existing row already attached to a
+            // thread. Skip the UPDATE entirely if the only mutable
+            // fields (folder_id + flags + Gmail labels) match what we
+            // already store. CONDSTORE/QRESYNC narrows the chunk
+            // server-side, but folders without those extensions still
+            // re-deliver every header on every poll, and even with
+            // them the small steady-state deltas frequently re-shape
+            // unchanged rows. Skipping here eliminates a per-row
+            // UPDATE that touches FTS + every secondary index — the
+            // dominant `slow_tx_execute` source after PR #144.
+            //
+            // Narrow comparison only — server-immutable fields
+            // (subject, from, references, ...) aren't checked, so a
+            // server that retroactively rewrites those would have its
+            // change silently dropped. That's a pathological case in
+            // practice; documented here so a future maintainer can
+            // widen the comparison if it ever bites.
+            let incoming_flags =
+                serde_json::to_string(&h.flags).map_err(|e| StorageError::Serde(e.to_string()))?;
+            let incoming_labels =
+                serde_json::to_string(&h.labels).map_err(|e| StorageError::Serde(e.to_string()))?;
+            if ex.folder_id == h.folder_id
+                && ex.flags_json == incoming_flags
+                && ex.labels_json == incoming_labels
+            {
+                skipped_unchanged += 1;
+                continue;
+            }
+            to_update_plain.push(h.clone());
         } else {
+            // Defensive: if `existing` doesn't have this id but
+            // we're in the else branch (not new, not heal), the row
+            // was deleted between Phase 1 and Phase 2. Treat as a
+            // plain UPDATE; the UPDATE will affect 0 rows and
+            // `batch_update_in_tx` already silently tolerates that.
             to_update_plain.push(h.clone());
         }
+    }
+    if skipped_unchanged > 0 {
+        debug!(
+            skipped = skipped_unchanged,
+            chunk_size = headers.len(),
+            "apply_chunk: skipped UPDATEs for unchanged rows"
+        );
     }
 
     // Phase 3: one tx per chunk wrapping every write — preserves
@@ -423,15 +466,40 @@ async fn apply_chunk(
     Ok(())
 }
 
+/// One row's worth of "what's already in storage" state, used by
+/// [`apply_chunk`] to decide both threading attachment and whether
+/// an incoming server-row actually differs from what we have.
+///
+/// The equality check is intentionally narrow — only the fields
+/// that can legitimately change between syncs (location + mutable
+/// flags + Gmail labels) are compared — so the rest of the UPDATE
+/// path stays trustworthy on the rare edge case where a server
+/// amends an "immutable" header.
+pub(crate) struct ExistingRow {
+    pub thread_id: Option<ThreadId>,
+    pub folder_id: qsl_core::FolderId,
+    /// Wire-encoded `MessageFlags` exactly as stored in
+    /// `messages.flags_json`. Comparing the encoded form lets us
+    /// skip a JSON parse per row.
+    pub flags_json: String,
+    /// Wire-encoded labels (`Vec<String>`) exactly as stored in
+    /// `messages.labels_json`. Same shape as `flags_json`.
+    pub labels_json: String,
+}
+
 /// Probe storage for which message ids in `headers` already exist,
-/// returning a map from id → existing `thread_id` (which may be
-/// `None` if the row was inserted before threading or orphaned by an
-/// older bug). Single batched SELECT — the loop's per-row `find`
-/// previously made N round-trips per chunk.
+/// returning a map from id → existing row state. Used both to drive
+/// threading attachment in [`apply_chunk`]'s Phase 1 and to gate the
+/// plain-update bucket in Phase 2 — a re-synced row whose
+/// `(folder_id, flags_json, labels_json)` already match the
+/// incoming wire-shape produces no DB write at all, eliminating the
+/// FTS+secondary-index churn that was the dominant remaining
+/// `slow_tx_execute` source after PR #144 silenced the count
+/// cascade.
 async fn batch_find_existing(
     conn: &dyn DbConn,
     headers: &[MessageHeaders],
-) -> Result<HashMap<MessageId, Option<ThreadId>>, StorageError> {
+) -> Result<HashMap<MessageId, ExistingRow>, StorageError> {
     if headers.is_empty() {
         return Ok(HashMap::new());
     }
@@ -440,20 +508,34 @@ async fn batch_find_existing(
         .map(|i| format!("?{i}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let sql = format!("SELECT id, thread_id FROM messages WHERE id IN ({placeholders})");
+    let sql = format!(
+        "SELECT id, thread_id, folder_id, flags_json, labels_json \
+           FROM messages WHERE id IN ({placeholders})"
+    );
     let storage_params: Vec<StorageValue> = headers
         .iter()
         .map(|h| StorageValue::Text(&h.id.0))
         .collect();
     let rows = conn.query(&sql, StorageParams(storage_params)).await?;
 
-    let mut out: HashMap<MessageId, Option<ThreadId>> = HashMap::with_capacity(rows.len());
+    let mut out: HashMap<MessageId, ExistingRow> = HashMap::with_capacity(rows.len());
     for r in &rows {
         let id = MessageId(r.get_str("id")?.to_string());
         let thread_id = r
             .get_optional_str("thread_id")?
             .map(|s| ThreadId(s.to_string()));
-        out.insert(id, thread_id);
+        let folder_id = qsl_core::FolderId(r.get_str("folder_id")?.to_string());
+        let flags_json = r.get_str("flags_json")?.to_string();
+        let labels_json = r.get_str("labels_json")?.to_string();
+        out.insert(
+            id,
+            ExistingRow {
+                thread_id,
+                folder_id,
+                flags_json,
+                labels_json,
+            },
+        );
     }
     Ok(out)
 }

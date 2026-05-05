@@ -308,6 +308,70 @@ fn sync_folder_updates_existing_headers() {
     });
 }
 
+/// Re-syncing a chunk whose rows match what we already store should
+/// produce zero `updated` writes — the apply_chunk plain-update
+/// bucket gates on `(folder_id, flags_json, labels_json)` and skips
+/// the row when all three match. Without this skip every IDLE poll
+/// of every folder fired a per-row UPDATE that touched FTS + every
+/// secondary index, the dominant `slow_tx_execute` source after
+/// PR #144 silenced the count cascade.
+#[test]
+fn sync_folder_skips_update_when_resynced_row_unchanged() {
+    rt().block_on(async {
+        let conn = TursoConn::in_memory().await.unwrap();
+        run_migrations(&conn).await.unwrap();
+        let (acct_id, folder) = seed_account(&conn).await;
+
+        let h1 = header("m1", &acct_id, &folder.id, "subject");
+        let backend = StubBackend {
+            folders: vec![folder.clone()],
+            responses: Mutex::new(vec![
+                MessageList {
+                    messages: vec![h1.clone()],
+                    flag_updates: vec![],
+                    new_state: SyncState {
+                        folder_id: folder.id.clone(),
+                        backend_state: "{\"uidvalidity\":1,\"highestmodseq\":0,\"uidnext\":2}"
+                            .into(),
+                    },
+                    removed: vec![],
+                },
+                // Second cycle: server re-delivers the EXACT same
+                // header (same flags, same labels, same folder).
+                MessageList {
+                    messages: vec![h1.clone()],
+                    flag_updates: vec![],
+                    new_state: SyncState {
+                        folder_id: folder.id.clone(),
+                        backend_state: "{\"uidvalidity\":1,\"highestmodseq\":0,\"uidnext\":2}"
+                            .into(),
+                    },
+                    removed: vec![],
+                },
+            ]),
+            raw_bodies: Default::default(),
+            failing_ids: Default::default(),
+            live_ids: None,
+        };
+
+        let r1 = sync_folder(&conn, &backend, None, &folder, None)
+            .await
+            .unwrap();
+        assert_eq!(r1.added, 1);
+        assert_eq!(r1.updated, 0);
+
+        let r2 = sync_folder(&conn, &backend, None, &folder, None)
+            .await
+            .unwrap();
+        assert_eq!(r2.added, 0);
+        assert_eq!(
+            r2.updated, 0,
+            "re-syncing unchanged rows must NOT produce UPDATE writes — \
+             that's the whole point of the skip-unchanged gate"
+        );
+    });
+}
+
 #[test]
 fn sync_folder_fetches_bodies_for_new_messages() {
     rt().block_on(async {
