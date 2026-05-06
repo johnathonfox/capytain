@@ -109,6 +109,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "messages_folder_id_covering",
         sql: include_str!("../migrations/0015_messages_folder_id_covering.sql"),
     },
+    Migration {
+        version: 16,
+        name: "apply_chunk_wide_covering",
+        sql: include_str!("../migrations/0016_apply_chunk_wide_covering.sql"),
+    },
 ];
 
 /// Bookkeeping table. Created lazily by [`run_migrations`] on first run.
