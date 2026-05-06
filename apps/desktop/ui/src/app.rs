@@ -4702,7 +4702,16 @@ fn MessageListV2(
     bulk_selected: Signal<HashSet<MessageId>>,
     visible_messages: Signal<Vec<MessageId>>,
 ) -> Element {
-    let mut visible_limit = use_signal(|| 200u32);
+    // Initial page size kept small so the first `messages_list` IPC call
+    // on a folder switch returns quickly even on cold-cache reads of
+    // large folders. The 20-column wide SELECT is N×heap-fetch; at 200
+    // rows on `[Gmail]/All Mail` it has been observed to land 3+ seconds
+    // (2026-05-06 telemetry) and hold `state.db.lock()` long enough to
+    // wedge unrelated UI commands behind it. The `onscroll_msglist`
+    // handler below grows the page by 50 each time the user nears the
+    // bottom — so a window-tall list still fills before the scroll
+    // reaches the missing rows.
+    let mut visible_limit = use_signal(|| 50u32);
     // Inline-read pattern (per feedback_dioxus_use_resource_reactive.md):
     // `use_reactive!` has been observed to miss the first signal change
     // on at least one component, so read the signals inside the closure
