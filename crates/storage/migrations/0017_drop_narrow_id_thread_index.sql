@@ -1,0 +1,27 @@
+-- Drop the narrow `messages_id_thread(id, thread_id)` covering index
+-- introduced in PR #146. The wider `messages_apply_chunk_lookup(id,
+-- thread_id, folder_id, flags_json, labels_json)` from PR #149
+-- supersedes it for `batch_find_existing` in
+-- `crates/sync/src/lib.rs::batch_find_existing` — that's the only
+-- caller post-#147.
+--
+-- After #149 shipped, telemetry on the maintainer's box (NVIDIA + KWin
+-- Wayland, 2026-05-06) still showed the post-#147 SELECT at 250-335ms
+-- across every populated folder. Most likely cause: Turso 0.5.3's
+-- planner is picking the smaller `messages_id_thread` index (less
+-- index-page I/O on the seek) and falling back to row-fetches for
+-- `folder_id` / `flags_json` / `labels_json` rather than serving the
+-- wider index index-only. The planner has no `INDEXED BY` hint on
+-- Turso 0.5.3 (per `feedback_qsl_casing.md` / Turso quirks notes —
+-- INDEXED BY isn't supported), so the only way to redirect the
+-- planner is to remove the alternative.
+--
+-- Safe to drop: `messages_id_thread` is no longer queried after #147.
+-- If a future query needs only `(id, thread_id)` it'll still be served
+-- index-only by the wider `messages_apply_chunk_lookup` (id is the
+-- leading column, thread_id is the second). One forced row-fetch path
+-- closed; one rarely-useful index removed.
+--
+-- `DROP INDEX IF EXISTS` is idempotent on Turso 0.5.3.
+
+DROP INDEX IF EXISTS messages_id_thread;
