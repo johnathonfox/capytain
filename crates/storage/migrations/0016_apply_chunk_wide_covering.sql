@@ -1,0 +1,49 @@
+-- Wider covering index for the post-#147 apply_chunk reconciliation SELECT.
+--
+-- After PR #147 (`perf(sync): skip apply_chunk UPDATE when row is unchanged`),
+-- `crates/sync/src/lib.rs::batch_find_existing` evolved from:
+--
+--   SELECT id, thread_id FROM messages WHERE id IN (?1, ?2, ..., ?N)
+--
+-- to:
+--
+--   SELECT id, thread_id, folder_id, flags_json, labels_json
+--   FROM messages
+--   WHERE id IN (?1, ?2, ..., ?N)
+--
+-- so apply_chunk can short-circuit the UPDATE on rows whose folder /
+-- flags / labels haven't changed. The 2-column covering index added in
+-- PR #146 (`messages_id_thread(id, thread_id)`) only covered the old
+-- shape — the new query has to row-fetch `folder_id`, `flags_json`,
+-- and `labels_json` off the heap, which on the maintainer's box (NVIDIA
+-- + KWin Wayland, 2026-05-06) shows as ~250-340ms slow events on every
+-- IDLE poll across every populated folder, plus a 1.0s+ event on the
+-- first sync_folder pass over `[Gmail]/All Mail` (~30k rows, cold
+-- pages).
+--
+-- This index extends `messages_id_thread`'s coverage to the full
+-- post-#147 column set so the planner can serve `batch_find_existing`
+-- index-only — no heap fetches.
+--
+-- Storage cost on this maintainer's mailbox (~50k rows total across all
+-- accounts): TEXT thread_id ~24B, INTEGER folder_id ~5B, flags_json
+-- (small JSON object like `{"seen":true,"flagged":false}`) ~50B,
+-- labels_json (e.g. `["INBOX","UNREAD"]`) ~50B → ~129B/row + index
+-- overhead, ~6MB total. Acceptable against the per-poll latency win.
+--
+-- Maintenance cost: every flag/label/folder write on a message now
+-- updates this index too. Flag updates already touch the new
+-- `messages_folder_unread` index from PR #145; the marginal cost of
+-- one more secondary index update per write is negligible against the
+-- read-side win, since reads happen once per IDLE poll per folder
+-- whereas writes are user-initiated (mark-read / flag) at human pace.
+--
+-- The narrower `messages_id_thread(id, thread_id)` from PR #146 is left
+-- in place for now. It's redundant for `batch_find_existing` (the wider
+-- index supersedes it), but the cost of carrying both is small and the
+-- planner could plausibly pick the narrow one for any future query
+-- that needs only (id, thread_id). If telemetry confirms it's never
+-- chosen, drop in a follow-up migration.
+
+CREATE INDEX IF NOT EXISTS messages_apply_chunk_lookup
+    ON messages(id, thread_id, folder_id, flags_json, labels_json);
