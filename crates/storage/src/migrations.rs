@@ -114,6 +114,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "apply_chunk_wide_covering",
         sql: include_str!("../migrations/0016_apply_chunk_wide_covering.sql"),
     },
+    Migration {
+        version: 17,
+        name: "replace_folder_id_with_folder_date_id",
+        sql: include_str!("../migrations/0017_replace_folder_id_with_folder_date_id.sql"),
+    },
 ];
 
 /// Bookkeeping table. Created lazily by [`run_migrations`] on first run.
