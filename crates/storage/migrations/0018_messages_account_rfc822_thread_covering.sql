@@ -1,0 +1,31 @@
+-- Covering index for `find_thread_id_by_rfc822_id`.
+--
+-- The threading pipeline (`crates/sync/src/threading.rs::thread_of_message`)
+-- looks up a referenced message's `thread_id` for every entry in an
+-- incoming header's `In-Reply-To` + `References` chain. On Gmail
+-- threads with long reference chains (5-20 entries × N new headers
+-- per chunk) that's hundreds-to-thousands of point lookups per sync
+-- chunk.
+--
+-- Pre-#154 the lookup went through `messages::find_by_rfc822_id`,
+-- which selects every column of the wide messages row even though
+-- the caller only reads `thread_id`. EXPLAIN QUERY PLAN
+-- (`tests/explain_plans.rs`) showed Turso 0.5.3 picks
+-- `MULTI-INDEX AND messages (messages_account_date,
+-- messages_rfc822)` and adds a `USE SORTER FOR ORDER BY` even
+-- though `LIMIT 1` should make the sort moot. That's the source of
+-- the `slow query` events tagged with the `sync_folder{...}` span
+-- in /tmp/qsl.log on every sync cycle.
+--
+-- The `messages_account_rfc822_thread(account_id, rfc822_message_id,
+-- thread_id)` index puts both filter columns + the only column the
+-- threading caller actually reads in one place. Combined with the
+-- new narrow `find_thread_id_by_rfc822_id` repo function (no wide
+-- SELECT, no ORDER BY), the lookup becomes index-only — no heap
+-- fetch, no sorter.
+--
+-- Cost: ~80 bytes/row × N messages ≈ a few MB. Reasonable for a
+-- per-chunk-hot path.
+
+CREATE INDEX IF NOT EXISTS messages_account_rfc822_thread
+    ON messages(account_id, rfc822_message_id, thread_id);
