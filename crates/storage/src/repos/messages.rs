@@ -232,14 +232,32 @@ pub async fn list_by_folder(
     limit: u32,
     offset: u32,
 ) -> Result<Vec<MessageHeaders>, StorageError> {
-    let sql = format!(
-        "SELECT {COLS} FROM messages \
-         WHERE folder_id = ?1 \
-         ORDER BY date DESC LIMIT ?2 OFFSET ?3"
-    );
-    let rows = conn
+    // Two-step on Turso 0.5.3: the planner adds a USE SORTER for
+    // ORDER BY date DESC even when the chosen index
+    // (`messages_folder_date_id`) already provides the ordering, and
+    // the sort happens *after* the heap fetch — so on a 30k-row
+    // folder the wide 20-column rows all get loaded into memory and
+    // sorted, which lands as a 3+ second freeze on the IPC mutex
+    // (telemetry 2026-05-06). Confirmed via EXPLAIN QUERY PLAN.
+    //
+    // Step 1: index-only fetch of `(id, date)` tuples, ordered. The
+    // sorter still runs but on small rows (~30 bytes/row) so it's
+    // fast and bounded.
+    //
+    // Step 2: PK hydration via `WHERE id IN (...)`. Turso reports a
+    // SCAN here, not point lookups, but with a small N (limit ≤ 500)
+    // the per-row work is the heap fetch — same as the original
+    // query but only for the rows we actually return, not every row
+    // in the folder.
+    //
+    // Step 3: re-sort the hydrated rows by the order Step 1 settled
+    // (Step 2 returns rows in arbitrary order).
+    let id_sql = "SELECT id FROM messages \
+                  WHERE folder_id = ?1 \
+                  ORDER BY date DESC LIMIT ?2 OFFSET ?3";
+    let id_rows = conn
         .query(
-            &sql,
+            id_sql,
             Params(vec![
                 Value::Text(&folder.0),
                 Value::Integer(limit.into()),
@@ -247,7 +265,45 @@ pub async fn list_by_folder(
             ]),
         )
         .await?;
-    rows.iter().map(row_to_headers).collect()
+    if id_rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ordered_ids: Vec<String> = id_rows
+        .iter()
+        .map(|r| r.get_str("id").map(str::to_owned))
+        .collect::<Result<_, _>>()?;
+    hydrate_in_order(conn, &ordered_ids).await
+}
+
+/// Hydrate a list of message ids, preserving the input ordering.
+/// Used by `list_by_folder` / `list_by_folders` after the slim id
+/// query establishes date-desc order. Two-step pattern works around
+/// Turso 0.5.3's mandatory SORTER on ORDER BY queries (see
+/// `list_by_folder`).
+async fn hydrate_in_order(
+    conn: &dyn DbConn,
+    ordered_ids: &[String],
+) -> Result<Vec<MessageHeaders>, StorageError> {
+    if ordered_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders: String = (1..=ordered_ids.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!("SELECT {COLS} FROM messages WHERE id IN ({placeholders})");
+    let params: Vec<Value> = ordered_ids.iter().map(|s| Value::Text(s)).collect();
+    let rows = conn.query(&sql, Params(params)).await?;
+    let mut by_id: std::collections::HashMap<String, MessageHeaders> =
+        std::collections::HashMap::with_capacity(rows.len());
+    for r in rows.iter() {
+        let h = row_to_headers(r)?;
+        by_id.insert(h.id.0.clone(), h);
+    }
+    Ok(ordered_ids
+        .iter()
+        .filter_map(|id| by_id.remove(id))
+        .collect())
 }
 
 /// Cross-folder version of [`list_by_folder`]: all messages in any
@@ -267,22 +323,32 @@ pub async fn list_by_folders(
     if folders.is_empty() {
         return Ok(Vec::new());
     }
+    // Same two-step shape as `list_by_folder` — see that function's
+    // doc comment for the rationale (Turso 0.5.3 mandatory SORTER on
+    // ORDER BY).
     let placeholders: String = (1..=folders.len())
         .map(|i| format!("?{i}"))
         .collect::<Vec<_>>()
         .join(", ");
     let limit_param = folders.len() + 1;
     let offset_param = folders.len() + 2;
-    let sql = format!(
-        "SELECT {COLS} FROM messages \
+    let id_sql = format!(
+        "SELECT id FROM messages \
          WHERE folder_id IN ({placeholders}) \
          ORDER BY date DESC LIMIT ?{limit_param} OFFSET ?{offset_param}"
     );
     let mut params: Vec<Value> = folders.iter().map(|f| Value::Text(&f.0)).collect();
     params.push(Value::Integer(limit.into()));
     params.push(Value::Integer(offset.into()));
-    let rows = conn.query(&sql, Params(params)).await?;
-    rows.iter().map(row_to_headers).collect()
+    let id_rows = conn.query(&id_sql, Params(params)).await?;
+    if id_rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ordered_ids: Vec<String> = id_rows
+        .iter()
+        .map(|r| r.get_str("id").map(str::to_owned))
+        .collect::<Result<_, _>>()?;
+    hydrate_in_order(conn, &ordered_ids).await
 }
 
 /// Cross-folder count for the unified inbox. Mirrors
