@@ -119,6 +119,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "replace_folder_id_with_folder_date_id",
         sql: include_str!("../migrations/0017_replace_folder_id_with_folder_date_id.sql"),
     },
+    Migration {
+        version: 18,
+        name: "messages_account_rfc822_thread_covering",
+        sql: include_str!("../migrations/0018_messages_account_rfc822_thread_covering.sql"),
+    },
 ];
 
 /// Bookkeeping table. Created lazily by [`run_migrations`] on first run.

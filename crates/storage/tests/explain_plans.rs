@@ -144,11 +144,22 @@ async fn explain_slow_queries() {
     )
     .await;
 
-    // 4. threading: find_by_rfc822_id.
+    // 4. threading: NEW narrow find_thread_id_by_rfc822_id (post-#154).
     let acct = AccountId("acct-0".into());
     explain(
         &conn,
-        "threading::thread_of_message (find_by_rfc822_id)",
+        "threading::thread_of_message (NARROW find_thread_id_by_rfc822_id)",
+        "SELECT thread_id FROM messages \
+         WHERE account_id = ?1 AND rfc822_message_id = ?2 LIMIT 1",
+        Params(vec![Value::Text(&acct.0), Value::Text("<rfc-1@x.test>")]),
+    )
+    .await;
+
+    // 4b. Old wide find_by_rfc822_id — kept around for backward compat,
+    // confirm its plan still has SORTER.
+    explain(
+        &conn,
+        "threading: OLD wide find_by_rfc822_id (kept for compat)",
         "SELECT id, account_id, folder_id, thread_id, rfc822_message_id, subject, \
          from_json, reply_to_json, to_json, cc_json, bcc_json, date, flags_json, \
          labels_json, snippet, size, has_attachments, body_path, in_reply_to, \

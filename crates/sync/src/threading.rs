@@ -218,9 +218,9 @@ async fn thread_of_message(
     headers: &MessageHeaders,
     rfc822_message_id: &str,
 ) -> Result<Option<qsl_core::ThreadId>, StorageError> {
-    let row =
-        messages_repo::find_by_rfc822_id(conn, &headers.account_id, rfc822_message_id).await?;
-    Ok(row.and_then(|m| m.thread_id))
+    // Narrow lookup — only `thread_id` is read; see
+    // `find_thread_id_by_rfc822_id` for why it's a different fn.
+    messages_repo::find_thread_id_by_rfc822_id(conn, &headers.account_id, rfc822_message_id).await
 }
 
 /// Normalize a subject for the subject+recency match path. Strips

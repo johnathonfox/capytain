@@ -198,6 +198,44 @@ pub async fn find(
         .transpose()
 }
 
+/// Look up a referenced message's `thread_id` only.
+///
+/// Threading's `thread_of_message` walks every entry of an incoming
+/// header's `In-Reply-To` + `References` chain and only ever reads
+/// `thread_id` off the matched row. The full-row `find_by_rfc822_id`
+/// below loaded all 20 columns and even then Turso 0.5.3's planner
+/// added a `MULTI-INDEX AND` + `USE SORTER` for the `ORDER BY date
+/// DESC LIMIT 1` tiebreaker — visible as the `sync_folder`-tagged
+/// slow events on every chunk.
+///
+/// This narrow form skips the wide-row hydration entirely and drops
+/// the `ORDER BY` (any matching thread is the right thread; rare
+/// duplicates are equivalent for threading attachment). Together
+/// with the `messages_account_rfc822_thread(account_id,
+/// rfc822_message_id, thread_id)` covering index from migration
+/// 0018, the planner can serve it index-only.
+pub async fn find_thread_id_by_rfc822_id(
+    conn: &dyn DbConn,
+    account: &AccountId,
+    rfc822_message_id: &str,
+) -> Result<Option<ThreadId>, StorageError> {
+    let row = conn
+        .query_opt(
+            "SELECT thread_id FROM messages \
+             WHERE account_id = ?1 AND rfc822_message_id = ?2 \
+             LIMIT 1",
+            Params(vec![
+                Value::Text(&account.0),
+                Value::OwnedText(rfc822_message_id.to_string()),
+            ]),
+        )
+        .await?;
+    let Some(row) = row else { return Ok(None) };
+    Ok(row
+        .get_optional_str("thread_id")?
+        .map(|s| ThreadId(s.into())))
+}
+
 /// Look up a message by its RFC 5322 `Message-ID` header within a
 /// single account. Used by the threading assembly pipeline to find
 /// the local row that an incoming message's `In-Reply-To` /
