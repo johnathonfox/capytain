@@ -662,46 +662,6 @@ async fn emit_folder_outcome(
                     v
                 }
             };
-            if live && report.added > 0 && folder_is_inbox(app, folder).await {
-                // Notifications fire only for the canonical Inbox-role
-                // folder. Three reasons:
-                //   1. Gmail delivers each new message to BOTH `INBOX`
-                //      and `[Gmail]/All Mail` (Gmail uses labels, not
-                //      folders). With IDLE watchers on both — both
-                //      sit at the top of `prioritize_imap_folders` —
-                //      that produced two notifications per incoming
-                //      message before this gate.
-                //   2. Sent / Drafts / Trash / Archive / Spam picking
-                //      up `report.added > 0` (e.g. an APPEND to Sent
-                //      after compose, a server-side filter dropping a
-                //      message into Spam) shouldn't pop a desktop
-                //      notification anyway.
-                //   3. `Important` (Gmail's priority Inbox) overlaps
-                //      Inbox content — same dupe risk if we widened
-                //      the gate.
-                // For single-message bursts fetch the most-recent
-                // header so the body can render `"{from} — {subject}"`
-                // instead of the older `"{account} · {folder}"`
-                // placeholder.
-                let preview = if report.added == 1 {
-                    let state: tauri::State<'_, AppState> = app.state();
-                    let db = state.sync_db.lock().await;
-                    match qsl_storage::repos::messages::list_by_folder(&*db, folder, 1, 0).await {
-                        Ok(mut v) => v.pop(),
-                        Err(e) => {
-                            warn!(
-                                account = %account.0,
-                                folder = %folder.0,
-                                "preview lookup failed: {e}; firing notification without sender/subject"
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-                fire_new_mail_notification(app, account, folder, report.added, preview.as_ref());
-            }
             SyncEvent::FolderSynced {
                 account: account.clone(),
                 folder: folder.clone(),
@@ -719,8 +679,49 @@ async fn emit_folder_outcome(
             error: format!("{e}"),
         },
     };
+
+    // Emit the sync event BEFORE the (potentially slow) notification
+    // preview path. The UI's status bar transitions out of
+    // "Initializing…" on the first FolderSynced event; blocking the
+    // emit on the preview-lookup path leaves the user staring at the
+    // initial-state spinner for the full duration of `list_by_folder`
+    // — and on `[Gmail]/All Mail` post-Turso-0.5.3 that's >1s
+    // (telemetry 2026-05-07).
     if let Err(e) = app.emit(SYNC_EVENT, &event) {
         warn!("emit sync_event: {e}");
+    }
+
+    // Notification preview after emit. Same-folder gate as before
+    // (Inbox-role only; Gmail's All Mail / Important / Spam don't
+    // pop a banner). Notifications are best-effort and fire-and-
+    // forget; the preview lookup still runs to populate the
+    // `"{from} — {subject}"` body when there's a single new message.
+    if let SyncEvent::FolderSynced {
+        added,
+        live: live_event,
+        ..
+    } = &event
+    {
+        if *live_event && *added > 0 && folder_is_inbox(app, folder).await {
+            let preview = if *added == 1 {
+                let state: tauri::State<'_, AppState> = app.state();
+                let db = state.sync_db.lock().await;
+                match qsl_storage::repos::messages::list_by_folder(&*db, folder, 1, 0).await {
+                    Ok(mut v) => v.pop(),
+                    Err(e) => {
+                        warn!(
+                            account = %account.0,
+                            folder = %folder.0,
+                            "preview lookup failed: {e}; firing notification without sender/subject"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            fire_new_mail_notification(app, account, folder, *added as usize, preview.as_ref());
+        }
     }
 }
 
