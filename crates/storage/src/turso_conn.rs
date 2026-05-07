@@ -81,8 +81,19 @@ impl TursoConn {
         // enforcement so cascade-dependent behavior fails in tests if
         // a future change forgets the pragma. WAL / synchronous /
         // busy_timeout are no-ops on `:memory:` so they're skipped.
+        // `cache_size` and `temp_store` aren't strictly needed for
+        // `:memory:` (everything is RAM-resident anyway) but we set
+        // them so the test fixture's plan choices match production —
+        // otherwise EXPLAIN tests could diverge from real-world
+        // behavior on the same query.
         let _ = this
             .query("PRAGMA foreign_keys=ON", crate::conn::Params::empty())
+            .await;
+        let _ = this
+            .query("PRAGMA cache_size=-256000", crate::conn::Params::empty())
+            .await;
+        let _ = this
+            .query("PRAGMA temp_store=MEMORY", crate::conn::Params::empty())
             .await;
         Ok(this)
     }
@@ -136,6 +147,30 @@ impl TursoConn {
             .await;
         let _ = this
             .query("PRAGMA busy_timeout=5000", crate::conn::Params::empty())
+            .await;
+        // Bump the per-connection page cache to 256 MB
+        // (negative value = absolute KB). Default is 2 MB / 2000 KB,
+        // which is dwarfed by the messages table + indexes once the
+        // local cache reaches a few thousand rows. Without this every
+        // `messages_list` re-reads index + heap pages off disk on
+        // each click — measured as a steady ~2.6s freeze on
+        // `[Gmail]/All Mail` (telemetry 2026-05-07). 256 MB lets the
+        // entire active working set stay resident in process memory
+        // for the maintainer's mailbox sizes; consumers with smaller
+        // caches still benefit from the pages they do hold.
+        // Verified TAKEN by Turso 0.5.3 in
+        // `tests/explain_plans.rs::PRAGMA write verification`.
+        let _ = this
+            .query("PRAGMA cache_size=-256000", crate::conn::Params::empty())
+            .await;
+        // Force the SORTER and any temp B-tree to live in RAM rather
+        // than an on-disk temp file. Turso 0.5.3's planner adds a
+        // mandatory `USE SORTER FOR ORDER BY` on every `ORDER BY`
+        // (see `tests/explain_plans.rs`); with the default
+        // `temp_store=0` the sort spills to disk — the dominant cost
+        // on the 30k-row `messages_list` slow events.
+        let _ = this
+            .query("PRAGMA temp_store=MEMORY", crate::conn::Params::empty())
             .await;
         // Enable FK enforcement so the schema's `ON DELETE CASCADE`
         // clauses actually fire. SQLite ships with foreign-key
