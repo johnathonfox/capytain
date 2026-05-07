@@ -660,6 +660,11 @@ fn full_app_shell() -> Element {
                     ..
                 }) => *added + *updated + *flag_updates + *removed > 0,
                 Ok(SyncEvent::FolderError { .. }) => true,
+                // FolderStarted fires *before* sync_folder runs —
+                // nothing has been written yet, so don't refetch.
+                // The status bar still updates via the unconditional
+                // SyncStatus path below.
+                Ok(SyncEvent::FolderStarted { .. }) => false,
                 Ok(SyncEvent::HistorySyncProgress { .. }) => false,
                 // Unparseable payload: preserve previous defensive
                 // behaviour and trigger a refetch — better to repaint
@@ -671,6 +676,7 @@ fn full_app_shell() -> Element {
             }
             if let Ok(evt) = parsed {
                 match &evt {
+                    SyncEvent::FolderStarted { .. } => {}
                     SyncEvent::FolderSynced { folder, .. } => {
                         tracing::info!(folder = %folder.0, "ui: sync_event FolderSynced");
                     }
@@ -683,6 +689,10 @@ fn full_app_shell() -> Element {
                     match &evt {
                         SyncEvent::FolderSynced { folder, .. }
                         | SyncEvent::FolderError { folder, .. } => Some(folder.clone()),
+                        // FolderStarted has triggers_refetch=false so
+                        // it never reaches this branch; explicit arm
+                        // keeps the match exhaustive.
+                        SyncEvent::FolderStarted { .. } => None,
                         // History-sync progress doesn't invalidate any
                         // folder's message list (the rows show up via
                         // the normal sync path); the Settings panel
@@ -2076,6 +2086,11 @@ pub enum SyncStatus {
     /// No sync_event has landed yet — engine is still in its
     /// pre-bootstrap wait or just kicking off.
     Initializing,
+    /// Sync engine has begun a folder cycle but `FolderSynced` hasn't
+    /// landed yet. Lets the status bar render "Syncing INBOX…" while
+    /// the per-folder sync_folder runs (multi-second on large
+    /// folders).
+    Syncing { folder: String },
     /// Most recent successful folder cycle. `live=false` rows
     /// (bootstrap pass) get a slightly different label.
     Synced {
@@ -2092,6 +2107,9 @@ pub enum SyncStatus {
 impl SyncStatus {
     fn from_event(evt: &SyncEvent) -> Option<Self> {
         match evt {
+            SyncEvent::FolderStarted { folder, .. } => Some(SyncStatus::Syncing {
+                folder: short_folder_label(&folder.0),
+            }),
             SyncEvent::FolderSynced {
                 folder,
                 added,
@@ -2337,6 +2355,7 @@ fn StatusBar(status: Signal<SyncStatus>, history: Signal<Option<HistoryActivity>
     } else {
         match &snapshot {
             SyncStatus::Initializing => ("status-dot working", "Initializing…".to_string()),
+            SyncStatus::Syncing { folder } => ("status-dot working", format!("Syncing {folder}…")),
             SyncStatus::Synced {
                 folder,
                 added,
