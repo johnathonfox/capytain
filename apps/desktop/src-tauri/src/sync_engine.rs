@@ -69,6 +69,18 @@ const MAX_IMAP_WATCHERS_PER_ACCOUNT: usize = 10;
 /// throttle threshold we've seen in practice.
 const POLL_INTERVAL: Duration = Duration::from_secs(120);
 
+/// Per-call ceiling on `MailBackend::list_messages` for incremental
+/// sync. Each call's headers are applied in a single `apply_chunk`
+/// transaction; that transaction's wall time is what holds the WAL
+/// writer lock and (under Turso 0.5.3) stalls reads on `state.db`.
+/// 200 produced 488-726 ms tx_execute INSERTs that pushed the IPC
+/// `messages_list` query past 1.6 s — telemetry 2026-05-07. 50 caps
+/// the writer-hold around 125-180 ms, below the 250 ms slow_query
+/// threshold, at the cost of more IMAP round-trips on big initial
+/// pulls. The next IDLE / poll cycle picks up anything past the cap,
+/// so freshness still converges in seconds.
+const SYNC_FETCH_LIMIT: u32 = 50;
+
 /// Spawn the engine task. Returns immediately; the task runs in the
 /// background until the app exits.
 ///
@@ -495,7 +507,14 @@ async fn bootstrap_account(app: &AppHandle, account: &Account) -> Result<Vec<Fol
         emit_folder_started(app, &account.id, &folder.id);
         let result = {
             let db = state.sync_db.lock().await;
-            qsl_sync::sync_folder(&*db, backend.as_ref(), Some(&blobs), &folder, Some(200)).await
+            qsl_sync::sync_folder(
+                &*db,
+                backend.as_ref(),
+                Some(&blobs),
+                &folder,
+                Some(SYNC_FETCH_LIMIT),
+            )
+            .await
         };
         if let Err(e) = &result {
             warn!(folder = %folder.id.0, "bootstrap sync_folder failed: {e}");
@@ -547,8 +566,14 @@ pub async fn sync_one_folder(
 
     emit_folder_started(app, account_id, &folder.id);
     let db = state.sync_db.lock().await;
-    let result =
-        qsl_sync::sync_folder(&*db, backend.as_ref(), Some(blobs), folder, Some(200)).await;
+    let result = qsl_sync::sync_folder(
+        &*db,
+        backend.as_ref(),
+        Some(blobs),
+        folder,
+        Some(SYNC_FETCH_LIMIT),
+    )
+    .await;
     drop(db);
 
     emit_folder_outcome(app, account_id, &folder.id, &result, /* live = */ true).await;
@@ -593,7 +618,14 @@ pub(crate) async fn sync_one_account(app: &AppHandle, blobs: &BlobStore, account
         emit_folder_started(app, account_id, &folder.id);
         let result = {
             let db = state.sync_db.lock().await;
-            qsl_sync::sync_folder(&*db, backend.as_ref(), Some(blobs), &folder, Some(200)).await
+            qsl_sync::sync_folder(
+                &*db,
+                backend.as_ref(),
+                Some(blobs),
+                &folder,
+                Some(SYNC_FETCH_LIMIT),
+            )
+            .await
         };
         if let Err(e) = &result {
             warn!(folder = %folder.id.0, "live sync_folder: {e}");
