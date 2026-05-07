@@ -249,6 +249,10 @@ fn sync_event_changed_state(payload: &str) -> bool {
         // they actually persist new rows. The progress event itself
         // doesn't change unread counts on its own.
         "history_sync_progress" => false,
+        // folder_started fires *before* sync_folder runs — nothing
+        // has been written yet, so the tray's unread count can't
+        // have changed. Skip the DB query.
+        "folder_started" => false,
         _ => true,
     }
 }

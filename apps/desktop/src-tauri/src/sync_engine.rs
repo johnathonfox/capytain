@@ -469,28 +469,23 @@ async fn bootstrap_account(app: &AppHandle, account: &Account) -> Result<Vec<Fol
 
     let blobs = BlobStore::new(state.data_dir.join("blobs"));
 
-    // Run every per-folder sync_folder under one db-lock acquisition.
-    // We collect (folder, result) pairs and release the lock before
-    // emit_folder_outcome runs, since it re-takes the lock for the
-    // unread-count read.
-    let outcomes: Vec<(Folder, Result<_, _>)> = {
-        let db = state.sync_db.lock().await;
-        let mut acc = Vec::with_capacity(folders.len());
-        for folder in folders {
-            let result =
-                qsl_sync::sync_folder(&*db, backend.as_ref(), Some(&blobs), &folder, Some(200))
-                    .await;
-            if let Err(e) = &result {
-                warn!(folder = %folder.id.0, "bootstrap sync_folder failed: {e}");
-            }
-            acc.push((folder, result));
-        }
-        acc
-    };
-
-    let mut succeeded = Vec::with_capacity(outcomes.len());
+    // Per-folder loop: emit FolderStarted before each sync_folder so
+    // the status bar can show "Syncing INBOX…" / "Syncing Sent…"
+    // during bootstrap, then sync, then emit FolderSynced. Re-takes
+    // sync_db.lock() per folder so the UI can read in between
+    // (state.db is a separate handle but Turso 0.5.3's WAL
+    // contention can stall reads behind a long-held writer lock).
+    let mut succeeded = Vec::with_capacity(folders.len());
     let mut failed = 0usize;
-    for (folder, result) in outcomes {
+    for folder in folders {
+        emit_folder_started(app, &account.id, &folder.id);
+        let result = {
+            let db = state.sync_db.lock().await;
+            qsl_sync::sync_folder(&*db, backend.as_ref(), Some(&blobs), &folder, Some(200)).await
+        };
+        if let Err(e) = &result {
+            warn!(folder = %folder.id.0, "bootstrap sync_folder failed: {e}");
+        }
         emit_folder_outcome(
             app,
             &account.id,
@@ -536,6 +531,7 @@ pub async fn sync_one_folder(
         }
     };
 
+    emit_folder_started(app, account_id, &folder.id);
     let db = state.sync_db.lock().await;
     let result =
         qsl_sync::sync_folder(&*db, backend.as_ref(), Some(blobs), folder, Some(200)).await;
@@ -580,6 +576,7 @@ pub(crate) async fn sync_one_account(app: &AppHandle, blobs: &BlobStore, account
         }
     };
     for folder in folders {
+        emit_folder_started(app, account_id, &folder.id);
         let result = {
             let db = state.sync_db.lock().await;
             qsl_sync::sync_folder(&*db, backend.as_ref(), Some(blobs), &folder, Some(200)).await
@@ -618,6 +615,21 @@ async fn folder_is_inbox(app: &AppHandle, folder_id: &FolderId) -> bool {
 /// notification when new messages arrived. Both bootstrap and
 /// reactive paths funnel through here so the IPC shape stays
 /// uniform.
+/// Emit `SyncEvent::FolderStarted` so the UI's status bar can flip
+/// to "Syncing X…" before the (potentially multi-second) `sync_folder`
+/// call returns. Caller invokes this *just before* awaiting the sync
+/// — see comments in `bootstrap_account` / `sync_one_folder` /
+/// `sync_one_account`. Best-effort, ignores emit errors.
+fn emit_folder_started(app: &AppHandle, account: &AccountId, folder: &FolderId) {
+    let event = SyncEvent::FolderStarted {
+        account: account.clone(),
+        folder: folder.clone(),
+    };
+    if let Err(e) = app.emit(SYNC_EVENT, &event) {
+        warn!("emit sync_event(FolderStarted): {e}");
+    }
+}
+
 async fn emit_folder_outcome(
     app: &AppHandle,
     account: &AccountId,

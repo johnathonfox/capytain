@@ -117,6 +117,17 @@ pub struct MessagePage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum SyncEvent {
+    /// A folder is about to start syncing. Emitted by the engine
+    /// right before invoking `sync_folder` so the UI can render
+    /// "Syncing X…" in the status bar instead of staying on
+    /// "Initializing…" until the first `FolderSynced` lands. The
+    /// per-folder cycle on a large account (e.g. `[Gmail]/All Mail`)
+    /// can take several seconds, so without this event the user has
+    /// no feedback during bootstrap beyond the static spinner.
+    FolderStarted {
+        account: AccountId,
+        folder: FolderId,
+    },
     /// A folder finished a sync cycle. Counts mirror `SyncReport`.
     /// `unread_count` is the post-sync `count_unread_by_folder`
     /// snapshot — the UI uses it to render sidebar badges without
