@@ -264,6 +264,15 @@ pub async fn find_by_rfc822_id(
     .transpose()
 }
 
+/// One page of a folder's message list, sorted newest-first.
+///
+/// **Returns lite `MessageHeaders` — see `COLS_LITE` for which fields
+/// carry real data and which are defaults.** Callers that need the
+/// full row (`to / cc / bcc / labels / references / body_path / size
+/// / rfc822_message_id / in_reply_to / reply_to`) must use
+/// [`find_by_id`] or [`find_by_message_id`] instead. The
+/// list-rendering UI consumes only the lite subset; selecting the
+/// other JSON columns cost ~1 s per page on a 30k-row Gmail mailbox.
 pub async fn list_by_folder(
     conn: &dyn DbConn,
     folder: &FolderId,
@@ -313,11 +322,31 @@ pub async fn list_by_folder(
     hydrate_in_order(conn, &ordered_ids).await
 }
 
+/// Subset of `COLS` selected by `hydrate_in_order` for the
+/// list-rendering path. The desktop UI's `MessageRowV2` only reads
+/// `id / account_id / folder_id / thread_id / subject / from / date /
+/// flags / snippet / has_attachments`; pulling the rest of the wide
+/// row (8 unused JSON columns including `references_json` and
+/// `body_path`) cost ~1 s per page on a 30k-row Gmail mailbox
+/// (telemetry 2026-05-07, ~1.07 s consistently in idle conditions).
+/// Dropping them brings hydration well under the 250 ms slow
+/// threshold. **Callers reading `to / cc / bcc / labels / size /
+/// references / in_reply_to / body_path / rfc822_message_id /
+/// reply_to` from a list result get default values, NOT the row's
+/// real data — use `messages::find_by_id` or `find_by_message_id`
+/// for the wide row.**
+const COLS_LITE: &str = "id, account_id, folder_id, thread_id, \
+     subject, from_json, date, flags_json, snippet, has_attachments";
+
 /// Hydrate a list of message ids, preserving the input ordering.
 /// Used by `list_by_folder` / `list_by_folders` after the slim id
 /// query establishes date-desc order. Two-step pattern works around
 /// Turso 0.5.3's mandatory SORTER on ORDER BY queries (see
 /// `list_by_folder`).
+///
+/// Returns `MessageHeaders` populated from `COLS_LITE` only — see
+/// that constant's docstring for which fields carry real data and
+/// which are defaults.
 async fn hydrate_in_order(
     conn: &dyn DbConn,
     ordered_ids: &[String],
@@ -329,13 +358,13 @@ async fn hydrate_in_order(
         .map(|i| format!("?{i}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let sql = format!("SELECT {COLS} FROM messages WHERE id IN ({placeholders})");
+    let sql = format!("SELECT {COLS_LITE} FROM messages WHERE id IN ({placeholders})");
     let params: Vec<Value> = ordered_ids.iter().map(|s| Value::Text(s)).collect();
     let rows = conn.query(&sql, Params(params)).await?;
     let mut by_id: std::collections::HashMap<String, MessageHeaders> =
         std::collections::HashMap::with_capacity(rows.len());
     for r in rows.iter() {
-        let h = row_to_headers(r)?;
+        let h = row_to_headers_lite(r)?;
         by_id.insert(h.id.0.clone(), h);
     }
     Ok(ordered_ids
@@ -352,6 +381,10 @@ async fn hydrate_in_order(
 /// Empty `folders` returns `Ok(vec![])` without round-tripping. The
 /// `IN (?, ?, …)` clause is built with one placeholder per folder
 /// id; we expect <100 entries in practice (one INBOX per account).
+///
+/// **Returns lite `MessageHeaders` — same contract as
+/// [`list_by_folder`]: see `COLS_LITE` for the populated/default
+/// field split.**
 pub async fn list_by_folders(
     conn: &dyn DbConn,
     folders: &[FolderId],
@@ -838,5 +871,40 @@ fn row_to_headers(row: &Row) -> Result<MessageHeaders, StorageError> {
         has_attachments: row.get_i64("has_attachments")? != 0,
         in_reply_to: row.get_optional_str("in_reply_to")?.map(str::to_string),
         references: json::decode(row.get_str("references_json")?)?,
+    })
+}
+
+/// Construct a `MessageHeaders` from the narrow `COLS_LITE` column
+/// set. Fills `rfc822_message_id`, `reply_to`, `to`, `cc`, `bcc`,
+/// `labels`, `size`, `in_reply_to`, `references` with empty defaults
+/// — readers that need those must use `find_by_id` or
+/// `find_by_message_id` for the wide row. See `COLS_LITE` for the
+/// rationale.
+fn row_to_headers_lite(row: &Row) -> Result<MessageHeaders, StorageError> {
+    Ok(MessageHeaders {
+        id: MessageId(row.get_str("id")?.to_string()),
+        account_id: AccountId(row.get_str("account_id")?.to_string()),
+        folder_id: FolderId(row.get_str("folder_id")?.to_string()),
+        thread_id: row
+            .get_optional_str("thread_id")?
+            .map(|s| ThreadId(s.to_string())),
+        rfc822_message_id: None,
+        subject: row.get_str("subject")?.to_string(),
+        from: json::decode(row.get_str("from_json")?)?,
+        reply_to: Vec::new(),
+        to: Vec::new(),
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        date: Utc
+            .timestamp_opt(row.get_i64("date")?, 0)
+            .single()
+            .ok_or_else(|| StorageError::Db("invalid message date".into()))?,
+        flags: json::decode(row.get_str("flags_json")?)?,
+        labels: Vec::new(),
+        snippet: row.get_str("snippet")?.to_string(),
+        size: 0,
+        has_attachments: row.get_i64("has_attachments")? != 0,
+        in_reply_to: None,
+        references: Vec::new(),
     })
 }
