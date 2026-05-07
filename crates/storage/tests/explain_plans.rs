@@ -102,6 +102,121 @@ async fn explain_slow_queries() {
         .expect("insert message");
     }
 
+    // Dump engine settings so we know what Turso 0.5.3 actually
+    // honors. Many of these are PRAGMA-level knobs the project
+    // assumes work but never verified; the comments in
+    // `crates/storage/src/turso_conn.rs::open` even flag that
+    // unrecognized PRAGMAs are silently no-ops.
+    println!("\n=== Turso PRAGMA introspection ===\n");
+    for pragma in [
+        "PRAGMA journal_mode",
+        "PRAGMA synchronous",
+        "PRAGMA cache_size",
+        "PRAGMA temp_store",
+        "PRAGMA page_size",
+        "PRAGMA mmap_size",
+        "PRAGMA threads",
+        "PRAGMA foreign_keys",
+        "PRAGMA wal_autocheckpoint",
+        "PRAGMA busy_timeout",
+        "PRAGMA application_id",
+    ] {
+        match conn.query(pragma, Params(vec![])).await {
+            Ok(rows) => {
+                if rows.is_empty() {
+                    println!("  {pragma:<28} (no rows returned)");
+                } else {
+                    for r in rows.iter() {
+                        // Try common column names; PRAGMAs return either an
+                        // unnamed column or a named one matching the pragma.
+                        let val = r
+                            .get_optional_str("journal_mode")
+                            .ok()
+                            .flatten()
+                            .map(str::to_owned)
+                            .or_else(|| {
+                                r.get_optional_str("synchronous")
+                                    .ok()
+                                    .flatten()
+                                    .map(str::to_owned)
+                            })
+                            .or_else(|| r.get_i64("cache_size").ok().map(|n| n.to_string()))
+                            .or_else(|| r.get_i64("temp_store").ok().map(|n| n.to_string()))
+                            .or_else(|| r.get_i64("page_size").ok().map(|n| n.to_string()))
+                            .or_else(|| r.get_i64("mmap_size").ok().map(|n| n.to_string()))
+                            .or_else(|| r.get_i64("threads").ok().map(|n| n.to_string()))
+                            .or_else(|| r.get_i64("foreign_keys").ok().map(|n| n.to_string()))
+                            .or_else(|| r.get_i64("wal_autocheckpoint").ok().map(|n| n.to_string()))
+                            .or_else(|| r.get_i64("busy_timeout").ok().map(|n| n.to_string()))
+                            .or_else(|| r.get_i64("application_id").ok().map(|n| n.to_string()))
+                            .unwrap_or_else(|| "<unknown shape>".to_string());
+                        println!("  {pragma:<28} = {val}");
+                    }
+                }
+            }
+            Err(e) => {
+                println!("  {pragma:<28} ERROR: {e}");
+            }
+        }
+    }
+    println!();
+
+    // ---- VERIFY PRAGMA WRITES ----
+    // `busy_timeout` introspection above showed Turso silently
+    // accepts the PRAGMA syntax but reports 0 at runtime. Test
+    // whether the two cache/sort knobs we'd actually want to use
+    // (cache_size, temp_store) survive a write.
+    println!("\n=== PRAGMA write verification ===\n");
+    let writes: &[(&str, &str, &str)] = &[
+        // (set_sql, read_sql, expected_substring)
+        (
+            "PRAGMA cache_size = -128000",
+            "PRAGMA cache_size",
+            "-128000",
+        ),
+        (
+            "PRAGMA temp_store = MEMORY",
+            "PRAGMA temp_store",
+            "2", // MEMORY = 2 in SQLite
+        ),
+        (
+            "PRAGMA mmap_size = 2147483648",
+            "PRAGMA mmap_size",
+            "2147483648",
+        ),
+    ];
+    for (set, read, expected) in writes {
+        match conn.execute(set, Params(vec![])).await {
+            Ok(_) => {
+                let got = match conn.query(read, Params(vec![])).await {
+                    Ok(rows) if !rows.is_empty() => {
+                        let r = &rows[0];
+                        r.get_optional_str("temp_store")
+                            .ok()
+                            .flatten()
+                            .map(str::to_owned)
+                            .or_else(|| r.get_i64("cache_size").ok().map(|n| n.to_string()))
+                            .or_else(|| r.get_i64("temp_store").ok().map(|n| n.to_string()))
+                            .or_else(|| r.get_i64("mmap_size").ok().map(|n| n.to_string()))
+                            .unwrap_or_else(|| "<unknown>".to_string())
+                    }
+                    Ok(_) => "<no rows>".to_string(),
+                    Err(e) => format!("read failed: {e}"),
+                };
+                let took = if got.contains(expected) {
+                    "TOOK"
+                } else {
+                    "DROPPED"
+                };
+                println!("  {set:<40} → {got} ({took}, expected ~{expected})");
+            }
+            Err(e) => {
+                println!("  {set:<40} → SET FAILED: {e}");
+            }
+        }
+    }
+    println!();
+
     println!("\n=== plans for queries flagged as slow in /tmp/qsl.log ===\n");
 
     // 1. messages_list — the user-visible folder-switch query.
@@ -216,6 +331,49 @@ async fn explain_slow_queries() {
             Value::Text("msg-1"),
             Value::Text("msg-2"),
             Value::Text("msg-3"),
+        ]),
+    )
+    .await;
+
+    // ---- ANALYZE experiment ----
+    println!("\n=== running ANALYZE on messages ===");
+    match conn.execute("ANALYZE messages", Params(vec![])).await {
+        Ok(_) => println!("ANALYZE messages: OK\n"),
+        Err(e) => {
+            println!("ANALYZE messages: FAILED ({e})\n");
+            return;
+        }
+    }
+
+    println!("=== plans for the same queries POST-ANALYZE ===\n");
+
+    // Re-run the two suspects most likely to benefit from stats:
+    // messages_list (wide ORDER BY DESC) and the slim id+date.
+    let folder = FolderId("acct-0/folder-0".into());
+    explain(
+        &conn,
+        "POST-ANALYZE messages_list",
+        "SELECT id, account_id, folder_id, thread_id, rfc822_message_id, subject, \
+         from_json, reply_to_json, to_json, cc_json, bcc_json, date, flags_json, \
+         labels_json, snippet, size, has_attachments, body_path, in_reply_to, \
+         references_json FROM messages WHERE folder_id = ?1 ORDER BY date DESC LIMIT ?2 OFFSET ?3",
+        Params(vec![
+            Value::Text(&folder.0),
+            Value::Integer(50),
+            Value::Integer(0),
+        ]),
+    )
+    .await;
+
+    explain(
+        &conn,
+        "POST-ANALYZE slim list (id, date)",
+        "SELECT id, date FROM messages WHERE folder_id = ?1 \
+         ORDER BY date DESC LIMIT ?2 OFFSET ?3",
+        Params(vec![
+            Value::Text(&folder.0),
+            Value::Integer(50),
+            Value::Integer(0),
         ]),
     )
     .await;
