@@ -219,4 +219,47 @@ async fn explain_slow_queries() {
         ]),
     )
     .await;
+
+    // ---- ANALYZE experiment ----
+    println!("\n=== running ANALYZE on messages ===");
+    match conn.execute("ANALYZE messages", Params(vec![])).await {
+        Ok(_) => println!("ANALYZE messages: OK\n"),
+        Err(e) => {
+            println!("ANALYZE messages: FAILED ({e})\n");
+            return;
+        }
+    }
+
+    println!("=== plans for the same queries POST-ANALYZE ===\n");
+
+    // Re-run the two suspects most likely to benefit from stats:
+    // messages_list (wide ORDER BY DESC) and the slim id+date.
+    let folder = FolderId("acct-0/folder-0".into());
+    explain(
+        &conn,
+        "POST-ANALYZE messages_list",
+        "SELECT id, account_id, folder_id, thread_id, rfc822_message_id, subject, \
+         from_json, reply_to_json, to_json, cc_json, bcc_json, date, flags_json, \
+         labels_json, snippet, size, has_attachments, body_path, in_reply_to, \
+         references_json FROM messages WHERE folder_id = ?1 ORDER BY date DESC LIMIT ?2 OFFSET ?3",
+        Params(vec![
+            Value::Text(&folder.0),
+            Value::Integer(50),
+            Value::Integer(0),
+        ]),
+    )
+    .await;
+
+    explain(
+        &conn,
+        "POST-ANALYZE slim list (id, date)",
+        "SELECT id, date FROM messages WHERE folder_id = ?1 \
+         ORDER BY date DESC LIMIT ?2 OFFSET ?3",
+        Params(vec![
+            Value::Text(&folder.0),
+            Value::Integer(50),
+            Value::Integer(0),
+        ]),
+    )
+    .await;
 }
