@@ -122,7 +122,7 @@ async fn run(app: &AppHandle) -> Result<(), String> {
     // get one EventSource watcher per account (AccountChanged
     // events).
     let mut imap_accounts: Vec<(AccountId, Vec<Folder>)> = Vec::new();
-    let mut jmap_accounts: Vec<AccountId> = Vec::new();
+    let mut jmap_accounts: Vec<(AccountId, Vec<Folder>)> = Vec::new();
     for account in &accounts {
         match bootstrap_account(app, account).await {
             Ok(folders) => match account.kind {
@@ -130,7 +130,7 @@ async fn run(app: &AppHandle) -> Result<(), String> {
                     imap_accounts.push((account.id.clone(), folders));
                 }
                 BackendKind::Jmap => {
-                    jmap_accounts.push(account.id.clone());
+                    jmap_accounts.push((account.id.clone(), folders));
                 }
                 _ => {
                     debug!(account = %account.id.0, kind = ?account.kind, "no live watcher for backend kind");
@@ -167,6 +167,7 @@ async fn run(app: &AppHandle) -> Result<(), String> {
     // `folder_by_id` so the reactive loop can resolve either kind
     // of FolderChanged event.
     let mut all_imap_folders: Vec<(AccountId, Folder)> = Vec::new();
+    let mut watched_ids: Vec<FolderId> = Vec::new();
     for (account_id, folders) in imap_accounts {
         let total = folders.len();
         for f in &folders {
@@ -182,6 +183,7 @@ async fn run(app: &AppHandle) -> Result<(), String> {
                 folder.id.clone(),
                 forward_tx,
             );
+            watched_ids.push(folder.id.clone());
             watcher_count += 1;
         }
         if !polled.is_empty() {
@@ -198,10 +200,22 @@ async fn run(app: &AppHandle) -> Result<(), String> {
             "imap watcher pool sized"
         );
     }
-    for account_id in &jmap_accounts {
+    for (account_id, folders) in &jmap_accounts {
         let forward_tx = spawn_forwarder(account_id.clone(), tx.clone());
         let _handle = jmap_push::spawn_watcher(app.clone(), account_id.clone(), forward_tx);
         watcher_count += 1;
+        // JMAP push covers every folder on the account, so all of them
+        // qualify as "watched" for the on-click skip.
+        for f in folders {
+            watched_ids.push(f.id.clone());
+        }
+    }
+    {
+        let state: tauri::State<'_, AppState> = app.state();
+        let mut set = state.watched_folders.lock().await;
+        for id in watched_ids {
+            set.insert(id);
+        }
     }
 
     // Drop the engine's copy of `tx` so `rx.recv()` returns `None`

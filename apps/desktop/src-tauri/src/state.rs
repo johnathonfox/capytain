@@ -13,7 +13,7 @@
 //! provider, not at boot. This keeps window-open fast even with many
 //! accounts configured.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::Arc;
@@ -148,6 +148,17 @@ pub struct AppState {
     /// into a `HashMap::get`.
     pub unread_cache: Arc<Mutex<HashMap<FolderId, u32>>>,
 
+    /// Folders covered by a live IMAP IDLE watcher or a JMAP push
+    /// connection. Populated by `sync_engine::run` after watchers are
+    /// spawned. `messages_refresh_folder` consults this set on every
+    /// folder click and skips the on-click sync when the folder is
+    /// already being pushed in real time — clicking would otherwise
+    /// fire an extra SELECT + UID SEARCH + reconcile pass that can
+    /// stall the IPC thread on the slow `messages` SELECT for
+    /// 1-2 seconds, with no observable freshness gain because the
+    /// watcher will deliver the same updates on its own.
+    pub watched_folders: Arc<Mutex<HashSet<FolderId>>>,
+
     /// Fired by the `ui_ready` IPC command once the Dioxus app has
     /// mounted in the webview. The sync engine awaits this (with a
     /// short safety timeout) before its bootstrap pass so the
@@ -179,6 +190,7 @@ impl AppState {
             history_account_locks: Mutex::new(HashMap::new()),
             pull_in_progress: Arc::new(AtomicU32::new(0)),
             unread_cache: Arc::new(Mutex::new(HashMap::new())),
+            watched_folders: Arc::new(Mutex::new(HashSet::new())),
             last_rendered: Mutex::new(None),
             ui_ready: Arc::new(Notify::new()),
             boot_at,
