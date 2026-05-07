@@ -1344,14 +1344,18 @@ pub struct MessagesRefreshFolderInput {
 /// `messages_refresh_folder` — kick a one-shot sync of one folder.
 ///
 /// Triggered by the UI when the user opens a folder. The reactive
-/// `sync_engine` already pushes new mail via IMAP IDLE for the top
-/// 10 folders per account (and a 2-min poll for the rest), but this
-/// command bridges the gap: clicking a folder always pulls server
-/// state immediately rather than waiting on the next watcher cycle.
+/// `sync_engine` already pushes new mail via IMAP IDLE for the top 10
+/// IMAP folders per account (and a 2-min poll for the rest), and JMAP
+/// push covers every folder on a JMAP account in real time. For those
+/// folders this command is a no-op — re-running SELECT + UID SEARCH
+/// + reconcile on every click added 1-2 s of UI-thread blocking with
+/// no freshness gain (the watcher delivers the same updates).
 ///
-/// Returns `()`; sync_one_folder emits its own `sync_event` so the
-/// caller doesn't need to bump `sync_tick` itself — the UI's
-/// reactive resources refetch automatically when the event lands.
+/// For folders that aren't watched (the IMAP poll-only tail), the
+/// sync work is spawned onto a background task and the IPC returns
+/// immediately so the UI thread is never blocked. `sync_one_folder`
+/// emits its own `sync_event` when it lands; the UI's reactive
+/// resources refetch when the event arrives.
 #[tauri::command]
 pub async fn messages_refresh_folder(
     app: tauri::AppHandle,
@@ -1359,14 +1363,24 @@ pub async fn messages_refresh_folder(
     input: MessagesRefreshFolderInput,
 ) -> IpcResult<()> {
     let folder_id = input.folder;
+    if state.watched_folders.lock().await.contains(&folder_id) {
+        tracing::debug!(
+            folder = %folder_id.0,
+            "messages_refresh_folder: skipped (folder is push-watched)"
+        );
+        return Ok(());
+    }
     let folder = {
         let db = state.db.lock().await;
         folders_repo::get(&*db, &folder_id).await?
     };
     let blobs = BlobStore::new(state.data_dir.join("blobs"));
     let account_id = folder.account_id.clone();
-    crate::sync_engine::sync_one_folder(&app, &blobs, &account_id, &folder).await;
-    tracing::info!(folder = %folder_id.0, "messages_refresh_folder");
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn(async move {
+        crate::sync_engine::sync_one_folder(&app_for_task, &blobs, &account_id, &folder).await;
+    });
+    tracing::info!(folder = %folder_id.0, "messages_refresh_folder: scheduled");
     Ok(())
 }
 
