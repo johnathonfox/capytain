@@ -340,6 +340,24 @@ pub struct ThreadCounts(pub Signal<std::collections::HashMap<String, u32>>);
 #[derive(Clone, Copy)]
 pub struct ThreadingEnabled(pub Signal<bool>);
 
+/// Client-side optimistic "this message is now read" set. Populated
+/// the moment the user clicks a row (synchronously, before the
+/// `messages_mark_read` IPC fires) so `MessageRowV2` can flip its
+/// bold→normal styling immediately without the message-list having
+/// to refetch. Without this, every click was bumping `sync_tick`
+/// just to repaint one row's visual state, forcing a full
+/// `messages_list` IPC (slim id query + hydration) — a 1.5+ s freeze
+/// per click on a 30k-row Gmail mailbox under Turso 0.5.3's
+/// SORTER-on-ORDER-BY behaviour.
+///
+/// The set persists for the life of the shell. Once the next
+/// legitimate sync_event refetch lands, the row's `flags.seen` is
+/// `true` in the fetched data and the override becomes a no-op (the
+/// `&&` short-circuits) — so growth is bounded by messages clicked
+/// per session, which never matters in practice.
+#[derive(Clone, Copy)]
+pub struct ClientReadIds(pub Signal<std::collections::HashSet<MessageId>>);
+
 // ---------- Root ----------
 
 /// Apply the persisted `appearance.theme` + `appearance.density`
@@ -484,6 +502,13 @@ fn full_app_shell() -> Element {
     // the same reason as `UnreadVisible`.
     let thread_counts: Signal<std::collections::HashMap<String, u32>> =
         use_signal(std::collections::HashMap::new);
+    // Optimistic "this id was clicked + marked-read this session" set.
+    // Provided as a context so `MessageRowV2` can flip its
+    // bold→normal styling synchronously when the reader-pane
+    // mark-read effect adds an id, without forcing the
+    // `messages_list` use_resource to refetch (which on a 30k-row
+    // Gmail mailbox is a 1.5+ s slim id query under Turso 0.5.3).
+    let client_read_ids: Signal<HashSet<MessageId>> = use_signal(HashSet::new);
     // Conversation-threading toggle. Loaded once at boot and live-
     // updated via `app_settings_changed`. Default-on so existing
     // users see no change unless they opt out.
@@ -577,6 +602,7 @@ fn full_app_shell() -> Element {
     use_context_provider(|| UnreadVisible(unread_visible));
     use_context_provider(|| ThreadCounts(thread_counts));
     use_context_provider(|| ThreadingEnabled(threading_enabled));
+    use_context_provider(|| ClientReadIds(client_read_ids));
     use_context_provider(|| selection);
 
     // Capture cleared search queries into the recent ring buffer.
@@ -5001,7 +5027,13 @@ fn MessageRowV2(
         .as_ref()
         .is_some_and(|m| m.0 == msg.id.0);
     let is_checked = bulk_selected.read().contains(&msg.id);
-    let unread = !msg.flags.seen;
+    // Override `flags.seen` with the optimistic client-side set so
+    // the row repaints bold→normal the instant the reader-pane
+    // mark-read effect runs (synchronous, no IPC round-trip). The
+    // persistent DB state catches up via the next legitimate refetch
+    // — `flags.seen == true` carries the same signal once it lands.
+    let ClientReadIds(client_read_ids) = use_context::<ClientReadIds>();
+    let unread = !msg.flags.seen && !client_read_ids.read().contains(&msg.id);
     let from_addr = msg.from.first();
     let from_name = from_addr
         .map(|a| {
@@ -5611,15 +5643,20 @@ fn ReaderV2(
     // thread, so unread sibling messages remain visually unread (and
     // therefore default-expanded) until the user clicks them. The
     // command queues an outbox entry for the server flag write, so
-    // the `\Seen` flag eventually propagates over IMAP. Bump
-    // sync_tick so the message-list row updates its visual state
-    // (bold → normal) immediately rather than waiting for the next
-    // sync cycle.
+    // the `\Seen` flag eventually propagates over IMAP.
+    //
+    // Visual state is updated optimistically through the
+    // `ClientReadIds` context set, NOT by bumping `sync_tick` to
+    // force a `messages_list` refetch. The refetch was costing 1.5+ s
+    // per click on a 30k-row Gmail mailbox under Turso 0.5.3
+    // (telemetry 2026-05-08); the optimistic set lets the row repaint
+    // bold→normal synchronously.
     {
         let id_for_mark = id.clone();
-        let mut sync_tick = sync_tick;
+        let ClientReadIds(mut client_read_ids) = use_context::<ClientReadIds>();
         use_effect(use_reactive!(|id_for_mark| {
             let id = id_for_mark.clone();
+            client_read_ids.write().insert(id.clone());
             wasm_bindgen_futures::spawn_local(async move {
                 if let Err(e) = invoke::<()>(
                     "messages_mark_read",
@@ -5629,7 +5666,6 @@ fn ReaderV2(
                 {
                     web_sys_log(&format!("messages_mark_read: {e}"));
                 }
-                sync_tick.with_mut(|t| *t = t.wrapping_add(1));
             });
         }));
     }
