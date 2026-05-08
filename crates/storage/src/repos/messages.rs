@@ -347,6 +347,17 @@ const COLS_LITE: &str = "id, account_id, folder_id, thread_id, \
 /// Returns `MessageHeaders` populated from `COLS_LITE` only — see
 /// that constant's docstring for which fields carry real data and
 /// which are defaults.
+///
+/// SQL shape: `UNION ALL` of single-id `WHERE id = ?` branches
+/// (one per ordered id), NOT `WHERE id IN (?, ?, …)`. Telemetry
+/// 2026-05-08 confirmed Turso 0.5.3 plans `IN` over the PK as a
+/// full-table SCAN with an in-memory filter set — on a 30k-row
+/// `messages` table that's ~1.0 s consistent baseline, even after
+/// `COLS_LITE` narrowing. Each `WHERE id = ?` branch on its own
+/// forces a PK index seek (point lookup), and `UNION ALL` keeps the
+/// shape as one query (one parse, one round-trip) rather than 50
+/// per-row queries that would each pay parse overhead and reacquire
+/// the connection mutex inside the IPC critical section.
 async fn hydrate_in_order(
     conn: &dyn DbConn,
     ordered_ids: &[String],
@@ -354,11 +365,16 @@ async fn hydrate_in_order(
     if ordered_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let placeholders: String = (1..=ordered_ids.len())
-        .map(|i| format!("?{i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!("SELECT {COLS_LITE} FROM messages WHERE id IN ({placeholders})");
+    let mut sql = String::with_capacity(ordered_ids.len() * 96);
+    for i in 1..=ordered_ids.len() {
+        if i > 1 {
+            sql.push_str(" UNION ALL ");
+        }
+        sql.push_str("SELECT ");
+        sql.push_str(COLS_LITE);
+        sql.push_str(" FROM messages WHERE id = ?");
+        sql.push_str(&i.to_string());
+    }
     let params: Vec<Value> = ordered_ids.iter().map(|s| Value::Text(s)).collect();
     let rows = conn.query(&sql, Params(params)).await?;
     let mut by_id: std::collections::HashMap<String, MessageHeaders> =
