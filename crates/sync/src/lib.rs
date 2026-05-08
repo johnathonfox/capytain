@@ -504,14 +504,23 @@ async fn batch_find_existing(
         return Ok(HashMap::new());
     }
     use qsl_storage::{Params as StorageParams, Value as StorageValue};
-    let placeholders: String = (1..=headers.len())
-        .map(|i| format!("?{i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT id, thread_id, folder_id, flags_json, labels_json \
-           FROM messages WHERE id IN ({placeholders})"
-    );
+    // `UNION ALL` of single-id `WHERE id = ?` branches forces a PK
+    // index seek (point lookup) per branch. `WHERE id IN (?, ?, …)`
+    // over the PK plans as a full-table SCAN with an in-memory filter
+    // set on Turso 0.5.3, which costs ~575-611 ms on a 30k-row
+    // messages table (telemetry 2026-05-08, /tmp/qsl.log). The
+    // UNION-ALL shape is still one query (one parse, one round-trip)
+    // and the planner does the right thing per-branch.
+    let mut sql = String::with_capacity(headers.len() * 96);
+    for i in 1..=headers.len() {
+        if i > 1 {
+            sql.push_str(" UNION ALL ");
+        }
+        sql.push_str(
+            "SELECT id, thread_id, folder_id, flags_json, labels_json FROM messages WHERE id = ?",
+        );
+        sql.push_str(&i.to_string());
+    }
     let storage_params: Vec<StorageValue> = headers
         .iter()
         .map(|h| StorageValue::Text(&h.id.0))
