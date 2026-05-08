@@ -447,6 +447,38 @@ These five items are genuinely deferred — either they're on the DESIGN.md road
 
 ---
 
+### P2 — Storage engine investigation: SQLite vs redb migration
+
+**Problem:** Turso 0.5.3 (libSQL fork) ships several SQL-planner and runtime quirks that we work around at the application layer. Documented in `feedback_turso_quirks.md` and direct telemetry from the 2026-05-07/08 perf sweep: mandatory `USE SORTER` on every `ORDER BY` (even when the chosen covering index already provides ordering); `WHERE id IN (?, ?, …)` over the PK plans as a full-table SCAN with in-memory filter rather than N point lookups (PR #163 worked around this with `UNION ALL` chains); silently dropped `PRAGMA mmap_size`/`threads`/`wal_autocheckpoint` and `busy_timeout` parsed but ignored; `PRAGMA foreign_keys` defaults OFF per-connection, so `ON DELETE CASCADE` was dead until migration 0011 + `TursoConn::open` set it explicitly; FTS index drift / 1000× insert slowdown when the `messages_fts_idx` is hot during history sync (worked around by dropping + rebuilding the index); WAL writer-lock stalls reads on the IPC connection despite the two-handle split (`state.db` reader queues behind `state.sync_db` writer for the full tx duration). None of these are crashes — they're perf cliffs that don't break tests, so they're unlikely to land upstream before Turso 1.0 (`v0.6.0-pre.27` shipped 2026-05-04; roadmap milestones go through 0.9). We're paying meaningful complexity in the storage layer to dodge them.
+
+**Hypothesis:** Two practical alternatives exist, and the right answer is probably "migrate to plain SQLite (`rusqlite` / `sqlx`) before v0.1." SQLite gives us back true WAL multi-reader semantics, working PRAGMAs, a mature planner, and 30+ years of operational understanding — at the cost of giving up Turso's experimental Tantivy-backed FTS (which we'd integrate directly via the existing `qsl-search` crate, since we already use Tantivy through Turso's `experimental_index_method`). Effort estimate: ~3-4 days of focused work, mostly mechanical (Turso API → rusqlite, drop the worked-around query rewrites, confirm planner picks the right indexes). The redb path is cleaner foundationally — no SQL planner means none of the bugs above can recur — but the rewrite touches every repo, every secondary index becomes a hand-maintained table, JSON columns become typed bytes, migrations become bespoke schema-walk code, and the whole `cargo test -p qsl-storage` suite is SQL-shaped. Estimate: 1-2 weeks. Worth it only if we'd outgrown SQLite, which we won't on a single-user mailbox.
+
+**User-facing value:** Folder switches, search, and message clicks stop being tied to Turso planner behaviour. The "UI blocked while syncing" symptoms we chased through PRs #148-#164 should largely disappear at the SQL level rather than via per-query workarounds. Reduced engineering tax for future storage features (per-account profiles, snooze, rules) since they wouldn't have to be designed around a planner that ignores `ORDER BY` index hints.
+
+**Scope (SQLite migration option):**
+- Replace `turso = "0.5.3"` with `rusqlite` (or `sqlx` with the SQLite backend) in `crates/storage/Cargo.toml`
+- Rewrite `TursoConn` → `SqliteConn` keeping the same `DbConn` trait; preserve the IPC/sync connection split
+- Confirm planner picks `messages_folder_date_id` covering index without forcing SORTER; if so, revert PR #153's two-step pattern back to the simple SELECT
+- Revert PR #163's `UNION ALL` workarounds in `hydrate_in_order` and `batch_find_existing` once Turso `IN`-clause SCAN is no longer the planner choice
+- Integrate Tantivy directly in `qsl-search` (the wrapper already exists; the change is owning the index lifecycle ourselves rather than via Turso's `experimental_index_method`)
+- Re-run the perf telemetry from `/tmp/qsl.log` against a 30k-row Gmail mailbox and compare: target is `messages_list` IPC <100 ms p50, no `slow_query` events during sync
+- Out of scope: redb evaluation (separate spike if the SQLite migration somehow fails to fix the planner-bug class)
+
+**Scope (redb spike option, if SQLite is rejected):**
+- Read `redb` design doc (`https://github.com/cberner/redb/blob/master/docs/design.md`) and confirm the FTS integration path with Tantivy
+- Prototype: rewrite ONE repo (`folders`) end-to-end against redb to validate the secondary-index pattern + key-schema design (`(folder_id, !date, msg_id)` for date-desc forward scans)
+- Decide go/no-go on the full migration based on the prototype experience
+
+**Success signal:** Either (a) SQLite migration ships, all `*_workaround` comments and PRs #153/#163 are reverted, perf telemetry shows clean `messages_list` IPC <100 ms p50; or (b) we finish the spike and consciously decide to stay on Turso with current workarounds, with this ticket closed as "investigated, declined."
+
+**Effort:** SQLite migration: M (3-4 days). redb spike: S (1-2 days). redb full migration if pursued: XL (1-2 weeks).  
+**Priority:** P2 — perf workarounds are not breaking anything today, so this is a "before v0.1 ships, decide what we're standing on" decision rather than a now/next item. Leave open until the v0.1 RC pass.  
+**Phase dependency:** Decide before v0.1 ships; the longer Turso workarounds accrete in the storage layer the more painful any future migration becomes.  
+**QSL principle risks:** None — Turso is an implementation detail, not a principle commitment. SQLite is even more battle-tested and unambiguously open-source.  
+**Pointers:** `feedback_turso_quirks.md`, `crates/storage/src/turso_conn.rs`, `crates/storage/src/repos/messages.rs` (the `UNION ALL` and two-step patterns are the load-bearing workarounds), `crates/storage/tests/explain_plans.rs` (existing planner-introspection harness), `docs/dependencies/turso.md`, `https://github.com/cberner/redb/blob/master/docs/design.md`, PRs #153 / #154 / #161 / #162 / #163 (the 2026-05-07/08 perf sweep)
+
+---
+
 ## Won't
 
 Proposals considered and rejected for QSL v1. These are listed explicitly so future sessions don't re-litigate them.
